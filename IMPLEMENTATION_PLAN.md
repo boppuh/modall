@@ -165,11 +165,13 @@ Proceed to the full experiment only when:
 - every private/internal case has data-owner approval, a classification, a retention policy, and an explicit provider-processing policy;
 - the corpus includes clean controls, single-defect PRs, and multi-defect or cross-file PRs;
 - the primary domain reviewer labels every case, while a second qualified reviewer independently labels a stratified 20% sample and every disputed high/critical finding;
-- measured inter-rater agreement reaches at least 0.80 Cohen's kappa on the stratified sample before label freeze; otherwise refine the rubric and expand dual review;
+- measured inter-rater agreement reaches at least 0.80 Cohen's kappa on the fixed rating matrix below before label freeze; otherwise refine the rubric and expand dual review;
 - train, validation, and hidden test groups are split by source repository and defect family to prevent near-duplicate leakage;
 - the harness reproduces the same deterministic grading result in at least 98% of reruns;
 - every candidate used for authoritative comparison has an immutable platform-controlled version or an attested remote implementation revision; unverified mutable remotes are excluded from G1 evidence;
 - no candidate capability has received hidden labels or hidden-case artifacts.
+
+For the kappa gate, the rating units are fixed before either reviewer labels the stratified sample: every sampled case crossed with every canonical defect family in the frozen taxonomy, including an explicit `other` family. Each reviewer independently assigns exactly one binary category, `present` or `absent`, to every case×family unit; a clean case is therefore all absent. Compute the primary Cohen's kappa once over the flattened matrix of those common units and report per-family kappas when both categories occur. Every concrete finding must map to one family and carry the revision-aware location from Section 7.3. An unrecognized but asserted finding maps to `other`/present rather than disappearing; a finding asserted by only one reviewer is a present/absent disagreement. Multiple same-family findings do not create extra kappa units: count, span, severity, and category-alias agreement are reported separately with deterministic bipartite span matching, and every count/location disagreement for high or critical findings enters adjudication before label freeze. The protocol versions the family map, unit matrix, alias rules, unmatched treatment, and span tolerance before annotation.
 
 ### Gate G1 — task-aware policy activation
 
@@ -671,9 +673,9 @@ The final report is generated from committed result snapshots and a versioned an
 
 | Epic | Deliverable | Acceptance criteria | Owner profile |
 |---|---|---|---|
-| P0-01 Protocol | Preregistered calibration and activation gate | Metrics, split, baselines, primary-attempt pairing/failed-slot rules, diagnostic repeats, exclusions, and statistics approved before hidden runs | Staff/data |
+| P0-01 Protocol | Preregistered calibration and activation gate | Metrics, fixed case×family kappa units/categories/unmatched rules, primary-attempt pairing, repeats, exclusions, and statistics approved before hidden runs | Staff/data |
 | P0-02 Taxonomy | Versioned task and feature schema | JSON Schema validation; feature provenance; no post-outcome fields | Backend/domain |
-| P0-03 Corpus | 75–100-case calibration suite plus an activation benchmark whose first authoring tranche is 200–300 cases and whose final size follows the preregistered power calculation | Initial revealed test is excluded from G1; expanded version passes G0 and reserves a fresh untouched grouped holdout giving the CI test at least 90% power to detect a true five-point lift | Swift/evaluation |
+| P0-03 Corpus | 75–100-case calibration suite plus an activation benchmark whose first authoring tranche is 200–300 cases and whose final size follows the preregistered power calculation | Fixed case×family rating matrix and span adjudication pass G0; revealed test is excluded; fresh grouped holdout gives the CI test 90% power for a true five-point lift | Swift/evaluation |
 | P0-04 Harness | Durable execution and artifact capture | Resumable, idempotent matrix runs; preregistered primary/diagnostic attempt slots; pinned environment; per-attempt cost/latency | Platform |
 | P0-04A Budget pilot | Separate 20-PR candidate matrix and frozen limits | Pilot cases excluded from official splits; cost/latency/resource ceilings approved before official matrix | Platform/product |
 | P0-05 Adapter SDK | Common adapter protocol and eight candidates | Contract suite requires base/head revision-aware finding locations; policy-permitted raw artifacts are quarantined/restricted and normalized outputs retained | Backend/AI |
