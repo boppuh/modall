@@ -173,7 +173,7 @@ Proceed to the full experiment only when:
 
 ### Gate G1 — task-aware policy activation
 
-Enable task-aware selection in the live request path only when, on the fresh universally eligible G1 activation holdout, the quality-first policy produces at least 5 percentage points higher task success than the strongest static capability, with no more than 20% higher cost per successful task. A paired bootstrap over tasks must show a 95% confidence interval that excludes no improvement in task success. This holdout contains no case whose candidate outputs or labels were revealed in the initial calibration report.
+Enable task-aware selection in the live request path only when, on the fresh universally eligible G1 activation holdout, the quality-first policy produces at least 5 percentage points higher task success than the strongest static capability, with no more than 20% higher cost per successful task. A paired bootstrap over tasks must show a 95% confidence interval that excludes no improvement in task success. Before freezing or executing that holdout, preregister a simulation-based power analysis using the exact paired, repository-grouped resampling procedure, observed group-size distribution, and a conservative calibration-derived bound on candidate discordance. The holdout must provide at least 90% power for that confidence-interval test to detect a true five-percentage-point lift; the observed five-point threshold remains a separate activation requirement. If the available corpus is smaller than the calculated sample, expand it or keep task-aware routing in shadow mode. This holdout contains no case whose candidate outputs or labels were revealed in the initial calibration report.
 
 A value-oriented policy should still be reported as secondary analysis, including whether it achieves at least 20% lower cost per successful task while remaining non-inferior within a 2 percentage-point success margin. It cannot substitute for the quality-first activation gate. Report all baselines and all attempted policy variants, including failures. If G1 does not pass, the closed alpha uses the strongest eligible static quality policy while task-aware decisions run in shadow mode.
 
@@ -426,11 +426,11 @@ pending -> finalized | unavailable
 
 Every transition is an append-only event guarded by an allowed-transition table. The current state is a materialized projection. Duplicate worker delivery must be safe.
 
-An attempt failure or timeout does not itself finalize the invocation. The orchestrator either enters `fallback_queued` and creates a child attempt linked by `parent_attempt_id`, or—only after fallback is unavailable or exhausted—moves the invocation to the corresponding execution-terminal state.
+An attempt failure or timeout does not by itself authorize fallback. The orchestrator may enter `fallback_queued` and create a child attempt linked by `parent_attempt_id` only when durable evidence proves the prior attempt did not execute, or when every candidate in the fallback chain honors the same tested end-to-end idempotency key for the external operation. A failure response alone is not proof of non-execution. Any post-fence timeout or lost response with uncertain acceptance moves the invocation to `indeterminate` with `reconciliation_required`; it never creates a fallback attempt. When the fallback guard fails or eligible fallback is exhausted, the invocation moves to the corresponding execution-terminal state.
 
 Execution status and outcome status are separate projections. Execution reaches a terminal state regardless of whether downstream outcome evidence arrives. At execution completion, an eligible invocation receives an outcome record with `pending` plus a fixed `evidence_due_at`; it transitions to `finalized` when adequate evidence arrives or `unavailable` when the deadline expires. An ineligible invocation receives terminal `not_expected`. Late evidence creates a superseding outcome version without reopening execution state.
 
-Before any provider network send, persist `dispatch_fenced` in the same transaction that records the attempt ownership. A recovered `created` attempt is safe to dispatch. A recovered `dispatch_fenced` or `awaiting_result` attempt without a durable terminal response must not be sent again: persist any available provider receipt and move it to `indeterminate` with `reconciliation_required`. This deliberately prefers manual reconciliation to duplicating an external side effect.
+Before any provider network send, persist `dispatch_fenced` in the same transaction that records the attempt ownership. Record an evidence-backed execution disposition of `not_executed`, `executed`, or `unknown` separately from transport status. A recovered `created` attempt is safe to dispatch. A recovered `dispatch_fenced` or `awaiting_result` attempt without a durable terminal response has disposition `unknown` and must not be sent again or fall back: persist any available provider receipt and move it to `indeterminate` with `reconciliation_required`. This deliberately prefers manual reconciliation to duplicating an external side effect.
 
 ### 7.6 Outcome contract and truth hierarchy
 
@@ -477,7 +477,7 @@ Start with a 75–100-case universally eligible, non-confidential calibration su
 
 The calibration test remains hidden until the initial report, then is permanently marked revealed and cannot contribute to the G1 activation holdout.
 
-Continue expanding to a separate 200–300-case activation benchmark version while the router alpha is built. Reserve at least 20% of that version as a fresh activation holdout drawn from newly added, grouped cases. Freeze its membership and labels before final policy selection; do not run candidates on it or reveal any artifact until the static baseline and task-aware policy are frozen. Previously revealed calibration-test cases may enter a later training pool with explicit provenance but never the activation holdout. Do not activate task-aware routing under G1 with fewer than 200 total activation-version cases unless an explicit statistical-power review demonstrates adequate power.
+Continue expanding to a separate activation benchmark while the router alpha is built, using 200–300 cases as the first authoring tranche rather than a fixed cap. Before allocating groups, preregister the G1 power calculation defined in the gate: simulate the exact paired, repository-grouped bootstrap with the planned group distribution and a conservative calibration-derived discordance bound, and choose a fresh activation-holdout size that gives the confidence-interval test at least 90% power to detect a true five-percentage-point lift. Freeze that many newly added grouped cases and their labels before final policy selection; do not run candidates on them or reveal any artifact until the static baseline and task-aware policy are frozen. Previously revealed calibration-test cases may enter a later training pool with explicit provenance but never the activation holdout. Expand beyond 300 total cases whenever the preregistered calculation requires it; an underpowered result cannot activate task-aware routing.
 
 Split by repository and defect archetype group, not by individual diff, so close variants cannot cross groups. Keep the test labels encrypted or access-controlled from capability authors and router development.
 
@@ -664,7 +664,7 @@ The final report is generated from committed result snapshots and a versioned an
 |---|---|---|---|
 | P0-01 Protocol | Preregistered calibration and activation gate | Metrics, split, baselines, success definition, exclusions, and statistics approved before hidden runs | Staff/data |
 | P0-02 Taxonomy | Versioned task and feature schema | JSON Schema validation; feature provenance; no post-outcome fields | Backend/domain |
-| P0-03 Corpus | 75–100-case calibration suite plus 200–300-case activation benchmark | Initial revealed test is excluded from G1; expanded version passes G0 and reserves a fresh untouched grouped activation holdout | Swift/evaluation |
+| P0-03 Corpus | 75–100-case calibration suite plus an activation benchmark whose first authoring tranche is 200–300 cases and whose final size follows the preregistered power calculation | Initial revealed test is excluded from G1; expanded version passes G0 and reserves a fresh untouched grouped holdout giving the CI test at least 90% power to detect a true five-point lift | Swift/evaluation |
 | P0-04 Harness | Durable execution and artifact capture | Resumable, idempotent matrix runs; pinned environment; per-run cost/latency | Platform |
 | P0-04A Budget pilot | Separate 20-PR candidate matrix and frozen limits | Pilot cases excluded from official splits; cost/latency/resource ceilings approved before official matrix | Platform/product |
 | P0-05 Adapter SDK | Common adapter protocol and eight candidates | Contract suite passes; policy-permitted raw artifacts are quarantined/restricted and normalized outputs retained | Backend/AI |
@@ -681,7 +681,7 @@ This schedule begins only after the MCP Registry Alpha release gate passes. With
 - **Post-registry Week 2:** first adapters and graders, 20-PR budget pilot, frozen execution limits, first 40–50 cases
 - **Post-registry Week 3:** all eight adapters, 75–100-case initial matrix, strongest static policy, router shadow policy, reproducible report
 
-After Week 3, activation-benchmark authoring and shadow evaluation continue as an evaluation workstream alongside productization. Freeze a fresh untouched activation holdout within the 200–300-case version and pass G1 on that holdout before task-aware selection controls live traffic. Do not compress by reusing the revealed calibration test or weakening holdout, label quality, or reproducibility requirements.
+After Week 3, activation-benchmark authoring and shadow evaluation continue as an evaluation workstream alongside productization. Treat 200–300 cases as an initial tranche, run the preregistered grouped-pair power calculation, and expand until a fresh untouched activation holdout gives the confidence-interval test at least 90% power to detect a true five-point lift. Pass G1 on that holdout before task-aware selection controls live traffic. Do not compress by reusing the revealed calibration test or weakening power, holdout, label-quality, or reproducibility requirements.
 
 ---
 
@@ -693,9 +693,11 @@ Begin Phase 1 routing foundations in post-registry Week 1 rather than waiting fo
 
 Endpoints:
 
-- `POST /v1/artifact-uploads` — authorize metadata and return a short-lived, workspace-scoped presigned upload target
-- `POST /v1/artifact-uploads/{id}/complete` — verify digest, size, content type, and scan status, then mint the authoritative `artifact://` URI
-- `GET /v1/artifacts/{id}` — return authorized metadata and readiness, never ambient object-store credentials
+- `POST /v1/artifact-uploads` — authorize metadata and return a short-lived, workspace-scoped, create-only target for a unique object key or storage version
+- `POST /v1/artifact-uploads/{id}/complete` — close the upload, verify the exact storage version's digest, size, content type, and scan status, then mint the authoritative `artifact://` URI
+- `GET /v1/artifacts/{id}` — return authorized metadata, readiness, and exact immutable storage-version/digest identity, never ambient object-store credentials
+- `POST /v1/artifacts/{id}/access-grants` — authorize the current subject, workspace, classification, and retention state, then mint an audited short-lived single-use grant bound to the exact artifact version
+- `GET /v1/artifacts/{id}/content?grant=` — require ordinary authentication plus the subject-bound grant and stream the exact artifact version through an isolated viewer/download path with no-store, nosniff, sandbox CSP, and cross-origin isolation headers
 - `POST /v1/routes` — create and persist a route-only decision
 - `POST /v1/run` — route, authorize, enqueue, and return `202 Accepted`
 - `GET /v1/invocations/{id}` — current state and normalized result metadata
@@ -705,13 +707,14 @@ Endpoints:
 
 Generate OpenAPI and SDK types from one schema source. Require an `Idempotency-Key` for mutating client calls. Scope API credentials to workspace, environment, action, and optional spending/quota policy. All errors use stable machine codes and correlation IDs.
 
-Routing and run requests accept only finalized, unexpired artifacts owned by the same workspace and allowed by the request/provider data policy. Completion verifies a client-declared digest and length, detects archive expansion/path traversal, applies malware and secret policy, and records an immutable artifact version. HTTP/SDK clients upload through the presigned target; the MCP facade exposes `create_artifact_upload` so an agent can obtain the same bounded workflow without direct object-store credentials.
+Routing and run requests accept only finalized, unexpired artifacts owned by the same workspace and allowed by the request/provider data policy. Each upload uses a unique non-overwritable object key or versioned-bucket write. Completion closes the upload, verifies a client-declared digest and length against the exact storage version, detects archive expansion/path traversal, applies malware and secret policy, and records that immutable storage version plus digest in the authoritative artifact version. Consumption reauthorizes the artifact and reads only that pinned version, verifying its digest or an integrity-equivalent storage checksum; a still-valid upload credential cannot replace finalized content. HTTP/SDK clients upload through the presigned target; the MCP facade exposes `create_artifact_upload` so an agent can obtain the same bounded workflow without direct object-store credentials. Large or retained non-text results use the same immutable artifact and authorized-access contract, so the console never reads object storage directly.
 
 Acceptance criteria:
 
 - identical idempotent requests produce one route/invocation;
 - cross-workspace access tests fail closed;
-- unfinalized, expired, digest-mismatched, unsafe, and cross-workspace artifacts are rejected before routing or enqueue;
+- unfinalized, expired, overwritten, wrong-version, digest-mismatched, unsafe, and cross-workspace artifacts are rejected before routing, enqueue, viewing, or download;
+- an authorized subject can view safe text/JSON or download other content only through an unexpired subject-bound grant for the exact immutable artifact version and required isolation headers;
 - p95 route-only latency is under 300 ms with 100 curated versions, excluding external task-artifact upload;
 - compatibility and constraint failures expose safe reason codes without private provider data.
 
@@ -728,7 +731,7 @@ Acceptance criteria:
 
 ### 9.3 Invocation and provider runtime
 
-Use curated HTTP/model/CLI adapters behind one async interface. Separate benchmark and production worker pools. Enforce per-provider concurrency, circuit breaking, retry budgets, absolute deadlines, and result-size limits. For a non-idempotent execution, persist a dispatch fence before the network send; never automatically repeat a fenced attempt when provider acceptance is uncertain. Every result passes the Registry Alpha quarantine, classification, redaction, and artifact policy before ordinary persistence or display; scanner failure fails closed.
+Use curated HTTP/model/CLI adapters behind one async interface. Separate benchmark and production worker pools. Enforce per-provider concurrency, circuit breaking, retry budgets, absolute deadlines, and result-size limits. Persist a dispatch fence before every provider network send and record an evidence-backed execution disposition separately from transport status. Fallback is allowed only when durable evidence proves the preceding attempt did not execute, or when all candidates share a tested end-to-end idempotency contract for the external operation. A fenced attempt with uncertain provider acceptance becomes `indeterminate` and can neither retry nor fall back. Every result passes the Registry Alpha quarantine, classification, redaction, and artifact policy before ordinary persistence or display; scanner failure fails closed.
 
 Acceptance criteria:
 
@@ -736,7 +739,7 @@ Acceptance criteria:
 - fault injection covers termination before send, after send, after provider receipt, and before response persistence;
 - deadline and cancellation propagate where the provider supports them;
 - circuit breaker removes a degraded deployment from new candidate snapshots;
-- a fallback creates a new child attempt linked to the original invocation and route.
+- permitted fallback creates a new child attempt linked to the original invocation and route; fault tests prove that post-fence timeout, lost response, and ambiguous failure paths never fall back.
 
 ### 9.4 Outcome collection
 
@@ -766,10 +769,10 @@ Build only internal workflows needed to operate the alpha:
 | Epic | Scope | Depends on | Exit condition |
 |---|---|---|---|
 | P1-01 Identity | Workspaces, workspace memberships, API keys, RBAC, audit log | Registry Alpha identity | Authorization test matrix passes |
-| P1-01A Artifacts | Presigned ingestion, completion validation, scanning, immutable workspace artifact URI | Identity, object storage | Authorized upload-to-route contract passes without direct store credentials |
+| P1-01A Artifacts | Non-overwritable presigned ingestion, completion validation, scanning, immutable workspace artifact URI, and subject-bound read grants | Identity, object storage | Authorized upload-to-route/view contract passes without direct store credentials; overwrite and wrong-version tests fail closed |
 | P1-02 Routing API | `/routes`, schemas, idempotency | P0 router, P1-01A | Replayable decision under latency target |
 | P1-03 Run API | `/run`, job creation, state API | Identity, artifacts, jobs | End-to-end curated invocation passes |
-| P1-04 Runtime | Adapter pools, deadlines, fallback, circuit breakers | P0 adapters | Fault-injection suite passes |
+| P1-04 Runtime | Adapter pools, deadlines, evidence-gated fallback, circuit breakers | P0 adapters | Fault injection proves fallback only after definitive non-execution or tested end-to-end idempotency |
 | P1-05 Outcomes | Evidence API, SDKs, CI integration, label derivation | Invocation lineage | >=90% expected alpha coverage in staging trial |
 | P1-06 MCP | Seven meta-tools, including `create_artifact_upload`, mapped to API | Stable HTTP contracts | MCP contract and auth tests pass |
 | P1-07 Console | Operations and experiment views | Core APIs | On-call can diagnose/disable/replay without SQL |
@@ -867,6 +870,7 @@ Never train directly from mutable production tables. Materialize versioned datas
 - `permission_grants`, `workspace_policies`
 - `task_instances`
 - `invocations`, `invocation_attempts`, `invocation_events`, `invocation_artifacts`
+- `artifact_uploads`, `artifact_versions`, `artifact_access_grants`
 - `outcome_evidence`, `outcome_labels`, `outcome_label_history`
 - `idempotency_records`
 - `provider_usage_records`
@@ -879,7 +883,7 @@ Never train directly from mutable production tables. Materialize versioned datas
 - Timestamps are UTC and server-assigned for security/audit events.
 - Money is stored as integer minor units plus currency, never floating point.
 - Raw request, source, model transcript, and output retention is separate from operational metadata retention.
-- Sensitive artifact access uses short-lived signed URLs and workspace authorization.
+- Sensitive artifact access uses audited, short-lived, single-use grants bound to the authenticated subject, workspace, and exact immutable artifact version; possession does not bypass the ordinary authorization check.
 - JSONB is appropriate for immutable snapshots and provider-specific metadata; fields used in constraints, joins, or policy are normalized and indexed.
 - Schema migrations are forward-compatible during rolling deployment and tested against production-sized fixtures.
 
@@ -911,10 +915,10 @@ The initial threat model must cover malicious repository content, prompt injecti
 
 - short-lived repository credentials scoped to required repositories;
 - encryption in transit and at rest;
-- artifact authorization independent of signed URL possession;
+- artifact authorization independent of grant or signed-URL possession, with subject/workspace binding and safe isolated response headers;
 - log and trace redaction with tests;
 - request, artifact, and output size limits;
-- presigned upload expiry, declared digest/length verification, archive traversal/expansion protection, malware scanning, and finalized-artifact state before routing;
+- presigned upload expiry, unique non-overwritable keys or pinned storage versions, declared digest/length verification at completion and consumption, archive traversal/expansion protection, malware scanning, and finalized-artifact state before routing;
 - outbound destination allowlists for workers;
 - signed integration webhooks with replay protection;
 - workspace-level data retention and deletion jobs;
@@ -963,10 +967,10 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 
 ### End to end
 
-- artifact upload, completion, authoritative URI issuance, and rejection of unsafe, unfinalized, expired, or cross-workspace artifacts;
+- artifact upload, completion, authoritative URI issuance, authorized viewer/download grants, and rejection of unsafe, mutable/overwritten, wrong-version, digest-mismatched, unfinalized, expired, or cross-workspace artifacts;
 - route-only success and no-candidate paths;
 - run through terminal result and outcome;
-- retry, timeout, fallback, cancellation, and provider degradation;
+- retry, timeout, evidence-gated fallback, ambiguous post-fence execution, cancellation, and provider degradation;
 - workspace isolation;
 - version disable and router rollback.
 
@@ -1188,10 +1192,10 @@ ADRs 1–9 block authoritative benchmark runs and task-aware activation, but not
 
 ### Phase 1 is done when
 
-- an authorized client can ingest a repository snapshot and diff and receive finalized workspace-scoped `artifact://` identifiers without direct object-store credentials;
+- an authorized client can ingest a repository snapshot and diff, receive finalized workspace-scoped `artifact://` identifiers pinned to immutable object versions, and retrieve permitted artifacts through subject-bound short-lived access without direct object-store credentials;
 - an authorized HTTP or MCP client can route and execute a supported task idempotently;
 - the exact decision, version, attempts, costs, artifacts, and evidence are traceable;
-- automatic fallback and provider disablement work under fault injection;
+- evidence-gated fallback and provider disablement work under fault injection, while uncertain fenced execution never falls back;
 - outcome coverage and trust are measurable;
 - security, isolation, replay, migration, and SLO tests pass;
 - the closed-alpha rollout and rollback runbooks have been exercised.
