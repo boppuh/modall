@@ -171,7 +171,7 @@ Internal admins and operators who understand that MCP tools may read or mutate e
 
 1. Operator searches the upstream registry and imports catalog metadata.
 2. UI distinguishes remote-connectable entries from catalog-only packages.
-3. Import stores the exact upstream version, sanitized allowlisted metadata, source location, and a versioned HMAC fingerprint of the received payload; the fingerprint key remains outside ordinary storage in the secret manager.
+3. Import stores the exact upstream version, sanitized allowlisted metadata, a validated `SafeUrl` source location, and a versioned HMAC fingerprint of the received payload; the fingerprint key remains outside ordinary storage in the secret manager.
 4. Admin separately configures the endpoint and optional credential reference; Operator verifies the connection.
 
 #### Scenario C — invoke a tool
@@ -216,7 +216,7 @@ Internal admins and operators who understand that MCP tools may read or mutate e
 - A schema change creates a new immutable capability version, makes the superseded live binding non-invocable, and preserves historical runs.
 - A same-connection A→B→A schema rollback creates a fresh pending occurrence generation for the restored A content and preserves both superseded historical rows.
 - A material endpoint or credential change suspends dispatch and requires fresh verification, discovery, and capability review; a tool omitted from a complete refresh becomes unavailable and is rejected before enqueue.
-- An imported official-registry entry retains its upstream name, version, source URL, and versioned keyed payload fingerprint without retaining unsanitized metadata or an ordinary digest that could act as a low-entropy secret oracle.
+- An imported official-registry entry retains its upstream name, version, validated `SafeUrl` source location, and versioned keyed payload fingerprint without retaining an unsafe raw URL, unsanitized metadata, or an ordinary digest that could act as a low-entropy secret oracle.
 - Catalog-only entries cannot be invoked.
 - Disabled connections and capabilities cannot create new runs.
 - A disabled connection and its latest non-superseded capability version can be restored only through Scenario F revalidation and explicit enablement.
@@ -243,7 +243,7 @@ Internal admins and operators who understand that MCP tools may read or mutate e
 - Endpoint validation blocks loopback, link-local, cloud metadata, and private-network destinations unless deployment configuration explicitly allows them.
 - Every request and redirect hop is resolved through the policy resolver, rejects any forbidden answer, and binds the transport dial to a selected validated IP without a second library DNS lookup while preserving the original hostname for TLS SNI, certificate verification, and the HTTP `Host`. Connection-pool reuse is allowed only for that validated origin/address tuple; new dials repeat resolution and policy checks. An enforced egress policy provides a second boundary against DNS rebinding and TOCTOU races.
 - Credential-bearing requests require a valid HTTPS certificate. HTTPS-to-HTTP redirects are rejected; redirects are bounded and must remain on the credential-bound origin. Scheme, host, port, certificate, and the dialed validated IP are checked for every hop, and credentials are retrieved and attached only after those checks pass.
-- Endpoint userinfo and credential-like query values are rejected in pre-log parsing; raw URL secrets never enter persistence, audit events, errors, logs, or traces.
+- Every URL-valued field—including connection endpoints, redirects, imported source locations, upstream search results, and retained resource links—must cross the one typed `SafeUrl` parser/sanitizer before persistence, audit, error interpolation, logging, tracing, or API output. It rejects userinfo, fragments, ambiguous/double encoding, credential/token/signature/secret/high-entropy-shaped decoded path segments, and non-allowlisted or credential-shaped query names/values. Raw URL secrets never leave the bounded parsing boundary.
 - Credentials, authorization headers, and secret values do not appear in logs, traces, API responses, or audit payloads.
 - Mutation request bodies are disabled in ingress/proxy/application telemetry, and fail-closed tool-argument scanning prevents a raw credential from reaching request persistence, idempotency storage, a queue, or an upstream server.
 - Hosted `stdio` execution and automatic package installation are impossible through the API.
@@ -480,6 +480,7 @@ The official MCP Registry is in preview, so its adapter is treated as an unrelia
 
 - generate or validate a client against the official OpenAPI contract;
 - isolate upstream response objects from internal domain models;
+- pass every URL-valued upstream field through the shared `SafeUrl` boundary before mapping it into a domain object, cache, error, or API response; reject an unsafe import/search item with a safe reason that never echoes the raw URL;
 - compute a versioned HMAC fingerprint of the received payload before discarding unsanitized fields, with its key held in the secret manager, then retain only the fingerprint/key-version reference, allowlisted/sanitized metadata, and source provenance;
 - use timeouts, bounded retries, caching, and a circuit breaker;
 - show stale cached results explicitly when the upstream is unavailable;
@@ -538,6 +539,7 @@ The official MCP Registry is in preview, so its adapter is treated as an unrelia
 - State transitions use compare-and-set version columns or explicit row locks.
 - Audit, snapshot, run event, and attempt tables cannot be updated through application repositories except to append terminal metadata defined by their state machine.
 - Raw secrets are forbidden from all table columns and JSON metadata fields.
+- Raw or merely redacted URL values are forbidden from domain/storage/API types; only a successfully validated canonical `SafeUrl` may cross the parsing boundary.
 - Timestamps are UTC and server-assigned.
 
 ### 7.3 Retention defaults
@@ -577,7 +579,7 @@ The OpenAPI document is generated from the backend schema source and checked int
 
 Connection endpoint and credential changes create a new audited connection configuration version even if the public connection ID remains stable. Applying one is a material lifecycle transition: it suspends dispatch, moves the connection to `verifying`, supersedes non-superseded prior-configuration capability versions while treating terminal superseded rows as no-ops, and requires fresh complete discovery plus explicit capability review before new runs.
 
-Endpoint parsing occurs at the first trusted ingress boundary before body capture or application telemetry; proxy access logs record only the API route template, never the submitted endpoint value. Reject URL userinfo, fragments, ambiguous/double encoding, and query parameters whose names or values are credential-, signature-, token-, key-, secret-, or high-entropy-shaped before logging, auditing, error interpolation, or persistence. Permit query parameters only from a configured non-secret name/value policy; never extract or migrate a URL secret automatically. Admins must use an opaque credential reference and the configured header/auth binding instead.
+All URL-valued fields use one context-aware `SafeUrl` parser/sanitizer at their first trusted application boundary. For an endpoint inside a request body, ingress/proxy body capture is disabled; the application holds the raw field only in bounded ephemeral memory, parses and percent-decodes exactly once, validates the fully decoded components, then destroys the raw buffer before normal middleware telemetry. Access logs record only the route template. The same boundary runs on redirects and every URL obtained from Official Registry payloads before caching, persistence, audit, error construction, or response mapping. All contexts reject userinfo, fragments, malformed or ambiguous/double encoding, and credential-, token-, signature-, key-, secret-, or high-entropy-shaped decoded path segments. Query names and values must pass a configured non-secret allowlist and the same credential/entropy checks. An unsafe endpoint or imported/search source URL fails with a stable safe reason and is never echoed, redacted-and-stored, or emitted. Admins must use an opaque credential reference and the configured header/auth binding instead.
 
 Credential configuration persists only a provider, resource identifier, and immutable provider-native version/generation. If an Admin supplies an alias such as `current`, the control plane resolves and displays its immutable version before applying the configuration; later alias movement has no effect until it is detected and applied as a new credential-binding and connection version through the same material-change flow.
 
@@ -597,6 +599,8 @@ Credential configuration persists only a provider, resource identifier, and immu
 - `GET /v1/runs/{id}` — immutable request plus current status and result metadata.
 - `GET /v1/runs/{id}/events` — ordered diagnostic timeline.
 - `POST /v1/runs/{id}/cancel` — best-effort cancel before or during supported execution.
+
+`Run` is the sole public execution resource and maps one-to-one to the internal invocation aggregate. Registry Alpha publishes only this plural `/v1/runs` family, with generated operations `createRun`, `listRuns`, `getRun`, `listRunEvents`, and `cancelRun`. Phase 1 preserves those direct-run schemas and paths, adds `POST /v1/routed-runs` as `createRoutedRun`, and adds `POST /v1/runs/{id}/outcomes` as `createRunOutcome`; routed creation returns the same Run schema and ID. The singular `/v1/run` and `/v1/invocations/*` names in earlier drafts are replaced before implementation and must never appear as runtime aliases, OpenAPI paths, or generated SDK methods. Compatibility tests compile an Alpha direct-run client against the Phase 1 schema and reject accidental legacy routes.
 
 All identity-scoped responses set `Cache-Control: no-store`. `GET /v1/session` and identity-scoped responses expose an `authorization_epoch` derived from an authoritative current group/membership snapshot plus deployment-policy revision, never solely from still-valid embedded token claims. In deployed OIDC mode, the API must refresh current groups through provider introspection/UserInfo or a newly refreshed token at least every 60 seconds; if the provider supports none of those, accepted access tokens must have a maximum lifetime of 60 seconds. Mutating requests block and fail closed when that authoritative snapshot is stale or refresh fails. Frontend query keys include subject, workspace, and the epoch; cached tenant data is never rendered until the current session check succeeds, and tenant content is hidden once authorization freshness exceeds 60 seconds. The client purges all identity-scoped query data on logout, token refresh, subject/workspace/epoch change, visibility regain with a stale session check, or any `401`/`403`. Current group, deployment membership/role, and policy changes advance the epoch so the next response or session refresh invalidates the prior cache.
 
@@ -723,7 +727,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 
 | ID | Task | Size | Depends on | Acceptance |
 |---|---|---:|---|---|
-| E2-T1 | Implement registry entry and source models | M | E1 | Provenance survives import/update |
+| E2-T1 | Implement the shared `SafeUrl` parser/value type plus registry entry and source models | M | E1 | Only canonical validated URLs can enter domain/storage/API types, and safe provenance survives import/update |
 | E2-T2 | Implement server connection configuration and lifecycle | M | E1 | Invalid transitions are rejected atomically |
 | E2-T3 | Implement canonical JSON normalization and snapshot hashing | M | E0 | Golden cross-process digests are stable |
 | E2-T4 | Implement sanitized discovery snapshot persistence | M | E2-T2, E2-T3 | Duplicate snapshot is deduplicated; old data immutable; secret/token/cookie/PII fixtures never persist unsanitized |
@@ -738,7 +742,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 |---|---|---:|---|---|
 | E3-T1 | Build MCP fixture servers for both supported protocol eras | M | E0 | Fixtures expose paging, schema drift, errors, and auth |
 | E3-T2 | Wrap the official SDK behind `McpClientAdapter` | M | E0 | No SDK type appears in domain or public API contracts |
-| E3-T3 | Implement pre-log endpoint validation and safe HTTP transport with resolved-address pinning | L | E1-T5 | URL userinfo/credential-query/encoding fixtures leave no stored or emitted secret; every hop dials only its validated IP with TLS hostname checks; rebinding/SSRF/downgrade tests pass |
+| E3-T3 | Enforce the shared pre-log `SafeUrl` boundary and safe HTTP transport with resolved-address pinning | L | E1-T5, E2-T1 | Endpoint/source path, query, userinfo, fragment, and encoding secret fixtures leave no stored or emitted raw URL; every hop dials only its validated IP with TLS hostname checks; rebinding/SSRF/downgrade tests pass |
 | E3-T4 | Implement negotiation/discovery and normalized server metadata | M | E3-T2, E3-T3 | Both target revisions pass contract tests |
 | E3-T5 | Implement paginated tool discovery and schema bounds | L | E3-T4 | 100-tool, cursor-loop, duplicate, and schema-bomb tests pass |
 | E3-T6 | Implement cache hints, refresh scheduling, explicit cache bypass, observations, and change handling | M | E3-T5, E2 | Refresh proves a fresh complete listing, appends tool observations, marks disappeared tools unavailable, creates a fresh pending generation on A→B→A rollback, and leaves 99 unchanged versions enabled when one of 100 tools changes |
@@ -752,7 +756,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 |---|---|---:|---|---|
 | E4-T1 | Pin official Registry OpenAPI fixture and generate/validate client types | M | E0 | Contract fixture detects upstream breaking changes |
 | E4-T2 | Implement search, pagination, timeout, cache, and circuit breaker | M | E4-T1 | Upstream outage returns explicit stale/unavailable state |
-| E4-T3 | Normalize and import exact server versions with sanitized metadata and versioned keyed-payload provenance | M | E2-T1, E4-T2 | Repeat import is idempotent; secret-shaped unsanitized fields and ordinary raw-payload digests never persist; HMAC key version is recorded |
+| E4-T3 | Normalize and import exact server versions with `SafeUrl` source locations, sanitized metadata, and versioned keyed-payload provenance | M | E2-T1, E4-T2 | Repeat import is idempotent; unsafe source URLs, secret-shaped fields, and ordinary raw-payload digests never persist or reach API output; HMAC key version is recorded |
 | E4-T4 | Classify remote-connectable versus catalog-only entries | S | E4-T3 | Package metadata cannot create an executable connection |
 
 ### E5 — Jobs and invocation ledger
@@ -776,7 +780,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 | ID | Task | Size | Depends on | Acceptance |
 |---|---|---:|---|---|
 | E6-T1 | Establish error, pagination, filtering, optimistic concurrency, and rotation-safe durable idempotency | M | E0, E1 | Replay/conflict/expiry tests plus HMAC rotation between original request and delayed replay never duplicate execution; missing retained key fails closed |
-| E6-T2 | Implement upstream catalog and import endpoints | M | E4, E6-T1 | Role and degraded-upstream paths pass |
+| E6-T2 | Implement upstream catalog and import endpoints | M | E4, E6-T1 | Role, degraded-upstream, and unsafe-source-URL response paths pass without echoing raw input |
 | E6-T3 | Implement server connection lifecycle endpoints | L | E2, E3, E6-T1 | Create/verify/refresh/disable/re-enable and endpoint-change suspension/reverification flows pass; control mutations share the dispatch-fence lock order and repeated material changes treat terminal superseded versions as no-ops |
 | E6-T4 | Implement capability catalog/version endpoints | M | E2, E6-T1 | Historical versions remain queryable |
 | E6-T5 | Implement secret-scanning run preflight, no-store run/event/cancel, and authorized artifact-read endpoints | M | E5, E6-T1 | Non-dispatching clean confirmation, pre-persistence secret rejection, E2E invocation, immutable artifact access, and authenticated-cache contract tests pass |
@@ -824,11 +828,11 @@ PRs should be vertically reviewable, generally stay below roughly 600 changed im
 | 02 | `build: scaffold api worker web and CI` | Python/TypeScript workspaces, lockfiles, quality gates, local commands | 01 | Green CI from clean checkout |
 | 03 | `infra: add local postgres object storage and migrations` | Compose stack, health, Alembic harness, backup/restore smoke test | 02 | Clean setup and migration test |
 | 04 | `feat(identity): add workspace roles auth and audit foundation` | OIDC/local auth, workspace repositories, RBAC, immutable secret-version adapter, audit service | 03 | Authorization and secret-rotation matrix |
-| 05 | `feat(registry): add entries connections and immutable snapshots` | Core registry migrations, repositories, lifecycle, canonical hashing | 03, 04 | Versioning golden tests |
+| 05 | `feat(registry): add entries connections and immutable snapshots` | Shared `SafeUrl` value/parser, core registry migrations, repositories, lifecycle, canonical hashing | 03, 04 | URL-boundary and versioning golden tests |
 | 06 | `test(mcp): add dual-era conformance fixture servers` | Modern/legacy fixtures, paging, auth, drift, errors, schema limits | 02 | Fixture contract suite |
-| 07 | `feat(mcp): connect and discover remote Streamable HTTP servers` | SDK wrapper, negotiation, address-pinned safe transport, paginated tools, health | 05, 06 | Both protocol eras and DNS-rebinding/SSRF suites |
+| 07 | `feat(mcp): connect and discover remote Streamable HTTP servers` | Shared `SafeUrl` enforcement, SDK wrapper, negotiation, address-pinned transport, paginated tools, health | 05, 06 | Both protocol eras plus URL-secret, DNS-rebinding, and SSRF suites |
 | 08 | `feat(registry): materialize capability versions from discovery` | Immutable occurrence-generated per-tool versions/trust-aware bindings, snapshot observations, status projections, drift policy | 05, 07 | One-of-100 drift changes one version; A→B→A creates a fresh pending generation; assurance downgrade creates review-required version; observation/event, endpoint, and credential tests pass |
-| 09 | `feat(catalog): search and import official registry entries` | Upstream adapter, cache, import, keyed provenance, catalog-only state | 05 | Recorded upstream contract and low-entropy-secret provenance tests |
+| 09 | `feat(catalog): search and import official registry entries` | Upstream adapter, `SafeUrl` mapping, cache, import, keyed provenance, catalog-only state | 05 | Recorded upstream contract, unsafe-source-URL, and low-entropy-secret provenance tests |
 | 10 | `feat(jobs): add durable jobs and run ledger` | Leases, events, attempts, idempotency, artifact metadata | 03, 04, 08 | Crash-recovery test |
 | 11 | `feat(invocation): execute MCP tools with bounded inputs and results` | Pre-persistence input secret scanning, input/output validation, lock-serialized dispatch, evidence-aware cancellation, byte-scanned immutable artifacts | 07, 10 | Input-secret non-persistence, dispatch/control-race, invocation-fault, invalid-output, secret-fingerprint, malware/type/archive, and artifact-integrity suites |
 | 12 | `feat(api): expose registry capability and run APIs` | REST resources, scan-before-hash durable idempotency, single-use run preflight, header-based artifact access, auth epochs, generated client | 08–11 | OpenAPI, input-secret non-persistence, and API E2E suites |
@@ -869,7 +873,7 @@ PR-01 decisions
 
 - canonical schema normalization and hashing;
 - state transitions and permission decisions;
-- pre-log URL credential rejection plus endpoint and resolved-address policy;
+- shared pre-log `SafeUrl` rejection for credential-bearing endpoint/import path, query, userinfo, fragment, encoding, and resolved-address policy;
 - HTTPS-only credential attachment and redirect validation;
 - schema bounds and argument validation;
 - fail-closed input secret/PII scanning before canonicalization, HMAC fingerprinting, persistence, or dispatch;
@@ -886,7 +890,7 @@ PR-01 decisions
 - `2026-07-28` discovery and invocation;
 - `2025-11-25` fallback discovery and invocation;
 - pagination, cache hints, one-of-many tool change without unrelated churn, authentication, timeout, cancellation acknowledgement/loss, output-schema-invalid, and malicious binary responses;
-- official Registry OpenAPI recorded fixtures;
+- official Registry OpenAPI recorded fixtures, including credential-bearing/high-entropy path and query source locations that never reach cache/domain/API output;
 - generated frontend client against checked OpenAPI;
 - stable public error codes.
 
@@ -897,6 +901,7 @@ PR-01 decisions
 - dispatch-fence crashes before send, after send, after receipt, and before response persistence;
 - deterministic barrier races between fence creation and connection disable, material change, capability-state change, or policy restriction, proving exactly one lock-serialized winner and no ineligible send;
 - DNS answer changes between validation and dial, including redirects and pooled/new connections;
+- connection request-body and registry-import URL fixtures prove raw credential-bearing path/query values never enter persistence, caches, audit, errors, logs/traces, or API responses;
 - object-store authorization and deletion;
 - immutable-version secret retrieval without disclosure and alias rotation through new binding/connection versions;
 - authoritative OIDC group refresh during still-valid tokens, fail-closed refresh errors, and authorization-epoch changes for membership, role, and policy revisions;
@@ -1013,7 +1018,7 @@ The schedule is capability-based, not date-based. If the critical path slips, cu
 | MCP version churn | SDK or server behavior changes during implementation | Official SDK wrapper, pinned versions, dual-era fixtures, protocol fields persisted |
 | Registry becomes an undifferentiated catalog | Work concentrates on listing metadata | Keep live verification, immutable versions, execution lineage, and later outcomes as the product path |
 | Official Registry preview breaks integration | Contract fixture or production parsing fails | Isolated adapter, stale cache, explicit provenance, no critical-path dependency for existing servers |
-| SSRF through operator-supplied endpoint | Requests target internal or metadata addresses | URL/IP/redirect validation, egress policy, explicit private-network configuration |
+| SSRF or secret exposure through any URL-valued field | Requests target internal/metadata addresses or credentials appear in paths/queries | Shared `SafeUrl` component validation before storage/output, IP/redirect validation, egress policy, explicit private-network configuration |
 | Arbitrary code execution via package metadata or `stdio` | Imported package becomes executable | Catalog and connection separation; no auto-install; hosted `stdio` impossible in alpha |
 | Duplicate mutating action | Worker retries after ambiguous disconnect | At-most-once dispatch policy and `indeterminate` terminal state |
 | Invisible remote redeploy mixes evidence | Behavior changes while schema digest remains stable | Record identity assurance/revision; version attested changes; exclude unverified remotes from authoritative evaluation and learned routing |
@@ -1031,7 +1036,7 @@ The schedule is capability-based, not date-based. If the critical path slips, cu
 2. **ADR-002:** Protocol-neutral capability identity, MCP tool binding, and remote implementation identity assurance.
 3. **ADR-003:** MCP protocol revisions, SDK pinning, and compatibility policy.
 4. **ADR-004:** Immutable discovery snapshots, schema-content digests, and occurrence-generated version identity.
-5. **ADR-005:** Remote endpoint trust, SSRF, redirects, and private-network policy.
+5. **ADR-005:** Shared URL-field secret boundary, remote endpoint trust, SSRF, redirects, and private-network policy.
 6. **ADR-006:** Credential references and secret-manager boundary.
 7. **ADR-007:** Durable job leases and at-most-once-oriented invocation semantics.
 8. **ADR-008:** Tool content normalization, artifact storage, and active-content isolation.
@@ -1052,7 +1057,7 @@ Milestone 1 is done when:
 - every tool schema change produces immutable history;
 - run creation is idempotent and upstream ambiguity never causes an automatic duplicate call;
 - no raw credential is stored or emitted outside the secret boundary;
-- endpoint, input-secret, schema, content, and tenant isolation security tests pass;
+- URL-field/endpoint, input-secret, schema, content, and tenant isolation security tests pass;
 - a run can be diagnosed and a server disabled without database access;
 - backup, restore, retention, deployment, incident, and rollback runbooks are exercised;
 - release evidence is attached to the `v0.1.0` tag; and

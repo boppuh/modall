@@ -246,7 +246,7 @@ flowchart LR
 
 Deployables:
 
-- `api`: authentication, route and invocation endpoints, control-plane administration, outcome ingestion.
+- `api`: authentication, route and public run endpoints, control-plane administration, outcome ingestion.
 - `worker`: benchmark and production invocation jobs with separate queues and concurrency limits.
 - `web`: experiment results and internal operations console.
 
@@ -714,13 +714,15 @@ Endpoints:
 - `POST /v1/artifacts/{id}/access-grants` — authorize the current subject, workspace, classification, and retention state, then mint an audited short-lived grant bound to that subject and exact artifact version; the grant is insufficient without the same ordinary authentication
 - `GET /v1/artifacts/{id}/content` — require ordinary authentication plus the subject-bound grant in a redacted `X-Modall-Artifact-Grant` header, never a URL, and stream the exact artifact version through an isolated viewer/download path with no-store, nosniff, sandbox CSP, and cross-origin isolation headers
 - `POST /v1/routes` — create and persist a route-only decision
-- `POST /v1/run` — route, authorize, enqueue, and return `202 Accepted`
-- `GET /v1/invocations/{id}` — current state and normalized result metadata
-- `POST /v1/invocations/{id}/cancel` — best-effort cancellation
-- `POST /v1/invocations/{id}/outcomes` — attributable outcome evidence
+- `POST /v1/routed-runs` — atomically route, authorize, create the canonical Run resource, enqueue, and return `202 Accepted`
+- `GET /v1/runs/{id}` — current state and normalized result metadata for either a direct Registry run or routed run
+- `POST /v1/runs/{id}/cancel` — best-effort cancellation
+- `POST /v1/runs/{id}/outcomes` — attributable outcome evidence
 - `GET /v1/capabilities/{id}/versions/{version}` — exact public/authorized metadata
 
 Generate OpenAPI and SDK types from one schema source. Require an `Idempotency-Key` for mutating client calls. After bounded input scanning, retain an HMAC-keyed idempotency-key tombstone plus a domain-separated HMAC request fingerprint and their HMAC key-version ID for the workspace lifetime: while the replay response exists, the same key/fingerprint returns it; after response expiry it fails with `idempotency_replay_expired`, and a different fingerprint always conflicts, so a delayed retry never executes again. Lookup tries the current and retained retired verification-key versions and recomputes request identity with the found record's version; older keys remain encrypted and non-retirable until all protected workspaces are hard-deleted, and missing key material fails closed. Scope API credentials to workspace, environment, action, and optional spending/quota policy. All errors use stable machine codes and correlation IDs.
+
+`Run` is the sole public execution resource and maps one-to-one to the internal Invocation aggregate. Registry Alpha's plural `/v1/runs` family remains backward compatible for direct capability execution; Phase 1 adds `/v1/routed-runs` only as a creation command and returns the same Run schema and ID. The previously planned singular `/v1/run` and `/v1/invocations/*` paths are replaced before implementation and never ship as aliases. Generated OpenAPI/SDK mappings are `createRun` for direct execution, `createRoutedRun` for routed execution, and `getRun`, `cancelRun`, and `createRunOutcome` for the shared resource paths. The MCP meta-tool name `get_invocation` is a protocol compatibility name that calls `getRun`; it does not create a second HTTP resource. Contract tests reject accidental legacy routes and compile both existing direct-run and new routed-run clients against the checked schema.
 
 Routing and run requests accept only finalized, unexpired artifacts owned by the same workspace and allowed by the request/provider data policy. Each upload uses a unique non-overwritable object key or versioned-bucket write. Completion closes the upload, verifies an ephemeral client integrity proof and length against the exact storage version, detects archive expansion/path traversal, and applies malware and secret policy. Clean artifacts persist a content digest; encrypted restricted artifacts persist a ciphertext integrity checksum plus a purpose-separated versioned HMAC plaintext fingerprint whose key remains in the secret manager, never an ordinary plaintext digest. Consumption reauthorizes the artifact and reads only that pinned version, verifying its kind-appropriate integrity value; a still-valid upload credential cannot replace finalized content. HTTP/SDK clients upload through the presigned target; the MCP facade exposes both `create_artifact_upload` and `complete_artifact_upload`, with the latter applying the authenticated completion contract and returning the authoritative `artifact://` URI so an MCP control-plane client needs no REST credential. Large or retained non-text results use the same immutable artifact and authorized-access contract, so the console never reads object storage directly.
 
@@ -792,7 +794,7 @@ Build only internal workflows needed to operate the alpha:
 | P1-01 Identity | Workspaces, workspace memberships, API keys, RBAC, audit log | Registry Alpha identity | Authorization test matrix passes |
 | P1-01A Artifacts | Non-overwritable presigned ingestion, completion validation, scanning, immutable workspace artifact URI, and header-redeemed subject-bound read grants | Identity, object storage | Authorized upload-to-route/view contract passes without direct store credentials or grant material in URLs/logs; overwrite and wrong-version tests fail closed |
 | P1-02 Routing API | `/routes`, schemas, idempotency | P0 router, P1-01A | Replayable decision under latency target |
-| P1-03 Run API | `/run`, job creation, state API | Identity, artifacts, jobs | End-to-end curated invocation passes |
+| P1-03 Run API | `/routed-runs`, shared `/runs` state API, job creation | Identity, artifacts, jobs | Existing direct-run SDK remains compatible; routed creation returns the canonical Run resource; legacy singular/invocation paths are absent |
 | P1-04 Runtime | Input scanning, adapter pools, dispatch-time eligibility, deadlines, evidence-gated fallback, circuit breakers | P0 adapters | Sensitive input and scan/kill-switch/policy/artifact changes before the first fence send no data; fallback requires definitive non-execution or tested idempotency; exhaustion and guard races terminate |
 | P1-05 Outcomes | Evidence API, SDKs, CI integration, label derivation | Invocation lineage | >=90% expected alpha coverage in staging trial |
 | P1-06 MCP | Nine meta-tools—`route_task`, `run_task`, `search_capabilities`, `get_capability`, `get_invocation`, `report_outcome`, `create_artifact_upload`, `complete_artifact_upload`, and `read_artifact`—mapped to API/services | Stable HTTP and artifact contracts | With MCP auth plus the presigned byte-transfer target, a client uploads/completes without REST credentials and reads results solely through bounded MCP chunks; contract/auth tests pass |
@@ -978,7 +980,7 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 
 - PostgreSQL transactions and migrations;
 - object upload/download authorization;
-- idempotency replay lookup across HMAC-key rotation and fail-closed behavior when a required retired key is unavailable;
+- idempotency replay lookup across HMAC-key rotation and fail-closed behavior when a retired key required for lookup is unavailable;
 - durable job recovery;
 - provider circuit breakers and health snapshots;
 - webhook verification and deduplication;
