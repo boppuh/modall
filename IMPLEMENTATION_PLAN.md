@@ -175,7 +175,9 @@ For the kappa gate, the rating units are fixed before either reviewer labels the
 
 ### Gate G1 — task-aware policy activation
 
-Enable task-aware selection in the live request path only when, on the fresh universally eligible G1 activation holdout, the quality-first policy produces at least 5 percentage points higher task success than the strongest static capability, with no more than 20% higher cost per successful task. The paired task outcome is the preregistered primary-attempt estimand defined in Section 8.4; diagnostic repeats never change it. A paired, repository-grouped bootstrap that resamples repositories and preserves those paired task results within each sampled repository must show a 95% confidence interval that excludes no improvement in task success. Before freezing or executing that holdout, preregister a simulation-based power analysis using that exact estimand and resampling procedure, observed group-size distribution, and a conservative calibration-derived bound on candidate discordance. The holdout must provide at least 90% power for that confidence-interval test to detect a true five-percentage-point lift; the observed five-point threshold remains a separate activation requirement. If the available corpus is smaller than the calculated sample, expand it or keep task-aware routing in shadow mode. This holdout contains no case whose candidate outputs or labels were revealed in the initial calibration report.
+Enable task-aware selection in the live request path only when, on the fresh universally eligible G1 activation holdout, the quality-first policy produces at least 5 percentage points higher task success than the strongest static capability and its cost per successful task is no more than 20% higher. For each policy, cost per successful task is total platform-attributed primary-attempt cost across all holdout tasks, including costs from unsuccessful tasks, divided by the number of successful primary tasks. Activation requires both an observed task-aware/static cost ratio no greater than 1.20 and a one-sided 95% upper confidence bound for that ratio no greater than 1.20 under the same paired, repository-grouped bootstrap. A zero-success policy arm, or an undefined ratio in the observed sample or any required bootstrap resample, fails the cost guardrail rather than being imputed or omitted.
+
+The paired task outcome is the preregistered primary-attempt estimand defined in Section 8.4; diagnostic repeats never change it. A paired, repository-grouped bootstrap that resamples repositories and preserves paired task outcomes and costs within each sampled repository must also show a two-sided 95% confidence interval that excludes no improvement in task success. Before freezing or executing that holdout, preregister the success and cost-ratio estimators, charge attribution and currency normalization, zero-success handling, confidence-bound construction, and a simulation-based sizing analysis using those exact estimands and resampling procedures, the observed group-size distribution, a conservative calibration-derived bound on candidate discordance, and pilot estimates of cost/success variance. Choose the larger sample required to give at least 90% power for the success confidence-interval test to detect a true five-percentage-point lift and enough cost precision to satisfy the upper-bound guard when the true ratio is at the preregistered planning alternative below 1.20. The observed five-point lift and 1.20 cost bound remain separate activation requirements. If the available corpus is smaller than that sample, either confidence result is too wide, or any ratio is undefined, expand the corpus or keep task-aware routing in shadow mode. This holdout contains no case whose candidate outputs or labels were revealed in the initial calibration report.
 
 A value-oriented policy should still be reported as secondary analysis, including whether it achieves at least 20% lower cost per successful task while remaining non-inferior within a 2 percentage-point success margin. It cannot substitute for the quality-first activation gate. Report all baselines and all attempted policy variants, including failures. If G1 does not pass, the closed alpha uses the strongest eligible static quality policy while task-aware decisions run in shadow mode.
 
@@ -486,7 +488,7 @@ Start with a 75–100-case universally eligible, non-confidential calibration su
 
 The calibration test remains hidden until the initial report, then is permanently marked revealed and cannot contribute to the G1 activation holdout.
 
-Continue expanding to a separate activation benchmark while the router alpha is built, using 200–300 cases as the first authoring tranche rather than a fixed cap. Before allocating groups, preregister the G1 power calculation defined in the gate: simulate the exact paired, repository-grouped bootstrap with the planned group distribution and a conservative calibration-derived discordance bound, and choose a fresh activation-holdout size that gives the confidence-interval test at least 90% power to detect a true five-percentage-point lift. Freeze that many newly added grouped cases and their labels before final policy selection; do not run candidates on them or reveal any artifact until the static baseline and task-aware policy are frozen. Previously revealed calibration-test cases may enter a later training pool with explicit provenance but never the activation holdout. Expand beyond 300 total cases whenever the preregistered calculation requires it; an underpowered result cannot activate task-aware routing.
+Continue expanding to a separate activation benchmark while the router alpha is built, using 200–300 cases as the first authoring tranche rather than a fixed cap. Before allocating groups, preregister the G1 sizing calculation defined in the gate: simulate the exact paired, repository-grouped bootstrap with the planned group distribution, a conservative calibration-derived discordance bound, and pilot cost/success variance. Choose a fresh activation-holdout size as the larger of the sample that gives the success confidence-interval test at least 90% power to detect a true five-percentage-point lift and the sample needed for the preregistered one-sided cost-ratio upper bound at its planning alternative. Freeze that many newly added grouped cases and their labels before final policy selection; do not run candidates on them or reveal any artifact until the static baseline and task-aware policy are frozen. Previously revealed calibration-test cases may enter a later training pool with explicit provenance but never the activation holdout. Expand beyond 300 total cases whenever either calculation requires it; an underpowered or cost-imprecise result cannot activate task-aware routing.
 
 Split by repository and defect archetype group, not by individual diff, so close variants cannot cross groups. Keep the test labels encrypted or access-controlled from capability authors and router development.
 
@@ -654,14 +656,14 @@ Required baselines:
 Report:
 
 - task success and paired difference versus every baseline;
-- cost per successful task;
+- cost per successful task for every policy, the observed task-aware/static ratio, and its one-sided 95% repository-grouped bootstrap upper bound;
 - latency per successful task;
 - capability failure and invalid-output rates;
 - selection share by capability and feature segment;
 - controlled-model, differentiated-capability, and combined-cohort routing results;
 - an ablation showing the incremental lift from adding differentiated capabilities to the controlled model set;
 - universal and private-stratum results reported separately, with candidate eligibility made explicit;
-- G1 paired bootstrap confidence intervals grouped by repository using exactly one primary outcome per policy/task, plus separately labeled nested-repeat variability intervals that cannot affect activation;
+- G1 paired bootstrap success confidence intervals and the cost-ratio upper bound grouped by repository using exactly one primary outcome and attributed cost per policy/task, plus separately labeled nested-repeat variability intervals that cannot affect activation;
 - sensitivity to policy weights and missing features;
 - oracle headroom;
 - train/validation/test divergence;
@@ -673,15 +675,15 @@ The final report is generated from committed result snapshots and a versioned an
 
 | Epic | Deliverable | Acceptance criteria | Owner profile |
 |---|---|---|---|
-| P0-01 Protocol | Preregistered calibration and activation gate | Metrics, fixed case×family kappa units/categories/unmatched rules, primary-attempt pairing, repeats, exclusions, and statistics approved before hidden runs | Staff/data |
+| P0-01 Protocol | Preregistered calibration and activation gate | Metrics, fixed case×family kappa units/categories/unmatched rules, primary-attempt pairing, cost attribution/ratio/UCB and zero-success rules, repeats, exclusions, and statistics approved before hidden runs | Staff/data |
 | P0-02 Taxonomy | Versioned task and feature schema | JSON Schema validation; feature provenance; no post-outcome fields | Backend/domain |
-| P0-03 Corpus | 75–100-case calibration suite plus an activation benchmark whose first authoring tranche is 200–300 cases and whose final size follows the preregistered power calculation | Fixed case×family rating matrix and span adjudication pass G0; revealed test is excluded; fresh grouped holdout gives the CI test 90% power for a true five-point lift | Swift/evaluation |
+| P0-03 Corpus | 75–100-case calibration suite plus an activation benchmark whose first authoring tranche is 200–300 cases and whose final size follows preregistered quality-power and cost-precision calculations | Fixed case×family rating matrix and span adjudication pass G0; revealed test is excluded; fresh grouped holdout satisfies both the 90%-power quality requirement and cost-ratio precision requirement | Swift/evaluation |
 | P0-04 Harness | Durable execution and artifact capture | Resumable, idempotent matrix runs; preregistered primary/diagnostic attempt slots; pinned environment; per-attempt cost/latency | Platform |
 | P0-04A Budget pilot | Separate 20-PR candidate matrix and frozen limits | Pilot cases excluded from official splits; cost/latency/resource ceilings approved before official matrix | Platform/product |
 | P0-05 Adapter SDK | Common adapter protocol and eight candidates | Official candidates attest one revision across the full matrix; aliases are diagnostic-only; contract suite requires revision-aware findings and safe normalized outputs | Backend/AI |
 | P0-06 Graders | Deterministic matching and blinded label-gap adjudication | Golden tests cover added/deleted/renamed/moved lines, genuine omitted defects, all-candidate exclusion/versioning, clean cases, and false positives; rerun agreement >=98% | Evaluation |
 | P0-07 Router V0 | Filter/rank/reason implementation | Deterministic replay from snapshots; no hidden data access | Backend/data |
-| P0-08 Analysis | Baseline comparison and confidence intervals | Reproducible report; the same paired repository-grouped bootstrap used for G1 sizing and activation; sensitivity analysis | Data/full-stack |
+| P0-08 Analysis | Baseline comparison and confidence intervals | Reproducible report; the same paired repository-grouped bootstrap produces the G1 quality interval and one-sided cost-ratio upper bound for sizing and activation; zero-success resamples fail closed; sensitivity analysis | Data/full-stack |
 | P0-09 Policy decision | Written static-versus-task-aware release review | Evidence, limitations, shadow plan, and policy recommendation signed off | Tech/product leads |
 
 ### 8.9 Post-registry Phase 0 schedule
@@ -692,7 +694,7 @@ This schedule begins only after the MCP Registry Alpha release gate passes. With
 - **Post-registry Week 2:** first adapters and graders, 20-PR budget pilot, frozen execution limits, first 40–50 cases
 - **Post-registry Week 3:** all eight adapters, 75–100-case initial matrix, strongest static policy, router shadow policy, reproducible report
 
-After Week 3, activation-benchmark authoring and shadow evaluation continue as an evaluation workstream alongside productization. Treat 200–300 cases as an initial tranche, run the preregistered grouped-pair power calculation, and expand until a fresh untouched activation holdout gives the confidence-interval test at least 90% power to detect a true five-point lift. Pass G1 on that holdout before task-aware selection controls live traffic. Do not compress by reusing the revealed calibration test or weakening power, holdout, label-quality, or reproducibility requirements.
+After Week 3, activation-benchmark authoring and shadow evaluation continue as an evaluation workstream alongside productization. Treat 200–300 cases as an initial tranche, run the preregistered grouped-pair quality-power and cost-precision calculations, and expand until a fresh untouched activation holdout gives the success confidence-interval test at least 90% power to detect a true five-point lift and the required precision for the one-sided cost-ratio upper bound. Pass every G1 threshold on that holdout before task-aware selection controls live traffic. Do not compress by reusing the revealed calibration test or weakening power, cost uncertainty, holdout, label-quality, or reproducibility requirements.
 
 ---
 
@@ -1247,7 +1249,7 @@ This schedule starts only after Milestone 1 satisfies its release definition of 
 
 ### Days 3–5
 
-- Preregister the quality-first objective, cost guardrail, success definition, baselines, split, and statistics.
+- Preregister the quality-first objective, observed cost-ratio and one-sided upper-bound guardrail, zero-success handling, success definition, baselines, split, and statistics.
 - Extend the Registry Alpha workspace, CI, PostgreSQL, object storage, migrations, and test conventions for evaluation data.
 - Implement manifest/task schemas and the provider adapter contract.
 - Produce the first ten gold benchmark cases and grader golden tests.
