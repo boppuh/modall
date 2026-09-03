@@ -166,20 +166,22 @@ Proceed to the full experiment only when:
 - the corpus includes clean controls, single-defect PRs, and multi-defect or cross-file PRs;
 - the primary domain reviewer labels every case, while a second qualified reviewer independently labels a stratified 20% sample and every disputed high/critical finding;
 - measured inter-rater agreement reaches at least 0.80 Cohen's kappa on the fixed rating matrix below before label freeze; otherwise refine the rubric and expand dual review;
-- train, validation, and hidden test groups are split by source repository and defect family to prevent near-duplicate leakage;
+- train, validation, and hidden test groups are split by a frozen composite `correlation_cluster_id` that preserves both source-repository and controlled-mutation/archetype lineage dependence;
 - the harness reproduces the same deterministic grading result in at least 98% of reruns;
 - every candidate used for authoritative comparison has an immutable platform-controlled version or an attested remote implementation revision; unverified mutable remotes are excluded from G1 evidence;
 - no candidate capability has received hidden labels or hidden-case artifacts.
+
+Before any split, build `correlation_cluster_id` as the connected component of a graph whose cases are linked when they share a source repository or the same controlled-mutation/archetype lineage, including a seeded template or near-duplicate variant applied across repositories. A broad defect-family label alone is not a lineage edge. Freeze repository and lineage IDs plus the resulting components before allocation; every component stays in one split and is the resampling unit for G1 sizing and activation. If a giant component or too few independent components makes either interval underpowered or imprecise, expand/rebalance the corpus or remain in shadow mode.
 
 For the kappa gate, the rating units are fixed before either reviewer labels the stratified sample: every sampled case crossed with every canonical defect family in the frozen taxonomy, including an explicit `other` family. Each reviewer independently assigns exactly one binary category, `present` or `absent`, to every case×family unit; a clean case is therefore all absent. Compute the primary Cohen's kappa once over the flattened matrix of those common units and report per-family kappas when both categories occur. Every concrete finding must map to one family and carry the revision-aware location from Section 7.3. An unrecognized but asserted finding maps to `other`/present rather than disappearing; a finding asserted by only one reviewer is a present/absent disagreement. Multiple same-family findings do not create extra kappa units: count, span, severity, and category-alias agreement are reported separately with deterministic bipartite span matching, and every count/location disagreement for high or critical findings enters adjudication before label freeze. The protocol versions the family map, unit matrix, alias rules, unmatched treatment, and span tolerance before annotation.
 
 ### Gate G1 — task-aware policy activation
 
-Enable task-aware selection in the live request path only when, on the fresh universally eligible G1 activation holdout, the quality-first policy produces at least 5 percentage points higher task success than the strongest static capability and its cost per successful task is no more than 20% higher. For each policy, cost per successful task is total platform-attributed primary-attempt cost across all holdout tasks, including costs from unsuccessful tasks, divided by the number of successful primary tasks. Activation requires both an observed task-aware/static cost ratio no greater than 1.20 and a one-sided 95% upper confidence bound for that ratio no greater than 1.20 under the same paired, repository-grouped bootstrap. A zero-success arm in the observed holdout fails the gate.
+Enable task-aware selection in the live request path only when, on the fresh universally eligible G1 activation holdout, the quality-first policy produces at least 5 percentage points higher task success than the strongest static capability and its cost per successful task is no more than 20% higher. For each policy, cost per successful task is total platform-attributed primary-attempt cost across all holdout tasks, including costs from unsuccessful tasks, divided by the number of successful primary tasks. Activation requires both an observed task-aware/static cost ratio no greater than 1.20 and a one-sided 95% upper confidence bound for that ratio no greater than 1.20 under the same paired `correlation_cluster_id` bootstrap. A zero-success arm in the observed holdout fails the gate.
 
-Bootstrap boundary draws are retained, never silently omitted and never treated as a one-draw veto. For the observed sample and each draw, define the task-aware/static ratio on the extended nonnegative reals: a draw with zero task-aware successes is `+infinity`; a draw with zero static successes but at least one task-aware success is `0`; if both arms have zero successes it is `+infinity`. When both arms have successes but the static cost per success is zero, the ratio is `1` if task-aware cost per success is also zero and `+infinity` otherwise. The upper bound is the preregistered empirical 95th percentile of all finite and infinite draw values. Fix the bootstrap seed, draw count, quantile convention, and Monte Carlo error rule before revealing results; use exact grouped-resample enumeration when tractable, and otherwise declare the gate inconclusive unless the conservative Monte Carlo error bound leaves the upper limit at or below 1.20. Isolated boundary draws therefore contribute their tail probability rather than vetoing activation based on whether any one draw occurred.
+Bootstrap boundary draws are retained, never silently omitted and never treated as a one-draw veto. For the observed sample and each draw, define the task-aware/static ratio on the extended nonnegative reals: a draw with zero task-aware successes is `+infinity`; a draw with zero static successes but at least one task-aware success is `0`; if both arms have zero successes it is `+infinity`. When both arms have successes but the static cost per success is zero, the ratio is `1` if task-aware cost per success is also zero and `+infinity` otherwise. The upper bound is the preregistered empirical 95th percentile of all finite and infinite draw values. Fix the bootstrap seed, draw count, quantile convention, and Monte Carlo error rule before revealing results; use exact correlation-cluster resample enumeration when tractable, and otherwise declare the gate inconclusive unless the conservative Monte Carlo error bound leaves the upper limit at or below 1.20. Isolated boundary draws therefore contribute their tail probability rather than vetoing activation based on whether any one draw occurred.
 
-The paired task outcome is the preregistered primary-attempt estimand defined in Section 8.4; diagnostic repeats never change it. A paired, repository-grouped bootstrap that resamples repositories and preserves paired task outcomes and costs within each sampled repository must also show a two-sided 95% confidence interval that excludes no improvement in task success. Before freezing or executing that holdout, preregister the success and cost-ratio estimators, charge attribution and currency normalization, observed and resampled boundary handling, confidence-bound construction, and a simulation-based sizing analysis using those exact estimands and resampling procedures, the observed group-size distribution, a conservative calibration-derived bound on candidate discordance, and pilot estimates of cost/success variance. Choose the larger sample required to give at least 90% power for the success confidence-interval test to detect a true five-percentage-point lift and enough cost precision to satisfy the upper-bound guard when the true ratio is at the preregistered planning alternative below 1.20. The observed five-point lift and 1.20 cost bound remain separate activation requirements. If the available corpus is smaller than that sample, either confidence result is too wide, or an observed arm has zero successes, expand the corpus or keep task-aware routing in shadow mode. This holdout contains no case whose candidate outputs or labels were revealed in the initial calibration report.
+The paired task outcome is the preregistered primary-attempt estimand defined in Section 8.4; diagnostic repeats never change it. A paired cluster bootstrap that resamples frozen `correlation_cluster_id` components and preserves all paired task outcomes and costs within each sampled component must also show a two-sided 95% confidence interval that excludes no improvement in task success. Before freezing or executing that holdout, preregister the success and cost-ratio estimators, charge attribution and currency normalization, observed and resampled boundary handling, confidence-bound construction, and a simulation-based sizing analysis using those exact estimands and resampling procedures, the observed composite-cluster size distribution, a conservative calibration-derived bound on candidate discordance, and pilot estimates of cost/success variance. Choose the larger sample required to give at least 90% power for the success confidence-interval test to detect a true five-percentage-point lift and enough cost precision to satisfy the upper-bound guard when the true ratio is at the preregistered planning alternative below 1.20. The observed five-point lift and 1.20 cost bound remain separate activation requirements. If the available corpus is smaller than that sample, either confidence result is too wide, or an observed arm has zero successes, expand the corpus or keep task-aware routing in shadow mode. This holdout contains no case—and no correlation component linked to a case—whose candidate outputs or labels were revealed in the initial calibration report.
 
 A value-oriented policy should still be reported as secondary analysis, including whether it achieves at least 20% lower cost per successful task while remaining non-inferior within a 2 percentage-point success margin. It cannot substitute for the quality-first activation gate. Report all baselines and all attempted policy variants, including failures. If G1 does not pass, the closed alpha uses the strongest eligible static quality policy while task-aware decisions run in shadow mode.
 
@@ -256,7 +258,7 @@ Logical modules:
 - `capabilities`
 - `routing`
 - `evaluation`
-- `invocations`
+- `runs` (the internal Invocation aggregate over the Registry run ledger)
 - `outcomes`
 - `providers`
 - `artifacts`
@@ -490,13 +492,14 @@ Start with a 75–100-case universally eligible, non-confidential calibration su
 
 The calibration test remains hidden until the initial report, then is permanently marked revealed and cannot contribute to the G1 activation holdout.
 
-Continue expanding to a separate activation benchmark while the router alpha is built, using 200–300 cases as the first authoring tranche rather than a fixed cap. Before allocating groups, preregister the G1 sizing calculation defined in the gate: simulate the exact paired, repository-grouped bootstrap with the planned group distribution, a conservative calibration-derived discordance bound, and pilot cost/success variance. Choose a fresh activation-holdout size as the larger of the sample that gives the success confidence-interval test at least 90% power to detect a true five-percentage-point lift and the sample needed for the preregistered one-sided cost-ratio upper bound at its planning alternative. Freeze that many newly added grouped cases and their labels before final policy selection; do not run candidates on them or reveal any artifact until the static baseline and task-aware policy are frozen. Previously revealed calibration-test cases may enter a later training pool with explicit provenance but never the activation holdout. Expand beyond 300 total cases whenever either calculation requires it; an underpowered or cost-imprecise result cannot activate task-aware routing.
+Continue expanding to a separate activation benchmark while the router alpha is built, using 200–300 cases as the first authoring tranche rather than a fixed cap. Before allocating groups, preregister the G1 sizing calculation defined in the gate: simulate the exact paired composite-cluster bootstrap with the planned `correlation_cluster_id` distribution, a conservative calibration-derived discordance bound, and pilot cost/success variance. Choose a fresh activation-holdout size as the larger of the sample that gives the success confidence-interval test at least 90% power to detect a true five-percentage-point lift and the sample needed for the preregistered one-sided cost-ratio upper bound at its planning alternative. Freeze that many newly added clustered cases and their labels before final policy selection; do not run candidates on them or reveal any artifact until the static baseline and task-aware policy are frozen. Previously revealed calibration-test cases may enter a later training pool with explicit provenance but never the activation holdout, and no activation component may connect to a revealed case. Expand beyond 300 total cases whenever either calculation requires it; an underpowered or cost-imprecise result cannot activate task-aware routing.
 
-Split by repository and defect archetype group, not by individual diff, so close variants cannot cross groups. Keep the test labels encrypted or access-controlled from capability authors and router development.
+Split by the frozen composite correlation components, not by individual diff, repository alone, or archetype alone, so same-repository and cross-repository lineage variants cannot cross groups. Keep the test labels encrypted or access-controlled from capability authors and router development.
 
 Each case contains:
 
 - immutable source snapshot and license/provenance;
+- immutable `source_repository_id`, nullable controlled-mutation/archetype-lineage ID, frozen `correlation_cluster_id`, and cluster-graph version;
 - base/head revisions and canonical diff;
 - zero or more labeled concurrency defects plus an explicit `clean` or `defective` case kind;
 - allowed category aliases and span tolerances;
@@ -658,14 +661,14 @@ Required baselines:
 Report:
 
 - task success and paired difference versus every baseline;
-- cost per successful task for every policy, the observed task-aware/static ratio, and its one-sided 95% repository-grouped bootstrap upper bound;
+- cost per successful task for every policy, the observed task-aware/static ratio, and its one-sided 95% composite-correlation-cluster bootstrap upper bound;
 - latency per successful task;
 - capability failure and invalid-output rates;
 - selection share by capability and feature segment;
 - controlled-model, differentiated-capability, and combined-cohort routing results;
 - an ablation showing the incremental lift from adding differentiated capabilities to the controlled model set;
 - universal and private-stratum results reported separately, with candidate eligibility made explicit;
-- G1 paired bootstrap success confidence intervals and the cost-ratio upper bound grouped by repository using exactly one primary outcome and attributed cost per policy/task, plus separately labeled nested-repeat variability intervals that cannot affect activation;
+- G1 paired bootstrap success confidence intervals and the cost-ratio upper bound grouped by frozen `correlation_cluster_id` using exactly one primary outcome and attributed cost per policy/task, plus separately labeled nested-repeat variability intervals that cannot affect activation;
 - sensitivity to policy weights and missing features;
 - oracle headroom;
 - train/validation/test divergence;
@@ -677,15 +680,15 @@ The final report is generated from committed result snapshots and a versioned an
 
 | Epic | Deliverable | Acceptance criteria | Owner profile |
 |---|---|---|---|
-| P0-01 Protocol | Preregistered calibration and activation gate | Metrics, fixed case×family kappa units/categories/unmatched rules, primary-attempt pairing, cost attribution/ratio/UCB, deterministic resample-boundary and observed zero-success rules, repeats, exclusions, and statistics approved before hidden runs | Staff/data |
+| P0-01 Protocol | Preregistered calibration and activation gate | Metrics, frozen repository-plus-archetype correlation clusters, fixed case×family kappa units/categories/unmatched rules, primary-attempt pairing, cost attribution/ratio/UCB, deterministic resample-boundary and observed zero-success rules, repeats, exclusions, and statistics approved before hidden runs | Staff/data |
 | P0-02 Taxonomy | Versioned task and feature schema | JSON Schema validation; feature provenance; no post-outcome fields | Backend/domain |
-| P0-03 Corpus | 75–100-case calibration suite plus an activation benchmark whose first authoring tranche is 200–300 cases and whose final size follows preregistered quality-power and cost-precision calculations | Fixed case×family rating matrix and span adjudication pass G0; revealed test is excluded; fresh grouped holdout satisfies both the 90%-power quality requirement and cost-ratio precision requirement | Swift/evaluation |
+| P0-03 Corpus | 75–100-case calibration suite plus an activation benchmark whose first authoring tranche is 200–300 cases and whose final size follows preregistered quality-power and cost-precision calculations | Fixed case×family rating matrix and span adjudication pass G0; repository/archetype-lineage component graph is audited and frozen; revealed test is excluded; fresh composite-cluster holdout satisfies both evidence requirements | Swift/evaluation |
 | P0-04 Harness | Durable execution and artifact capture | Resumable, idempotent matrix runs; preregistered primary/diagnostic attempt slots; pinned environment; per-attempt cost/latency | Platform |
 | P0-04A Budget pilot | Separate 20-PR candidate matrix and frozen limits | Pilot cases excluded from official splits; cost/latency/resource ceilings approved before official matrix | Platform/product |
 | P0-05 Adapter SDK | Common adapter protocol and eight candidates | Official candidates attest one revision across the full matrix; aliases are diagnostic-only; contract suite requires revision-aware findings and safe normalized outputs | Backend/AI |
 | P0-06 Graders | Deterministic matching and blinded label-gap adjudication | Golden tests cover added/deleted/renamed/moved lines, genuine omitted defects, all-candidate exclusion/versioning, clean cases, and false positives; rerun agreement >=98% | Evaluation |
 | P0-07 Router V0 | Filter/rank/reason implementation | Deterministic replay from snapshots; no hidden data access | Backend/data |
-| P0-08 Analysis | Baseline comparison and confidence intervals | Reproducible report; the same paired repository-grouped bootstrap produces the G1 quality interval and one-sided cost-ratio upper bound for sizing and activation; preregistered extended-ratio boundary draws determine tail mass without one-draw veto or omission; sensitivity analysis | Data/full-stack |
+| P0-08 Analysis | Baseline comparison and confidence intervals | Reproducible report; the same paired frozen-correlation-cluster bootstrap produces the G1 quality interval and one-sided cost-ratio upper bound for sizing and activation; preregistered extended-ratio boundary draws determine tail mass without one-draw veto or omission; sensitivity analysis | Data/full-stack |
 | P0-09 Policy decision | Written static-versus-task-aware release review | Evidence, limitations, shadow plan, and policy recommendation signed off | Tech/product leads |
 
 ### 8.9 Post-registry Phase 0 schedule
@@ -696,7 +699,7 @@ This schedule begins only after the MCP Registry Alpha release gate passes. With
 - **Post-registry Week 2:** first adapters and graders, 20-PR budget pilot, frozen execution limits, first 40–50 cases
 - **Post-registry Week 3:** all eight adapters, 75–100-case initial matrix, strongest static policy, router shadow policy, reproducible report
 
-After Week 3, activation-benchmark authoring and shadow evaluation continue as an evaluation workstream alongside productization. Treat 200–300 cases as an initial tranche, run the preregistered grouped-pair quality-power and cost-precision calculations, and expand until a fresh untouched activation holdout gives the success confidence-interval test at least 90% power to detect a true five-point lift and the required precision for the one-sided cost-ratio upper bound. Pass every G1 threshold on that holdout before task-aware selection controls live traffic. Do not compress by reusing the revealed calibration test or weakening power, cost uncertainty, holdout, label-quality, or reproducibility requirements.
+After Week 3, activation-benchmark authoring and shadow evaluation continue as an evaluation workstream alongside productization. Treat 200–300 cases as an initial tranche, run the preregistered paired composite-cluster quality-power and cost-precision calculations, and expand until a fresh untouched activation holdout gives the success confidence-interval test at least 90% power to detect a true five-point lift and the required precision for the one-sided cost-ratio upper bound. Pass every G1 threshold on that holdout before task-aware selection controls live traffic. Do not compress by reusing the revealed calibration test or weakening clustering, power, cost uncertainty, holdout, label-quality, or reproducibility requirements.
 
 ---
 
@@ -794,7 +797,7 @@ Build only internal workflows needed to operate the alpha:
 | P1-01 Identity | Workspaces, workspace memberships, API keys, RBAC, audit log | Registry Alpha identity | Authorization test matrix passes |
 | P1-01A Artifacts | Non-overwritable presigned ingestion, completion validation, scanning, immutable workspace artifact URI, and header-redeemed subject-bound read grants | Identity, object storage | Authorized upload-to-route/view contract passes without direct store credentials or grant material in URLs/logs; overwrite and wrong-version tests fail closed |
 | P1-02 Routing API | `/routes`, schemas, idempotency | P0 router, P1-01A | Replayable decision under latency target |
-| P1-03 Run API | `/routed-runs`, shared `/runs` state API, job creation | Identity, artifacts, jobs | Existing direct-run SDK remains compatible; routed creation returns the canonical Run resource; legacy singular/invocation paths are absent |
+| P1-03 Run API | `/routed-runs`, shared `/runs` state API, in-place ledger migration, job creation | Identity, artifacts, jobs | Existing direct rows/SDK remain compatible; mixed direct/routed query, cancellation, and replay use one ledger; routed creation returns the canonical Run resource; legacy singular/invocation paths and tables are absent |
 | P1-04 Runtime | Input scanning, adapter pools, dispatch-time eligibility, deadlines, evidence-gated fallback, circuit breakers | P0 adapters | Sensitive input and scan/kill-switch/policy/artifact changes before the first fence send no data; fallback requires definitive non-execution or tested idempotency; exhaustion and guard races terminate |
 | P1-05 Outcomes | Evidence API, SDKs, CI integration, label derivation | Invocation lineage | >=90% expected alpha coverage in staging trial |
 | P1-06 MCP | Nine meta-tools—`route_task`, `run_task`, `search_capabilities`, `get_capability`, `get_invocation`, `report_outcome`, `create_artifact_upload`, `complete_artifact_upload`, and `read_artifact`—mapped to API/services | Stable HTTP and artifact contracts | With MCP auth plus the presigned byte-transfer target, a client uploads/completes without REST credentials and reads results solely through bounded MCP chunks; contract/auth tests pass |
@@ -875,29 +878,34 @@ Never train directly from mutable production tables. Materialize versioned datas
 
 ## 11. Data implementation
 
-### 11.1 Phase 0 tables
+The released Registry Alpha schema is the migration baseline, not a parallel subsystem. Every follow-on migration extends its tenant, capability, job, run, attempt, event, artifact, idempotency, and audit rows in place; the names below distinguish genuinely new tables from extensions to that existing authority.
+
+### 11.1 Phase 0 tables and extensions
 
 - `task_types`, `task_type_versions`
 - `benchmark_suites`, `benchmark_suite_versions`
-- `benchmark_cases`, `benchmark_case_versions`, `benchmark_case_assets`
-- `capabilities`, `capability_versions`, `capability_task_claims`
+- `benchmark_cases`, `benchmark_case_versions`, `benchmark_case_assets`, including frozen repository/archetype-lineage graph provenance and `correlation_cluster_id`
+- `capability_task_claims` plus additive evaluation metadata on the existing `capabilities` and `capability_versions` rows
 - `deployments`, `deployment_health_snapshots`
-- `evaluation_runs`, `evaluation_attempts`, `evaluation_results`, `grader_results`
+- `evaluation_runs`, `evaluation_attempts`, `evaluation_results`, `grader_results`; Phase 0 first adds/backfills `run_kind=direct` on existing Registry rows, then writes evaluation executions as `run_kind=evaluation` and references those authoritative `runs`/`run_attempts` rows rather than duplicating dispatch state
 - `routing_models`, `routing_model_versions`
 - `routing_decisions`, `routing_candidates`, `routing_feature_snapshots`
-- `artifacts`
+- references to the existing immutable `artifacts` rows; no evaluation-specific artifact store
 
-### 11.2 Phase 1 additions
+### 11.2 Phase 1 additions and in-place run-ledger migration
 
-- `users`, `workspaces`, `workspace_memberships`, `api_credentials`
+- `api_credentials`; the existing `users`, `workspaces`, and `workspace_memberships` remain canonical
 - `permission_grants`, `workspace_policies`
 - `task_instances`
-- `invocations`, `invocation_attempts`, `invocation_events`, `invocation_artifacts`
-- `artifact_uploads`, `artifact_versions`, `artifact_access_grants`
+- the additive `routed` value for the existing `run_kind` constraint, nullable `routing_decision_id`/`task_instance_id`, and routing lineage on existing `runs`
+- additive provider deployment, parent-attempt, execution-disposition, and fallback lineage on existing `run_attempts`
+- new routed/fallback event kinds in existing `run_events`; event ordering and projection replay remain one stream per run
+- `run_artifacts` as a role-qualified link to existing immutable `artifacts`; `artifact_uploads` for ingestion; existing `artifact_access_grants` remain canonical
 - `outcome_evidence`, `outcome_labels`, `outcome_label_history`
-- `idempotency_records`
 - `provider_usage_records`
-- `audit_events`
+- extensions to existing `idempotency_records` and `audit_events`; no second idempotency or audit ledger
+
+The Phase 0 rolling migration first adds nullable `run_kind`, deploys readers/workers that treat null legacy rows as direct and leave unknown kinds non-dispatchable, backfills Registry rows with `direct`, and only then validates the `direct|evaluation` constraint and enables evaluation writers. Phase 1 uses the same expand/contract sequence to add nullable routing columns and the `routed` allowed value; routed creation writes `run_kind=routed` and its routing foreign key into the same transaction/ledger. Existing run IDs, attempts, events, artifacts, lifecycle projections, idempotency records, and API results are never copied or renamed. Mixed direct/evaluation/routed queries, cancellation, event replay, retention, and rollback use the same repositories and role filters. Rollback first disables new evaluation/routed creation and their workers; down-level readers leave unknown kinds queryable but non-dispatchable rather than misclassifying them. Columns or allowed values are not removed until the compatibility window and rollback evidence close.
 
 ### 11.3 Data rules
 
@@ -961,6 +969,7 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 
 - manifest and API schema validation;
 - taxonomy and feature extraction;
+- deterministic correlation-component construction and leakage checks across repository and cross-repository mutation/archetype lineages;
 - filter reason codes and deterministic tie-breaking;
 - state transitions;
 - grader matching and thresholds;
@@ -979,6 +988,8 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 ### Integration
 
 - PostgreSQL transactions and migrations;
+- G1 sizing/analysis fixtures prove repository-only and archetype-only resampling are rejected and the frozen composite cluster preserves every linked case in each draw;
+- upgrades from a populated Registry Alpha ledger preserve direct run IDs/events/attempts, safely introduce direct/evaluation/routed `run_kind` values, and support role-filtered mixed-ledger query, cancellation, retention, rollback, and projection replay without copying into parallel tables;
 - object upload/download authorization;
 - idempotency replay lookup across HMAC-key rotation and fail-closed behavior when a retired key required for lookup is unavailable;
 - durable job recovery;
@@ -1177,7 +1188,7 @@ Public packages must not import private packages or require private data to run 
 | Risk | Early signal | Mitigation |
 |---|---|---|
 | No exploitable capability heterogeneity in the initial corpus | Oracle headroom is small | Ship the static quality policy, keep task-aware routing in shadow, revise task segments/features/candidates, and continue collecting outcomes |
-| Router overfits benchmark | Validation gains disappear on grouped test | Grouped splits, hidden test, preregistration, versioned analysis |
+| Router overfits benchmark | Validation gains disappear on composite-cluster test | Frozen repository-plus-archetype-lineage components, hidden test, preregistration, versioned analysis |
 | Review labels are subjective | Low reviewer agreement and high adjudication | Narrow defect definitions; prefer seeded defects; report ambiguity |
 | Swift/iOS infrastructure blocks reproducibility | Xcode/macOS queue and version failures | Make source review authoritative; retain an SPM subset; keep optional Xcode evidence in a separate macOS stratum and budget |
 | Provider/model drift invalidates results | Same version changes over time | Record timestamp/config, monitor sentinels, rerun anchors, flag unpinned sources |
@@ -1229,6 +1240,7 @@ ADRs 1–9 block authoritative benchmark runs and task-aware activation, but not
 - an authorized HTTP client or MCP-authenticated control-plane client can ingest and complete a repository snapshot and diff and receive finalized workspace-scoped `artifact://` identifiers pinned to immutable object versions without REST credentials in the MCP path;
 - an MCP-only result client can retrieve permitted text/JSON or bounded binary chunks through `read_artifact` using its MCP session, while HTTP clients use subject-bound short-lived access and neither path receives object-store credentials;
 - an authorized HTTP or MCP client can route and execute a supported task idempotently;
+- direct and routed executions share the upgraded Registry `runs`/attempt/event ledger and canonical public Run resource with no parallel invocation tables;
 - the exact decision, version, attempts, costs, artifacts, and evidence are traceable;
 - evidence-gated fallback and provider disablement work under fault injection, while uncertain fenced execution never falls back;
 - outcome coverage and trust are measurable;
@@ -1255,7 +1267,7 @@ This schedule starts only after Milestone 1 satisfies its release definition of 
 
 ### Days 3–5
 
-- Preregister the quality-first objective, observed cost-ratio and one-sided upper-bound guardrail, zero-success handling, success definition, baselines, split, and statistics.
+- Preregister the quality-first objective, observed cost-ratio and one-sided upper-bound guardrail, zero-success handling, success definition, baselines, frozen correlation-cluster graph/split, and statistics.
 - Extend the Registry Alpha workspace, CI, PostgreSQL, object storage, migrations, and test conventions for evaluation data.
 - Implement manifest/task schemas and the provider adapter contract.
 - Produce the first ten gold benchmark cases and grader golden tests.
