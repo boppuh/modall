@@ -173,7 +173,7 @@ Proceed to the full experiment only when:
 
 ### Gate G1 — task-aware policy activation
 
-Enable task-aware selection in the live request path only when, on the fresh universally eligible G1 activation holdout, the quality-first policy produces at least 5 percentage points higher task success than the strongest static capability, with no more than 20% higher cost per successful task. A paired bootstrap over tasks must show a 95% confidence interval that excludes no improvement in task success. Before freezing or executing that holdout, preregister a simulation-based power analysis using the exact paired, repository-grouped resampling procedure, observed group-size distribution, and a conservative calibration-derived bound on candidate discordance. The holdout must provide at least 90% power for that confidence-interval test to detect a true five-percentage-point lift; the observed five-point threshold remains a separate activation requirement. If the available corpus is smaller than the calculated sample, expand it or keep task-aware routing in shadow mode. This holdout contains no case whose candidate outputs or labels were revealed in the initial calibration report.
+Enable task-aware selection in the live request path only when, on the fresh universally eligible G1 activation holdout, the quality-first policy produces at least 5 percentage points higher task success than the strongest static capability, with no more than 20% higher cost per successful task. A paired, repository-grouped bootstrap that resamples repositories and preserves paired task results within each sampled repository must show a 95% confidence interval that excludes no improvement in task success. Before freezing or executing that holdout, preregister a simulation-based power analysis using that exact resampling procedure, observed group-size distribution, and a conservative calibration-derived bound on candidate discordance. The holdout must provide at least 90% power for that confidence-interval test to detect a true five-percentage-point lift; the observed five-point threshold remains a separate activation requirement. If the available corpus is smaller than the calculated sample, expand it or keep task-aware routing in shadow mode. This holdout contains no case whose candidate outputs or labels were revealed in the initial calibration report.
 
 A value-oriented policy should still be reported as secondary analysis, including whether it achieves at least 20% lower cost per successful task while remaining non-inferior within a 2 percentage-point success margin. It cannot substitute for the quality-first activation gate. Report all baselines and all attempted policy variants, including failures. If G1 does not pass, the closed alpha uses the strongest eligible static quality policy while task-aware decisions run in shadow mode.
 
@@ -650,7 +650,7 @@ Report:
 - controlled-model, differentiated-capability, and combined-cohort routing results;
 - an ablation showing the incremental lift from adding differentiated capabilities to the controlled model set;
 - universal and private-stratum results reported separately, with candidate eligibility made explicit;
-- bootstrap confidence intervals grouped by task;
+- paired bootstrap confidence intervals grouped by repository, with paired task results and nested stochastic reruns preserved within each resampled repository;
 - sensitivity to policy weights and missing features;
 - oracle headroom;
 - train/validation/test divergence;
@@ -670,7 +670,7 @@ The final report is generated from committed result snapshots and a versioned an
 | P0-05 Adapter SDK | Common adapter protocol and eight candidates | Contract suite passes; policy-permitted raw artifacts are quarantined/restricted and normalized outputs retained | Backend/AI |
 | P0-06 Graders | Deterministic matching and adjudication queue | Golden tests include empty-label clean cases and false-positive failures; rerun agreement >=98%; versioned rules | Evaluation |
 | P0-07 Router V0 | Filter/rank/reason implementation | Deterministic replay from snapshots; no hidden data access | Backend/data |
-| P0-08 Analysis | Baseline comparison and confidence intervals | Reproducible report; paired grouped bootstrap; sensitivity analysis | Data/full-stack |
+| P0-08 Analysis | Baseline comparison and confidence intervals | Reproducible report; the same paired repository-grouped bootstrap used for G1 sizing and activation; sensitivity analysis | Data/full-stack |
 | P0-09 Policy decision | Written static-versus-task-aware release review | Evidence, limitations, shadow plan, and policy recommendation signed off | Tech/product leads |
 
 ### 8.9 Post-registry Phase 0 schedule

@@ -178,8 +178,8 @@ Internal admins and operators who understand that MCP tools may read or mutate e
 
 1. Operator chooses an enabled capability version.
 2. UI presents its schema and a JSON arguments editor.
-3. UI calls the non-dispatching run-preflight API; the API validates and authorizes the exact request and returns a canonical confirmation summary plus a short-lived token bound to its request hash, actor, workspace, capability version, connection configuration, discovery snapshot, and policy version.
-4. Operator confirms; the run API requires that token, revalidates all mutable policy and lifecycle conditions against the same request, then creates one run and queues it.
+3. UI chooses the prospective run `Idempotency-Key` and calls the non-dispatching run-preflight API; the API validates and authorizes the exact request and returns a canonical confirmation summary plus a short-lived single-use token bound to its request hash, idempotency key, actor, workspace, capability version, connection configuration, discovery snapshot, and policy version.
+4. Operator confirms; in one transaction the run API requires and consumes that token, revalidates all mutable policy and lifecycle conditions against the same request and idempotency key, then creates one run and queues it. Replay with that same idempotency key returns the original run; a different key cannot reuse the confirmation.
 5. Worker calls the bound MCP tool once.
 6. UI shows the terminal result, latency, content metadata, and correlation ID.
 
@@ -221,7 +221,7 @@ Internal admins and operators who understand that MCP tools may read or mutate e
 - A disabled connection and its latest non-superseded capability version can be restored only through Scenario F revalidation and explicit enablement.
 - A run whose declared classification is not allowed by both the global alpha policy and selected connection policy is rejected before enqueue; the worker checks current policy again before dispatch.
 - Sensitive tool output is never stored or displayed inline; scanner failure also fails closed to quarantine.
-- Confirmation uses a non-dispatching authoritative preflight, and run creation rejects expired, mismatched, or stale-lifecycle preflight tokens without enqueueing.
+- Confirmation uses a non-dispatching authoritative preflight; run creation atomically consumes its single-use token with the bound `Idempotency-Key`, returns the original run on same-key replay, and rejects expired, mismatched, reused-with-another-key, or stale-lifecycle tokens without enqueueing.
 - Large and non-text results are read only through authorized, subject-bound, short-lived artifact access to an integrity-checked immutable object version; overwrite and cross-workspace attempts fail closed.
 - A completed run can be diagnosed from the UI without direct database access.
 
@@ -349,6 +349,7 @@ Capability
   -> CapabilityVersion
        -> MCPToolBinding
             server_connection_id
+            server_connection_version_id
             discovery_snapshot_id
             remote_tool_name
             input_schema
@@ -364,7 +365,7 @@ For `v0.1.0`, one discovered MCP tool maps to one logical capability scoped to i
 - IDs are UUIDv7 or another sortable opaque identifier; slugs are mutable aliases.
 - Normalize JSON deterministically before hashing.
 - A discovery snapshot digest covers server identity, negotiated protocol, advertised capabilities, complete tool pages, and relevant extensions.
-- Tool version digest covers tool name, title, description, annotations, input schema, output schema, server binding, and an attested remote implementation revision when one is available.
+- Tool version digest covers tool name, title, description, annotations, input schema, output schema, exact `server_connection_version_id`, discovery snapshot, and an attested remote implementation revision when one is available. Credential rotation or another material connection-version change therefore creates a distinct pending capability version even when the advertised tools are byte-identical.
 - Any digest change creates a new immutable version.
 - Operator metadata such as local tags does not create a protocol version; it is separately audited.
 - Refresh never overwrites a prior snapshot or version.
@@ -489,11 +490,12 @@ The official MCP Registry is in preview, so its adapter is treated as an unrelia
 | `discovery_snapshots` | Immutable normalized and sanitized discovery result | Append-only |
 | `capabilities` | Stable logical tool identity | Mutable display metadata |
 | `capability_versions` | Immutable discovered tool version | Append-only |
-| `mcp_tool_bindings` | Version-to-server/tool binding | Immutable |
+| `mcp_tool_bindings` | Version-to-exact-server-connection-version/snapshot/tool binding | Immutable |
 | `jobs` | Durable worker coordination | State machine |
 | `runs` | Operator-requested invocation | Append/supersede status |
 | `run_attempts` | Exact dispatch attempt, receipt, and output-scan decision | Append-only events/status |
 | `run_events` | Timeline and state-transition evidence | Append-only |
+| `run_preflights` | Request hash, prospective run idempotency key, authorization/lifecycle snapshot, expiry, and atomic consumption lineage | Append/consume-once |
 | `artifacts` | Content-addressed large result metadata pinned to an immutable object version and digest | Append-only |
 | `artifact_access_grants` | Short-lived, subject-bound viewer/download authorization | Expiring append-only |
 | `idempotency_records` | Request deduplication | Expiring immutable result |
@@ -504,6 +506,7 @@ The official MCP Registry is in preview, so its adapter is treated as an unrelia
 - Every tenant-owned row carries `workspace_id` and is checked by repository methods.
 - A capability version digest is unique within its logical capability.
 - A discovery snapshot digest is unique within a server connection.
+- Every MCP tool binding references the exact `server_connection_version_id`; that identifier participates in the capability-version digest even when a discovery snapshot is deduplicated.
 - A run references one immutable capability version and server-connection version. Its credential-binding version is nullable for unauthenticated servers and exact when credentials are used.
 - Every run attempt persists its pre-send dispatch fence, exact input digest, nullable credential-binding version, optional provider receipt, reconciliation state, output classification, scan status, and content digest.
 - State transitions use compare-and-set version columns or explicit row locks.
@@ -557,14 +560,14 @@ Connection endpoint and credential changes create a new audited connection confi
 
 ### 8.4 Runs
 
-- `POST /v1/run-preflights` — perform authoritative validation and authorization without creating or enqueueing a run; return a canonical confirmation summary and short-lived request-bound token. This non-mutating `POST` does not need an idempotency key.
-- `POST /v1/runs` — validate the preflight token against an identical request, recheck current authorization, policy, connection, snapshot, and capability state, then create and enqueue an invocation; requires a declared data classification and returns `202`.
+- `POST /v1/run-preflights` — perform authoritative validation and authorization without creating or enqueueing a run; accept the prospective run `Idempotency-Key` and return a canonical confirmation summary plus a short-lived, single-use token bound to that key and the exact request. The preflight call itself is non-mutating and does not need a separate idempotency key.
+- `POST /v1/runs` — validate the preflight token against an identical request and `Idempotency-Key`, recheck current authorization, policy, connection, snapshot, and capability state, then atomically consume the preflight while creating the idempotency record and invocation; requires a declared data classification and returns `202`. Same-key replay returns the original run, while token reuse with any different key fails without enqueue.
 - `GET /v1/runs` — filter by status, capability, connection, actor, and time.
 - `GET /v1/runs/{id}` — immutable request plus current status and result metadata.
 - `GET /v1/runs/{id}/events` — ordered diagnostic timeline.
 - `POST /v1/runs/{id}/cancel` — best-effort cancel before or during supported execution.
 
-All identity-scoped run responses set `Cache-Control: no-store`. Frontend query keys include the authenticated subject and workspace IDs, and the client clears all identity-scoped query data on logout, token-subject change, or workspace change.
+All identity-scoped responses set `Cache-Control: no-store`. `GET /v1/session` and identity-scoped responses expose an `authorization_epoch` derived from the active token claims, workspace membership/role mapping, and deployment-policy revision. Frontend query keys include subject, workspace, and this epoch; cached tenant data is never rendered until the current session check succeeds, and authorization context has a 60-second maximum freshness before tenant content is hidden pending refresh. The client purges all identity-scoped query data on logout, token refresh, subject/workspace/epoch change, visibility regain with a stale session check, or any `401`/`403`. OIDC claim changes and deployment membership/role changes increment or replace the epoch so the next response or session refresh invalidates the prior cache.
 
 ### 8.5 Artifacts
 
@@ -679,7 +682,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 |---|---|---:|---|---|
 | E1-T1 | Implement UUID, time, actor, and state-machine primitives | S | E0 | Unit and serialization tests pass |
 | E1-T2 | Create workspace, user, membership, and role migrations/repositories | M | E0 | Cross-workspace repository tests fail closed |
-| E1-T3 | Implement OIDC validation and local development principal | M | E1-T2 | Invalid issuer/audience/signature tests fail closed |
+| E1-T3 | Implement OIDC validation, authorization epochs, and local development principal | M | E1-T2 | Invalid issuer/audience/signature tests fail closed; claim, membership, role, and deployment-policy changes advance the effective epoch |
 | E1-T4 | Implement append-only audit service and middleware | M | E1-T1, E1-T2 | All listed control actions emit actor-attributed events |
 | E1-T5 | Add secret-reference abstraction and one deployment adapter | M | E1-T2 | API never accepts or returns stored secret values |
 
@@ -693,7 +696,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 | E2-T2 | Implement server connection configuration and lifecycle | M | E1 | Invalid transitions are rejected atomically |
 | E2-T3 | Implement canonical JSON normalization and snapshot hashing | M | E0 | Golden cross-process digests are stable |
 | E2-T4 | Implement sanitized discovery snapshot persistence | M | E2-T2, E2-T3 | Duplicate snapshot is deduplicated; old data immutable; secret/token/cookie/PII fixtures never persist unsanitized |
-| E2-T5 | Implement capability, version, MCP binding, and remote-identity-assurance models | L | E2-T4 | Schema or attested implementation-revision drift produces a new version; unverified remotes are labeled and excluded from authoritative evidence |
+| E2-T5 | Implement capability, version, exact connection-version MCP binding, and remote-identity-assurance models | L | E2-T4 | Schema, connection-version, or attested implementation-revision drift produces a new version; identical tools after credential rotation materialize without digest collision; unverified remotes are excluded from authoritative evidence |
 | E2-T6 | Implement enable/disable, unavailable/superseded, safe re-enable, and material-change review policy | M | E2-T5, E1-T4 | Disabled, disappeared, stale-configuration, and unreviewed bindings cannot run; only a current non-superseded binding can be re-enabled |
 
 ### E3 — MCP client and discovery
@@ -729,7 +732,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 |---|---|---:|---|---|
 | E5-T1 | Implement leased PostgreSQL job queue, heartbeat, and dispatch-fence-aware recovery | L | E1 | Lease recovery redispatches only unfenced attempts |
 | E5-T2 | Implement run, attempt, event, receipt/reconciliation, output-scan, and immutable artifact/access-grant models | L | E1, E2-T5 | Every terminal, indeterminate, quarantined, and artifact-access state has complete lineage; credentials are optional but exactly versioned when present |
-| E5-T3 | Implement idempotent run creation, role authorization, and fail-closed classification policy | M | E5-T2, E1 | Duplicate keys return one run; disallowed classifications never enqueue |
+| E5-T3 | Implement single-use preflight consumption, idempotent run creation, role authorization, and fail-closed classification policy | M | E5-T2, E1 | Preflight consumption and run/idempotency creation are atomic; same-key replay returns one run, while another key or disallowed classification never enqueues |
 | E5-T4 | Implement JSON Schema input validation with resource bounds | M | E2-T5 | Invalid and pathological schemas fail safely |
 | E5-T5 | Implement MCP tool dispatch, dispatch-time policy recheck, deadline, and cancellation | L | E3, E5-T1, E5-T2 | Success, policy-change, error, timeout, cancel, and worker-loss tests pass |
 | E5-T6 | Implement durable pre-send dispatch fence, indeterminate reconciliation, and no-retry policy | M | E5-T5 | Crash tests before send, after send, and before response persistence never duplicate a fenced call |
@@ -754,7 +757,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 
 | ID | Task | Size | Depends on | Acceptance |
 |---|---|---:|---|---|
-| E7-T1 | Build app shell, navigation, auth boundary, and identity/workspace-partitioned query cache | M | E0, E1-T3 | Roles pass; logout or identity/workspace change clears scoped cache data |
+| E7-T1 | Build app shell, navigation, auth boundary, and subject/workspace/authorization-epoch-partitioned query cache | M | E0, E1-T3 | Tenant content hides after 60 seconds without session refresh; logout, refresh, claims/role/membership/epoch change, visibility recheck, and `401`/`403` purge identity-scoped cache before stale data renders |
 | E7-T2 | Build overview and shared status components | M | E7-T1 | Empty, loading, stale, and degraded states covered |
 | E7-T3 | Build official-registry search/import flow | M | E6-T2, E7-T1 | Remote and catalog-only states are distinct |
 | E7-T4 | Build connection list/create/detail/refresh/disable/re-enable flows | L | E6-T3, E7-T1 | Scenarios A and F pass in Playwright |
@@ -793,11 +796,11 @@ PRs should be vertically reviewable, generally stay below roughly 600 changed im
 | 05 | `feat(registry): add entries connections and immutable snapshots` | Core registry migrations, repositories, lifecycle, canonical hashing | 03, 04 | Versioning golden tests |
 | 06 | `test(mcp): add dual-era conformance fixture servers` | Modern/legacy fixtures, paging, auth, drift, errors, schema limits | 02 | Fixture contract suite |
 | 07 | `feat(mcp): connect and discover remote Streamable HTTP servers` | SDK wrapper, negotiation, safe transport, paginated tools, health | 05, 06 | Both protocol eras and SSRF suite |
-| 08 | `feat(registry): materialize capability versions from discovery` | Capability/version/binding models, drift/disappearance policy, enable/disable | 05, 07 | Drift, disappearance, and endpoint-change E2E tests |
+| 08 | `feat(registry): materialize capability versions from discovery` | Capability/version/exact-connection-version binding models, drift/disappearance policy, enable/disable | 05, 07 | Drift, disappearance, endpoint-change, and credential-rotation E2E tests |
 | 09 | `feat(catalog): search and import official registry entries` | Upstream adapter, cache, import, provenance, catalog-only state | 05 | Recorded upstream contract tests |
 | 10 | `feat(jobs): add durable jobs and run ledger` | Leases, events, attempts, idempotency, artifact metadata | 03, 04, 08 | Crash-recovery test |
 | 11 | `feat(invocation): execute MCP tools with bounded results` | Validation, dispatch, deadlines, cancellation, indeterminate state, immutable artifacts | 07, 10 | Invocation fault and artifact-integrity suites |
-| 12 | `feat(api): expose registry capability and run APIs` | REST resources, run preflight, artifact access, filters, errors, generated frontend client | 08–11 | OpenAPI and API E2E suite |
+| 12 | `feat(api): expose registry capability and run APIs` | REST resources, single-use run preflight, artifact access, auth epochs, filters, errors, generated frontend client | 08–11 | OpenAPI and API E2E suite |
 | 13 | `feat(web): add operator shell discovery and server flows` | Auth shell, overview, upstream search/import, connection screens | 04, 12 | Playwright scenarios A/B under the admin/operator role split |
 | 14 | `feat(web): add capability catalog playground and runs` | Version detail, JSON editor, preflight confirmation, safe artifact access, run polling/timeline | 11–13 | Playwright scenarios C–E |
 | 15 | `feat(ops): add telemetry limits retention and security hardening` | OTel, metrics, CSP, rate/concurrency limits, deletion jobs, worker isolation | 11–14 | Security, worker-isolation, and trace gates |
@@ -862,10 +865,10 @@ PR-01 decisions
 - dispatch-fence crashes before send, after send, after receipt, and before response persistence;
 - object-store authorization and deletion;
 - secret retrieval without disclosure;
-- OIDC claim and role enforcement;
-- identity/workspace cache partitioning, no-store responses, and logout/workspace-change clearing;
+- OIDC claim and role enforcement with authorization-epoch changes for claim, membership, role, and deployment-policy revisions;
+- subject/workspace/authorization-epoch cache partitioning, no-store responses, and purge on logout, token refresh, authorization change/failure, visibility recheck, and workspace change;
 - audit completeness;
-- connection refresh and schema drift;
+- connection refresh, schema drift, and byte-identical discovery after endpoint or credential rotation without capability-version collision;
 - circuit breaker and scheduled health probes.
 
 ### 12.4 End-to-end tests
