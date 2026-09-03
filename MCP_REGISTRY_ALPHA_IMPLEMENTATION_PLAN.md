@@ -69,7 +69,7 @@ Importing a catalog entry never makes code executable, installs a package, or ma
 
 #### Registry
 
-- One workspace with invited operator access; all tenant-owned rows carry `workspace_id`.
+- One workspace with pre-provisioned operator access; all tenant-owned rows carry `workspace_id`.
 - Manual registration of remote MCP Streamable HTTP endpoints.
 - Read-only search of the official MCP Registry through an isolated upstream adapter.
 - On-demand import of official `server.json` metadata with source and version provenance.
@@ -114,7 +114,7 @@ Importing a catalog entry never makes code executable, installs a package, or ma
 #### Operations and security
 
 - OIDC authentication in deployed environments and an explicit local-development auth mode.
-- Admin, operator, and viewer roles; no self-service invitations in this release.
+- Admin, operator, and viewer roles mapped from deployment configuration or OIDC groups; membership and invitation management are not exposed in this release.
 - Secret references backed by the deployment secret manager; secrets never returned by APIs.
 - Server-side SSRF and redirect protection.
 - Structured audit events for registration, credential changes, enable/disable, refresh, and invocation.
@@ -209,6 +209,7 @@ An internal operator who understands that MCP tools may read or mutate external 
 - An imported official-registry entry retains its upstream name, version, source URL, and raw metadata digest.
 - Catalog-only entries cannot be invoked.
 - Disabled connections and capabilities cannot create new runs.
+- A run whose declared classification is not allowed by both the global alpha policy and selected connection policy is rejected before enqueue; the worker checks current policy again before dispatch.
 - A completed run can be diagnosed from the UI without direct database access.
 
 ### 4.2 Reliability gate
@@ -356,8 +357,11 @@ For `v0.1.0`, one discovered MCP tool maps to one logical capability scoped to i
 
 ```text
 Server connection
-draft -> verifying -> active <-> degraded -> disabled
-                    \---------------------> disabled
+draft -> verifying
+verifying -> active | degraded | disabled
+active <-> degraded
+active | degraded -> disabled
+disabled -> verifying
 
 Capability version
 pending_review -> enabled -> superseded
@@ -368,11 +372,13 @@ Run
 queued -> running -> succeeded
    |         |-----> failed
    |         |-----> timed_out
+   |         |-----> cancelled
    |         |-----> indeterminate
    +---------------> cancelled
 ```
 
 - A disabled or degraded connection does not accept new dispatches; operators may allow read-only refresh while degraded.
+- Re-enabling a disabled connection transitions it to `verifying`, never directly to `active`; successful protocol negotiation and discovery are required before it can serve new runs.
 - Refresh matches tools by connection plus remote tool name. A disappeared tool becomes unavailable.
 - Any changed tool digest creates a new `pending_review` version. The old binding becomes `superseded` and historical-only because a remote MCP endpoint cannot guarantee that its prior implementation remains addressable.
 - A run queued against a version that becomes disabled or superseded before dispatch is cancelled with a stable reason code.
@@ -405,7 +411,9 @@ queued -> running -> succeeded
 ### 6.3 Invocation
 
 - Validate the operator arguments against the immutable stored schema before dispatch.
+- Accept only `public` or `non_confidential` declarations in the alpha. Before enqueue, authorize the declared classification against the global alpha policy and the selected server-connection version; fail closed when policy is missing or ambiguous.
 - Revalidate against the live tool name and connection state immediately before the call.
+- Before dispatch, re-evaluate the run classification against the current connection policy so a policy restriction applied while a job was queued takes effect immediately.
 - Attach trace context using the current protocol's supported metadata.
 - Default deadline: 120 seconds; configurable downward per connection or capability.
 - Default maximum input: 256 KiB serialized JSON.
@@ -503,7 +511,7 @@ The OpenAPI document is generated from the backend schema source and checked int
 - `PATCH /v1/server-connections/{id}` — edit operator metadata and safe policy fields.
 - `POST /v1/server-connections/{id}/verify` — enqueue verification and discovery.
 - `POST /v1/server-connections/{id}/refresh` — enqueue discovery refresh.
-- `POST /v1/server-connections/{id}/enable` — allow eligible capabilities to be enabled.
+- `POST /v1/server-connections/{id}/enable` — move a disabled connection to verification; only successful rediscovery returns it to active service.
 - `POST /v1/server-connections/{id}/disable` — prevent new discovery execution and runs.
 
 Connection endpoint and credential changes create a new audited connection configuration version even if the public connection ID remains stable.
@@ -550,9 +558,10 @@ Stable codes cover authentication, authorization, endpoint policy, upstream regi
 | Import public catalog metadata | No | Yes | Yes |
 | Verify, refresh, enable, disable, invoke, and cancel | No | Yes | Yes |
 | Create or edit endpoints, credential references, and connection policy | No | No | Yes |
-| Manage workspace role assignments | No | No | Yes |
 
 The API enforces this matrix independently of UI visibility. Every mutating action records the actor, reason where required, request correlation ID, and before/after configuration version identifiers.
+
+Workspace membership and role mappings are provisioned outside the application through deployment configuration or OIDC groups. Their administration remains explicitly out of scope; the identity provider or configuration delivery system is the authoritative audit source for changes.
 
 ---
 
@@ -678,9 +687,9 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 |---|---|---:|---|---|
 | E5-T1 | Implement leased PostgreSQL job queue, heartbeat, and recovery | L | E1 | Worker restart and lease-expiry tests pass |
 | E5-T2 | Implement run, attempt, event, and artifact models | L | E1, E2-T5 | Every terminal state has complete lineage |
-| E5-T3 | Implement idempotent run creation and authorization | M | E5-T2, E1 | Duplicate keys return one run |
+| E5-T3 | Implement idempotent run creation, role authorization, and fail-closed classification policy | M | E5-T2, E1 | Duplicate keys return one run; disallowed classifications never enqueue |
 | E5-T4 | Implement JSON Schema input validation with resource bounds | M | E2-T5 | Invalid and pathological schemas fail safely |
-| E5-T5 | Implement MCP tool dispatch, deadline, and cancellation | L | E3, E5-T1, E5-T2 | Success, error, timeout, cancel, and worker-loss tests pass |
+| E5-T5 | Implement MCP tool dispatch, dispatch-time policy recheck, deadline, and cancellation | L | E3, E5-T1, E5-T2 | Success, policy-change, error, timeout, cancel, and worker-loss tests pass |
 | E5-T6 | Implement indeterminate-execution handling and retry policy | M | E5-T5 | Ambiguous dispatch is never automatically repeated |
 | E5-T7 | Normalize result content and store bounded artifacts | L | E5-T2, E0-T4 | Content-type, size, and active-content tests pass |
 
@@ -816,7 +825,7 @@ PR-01 decisions
 
 - Scenarios A–E from Section 3.
 - Viewer cannot mutate; operator can operate; admin can change credentials/policy.
-- Disabled connection blocks invocation already queued but not dispatched.
+- Disabled, superseded, or newly policy-incompatible connection blocks invocation already queued but not dispatched.
 - Exact historical capability schema remains visible after refresh.
 - Upstream Registry outage does not impair existing connection browsing or invocation.
 - Oversized and active-content responses are safely contained.
@@ -837,11 +846,12 @@ PR-01 decisions
 
 ### 13.1 Estimate
 
-Expected effort: **14–18 person-weeks**, including stabilization and release evidence.
+Expected effort: **45–55 person-weeks**, including stabilization and release evidence. This range reconciles the 56-task inventory with the declared S/M/L day ranges; it assumes some implementation and validation work within a task overlaps, but it does not treat parallel work as reducing total effort.
 
-- Three focused engineers: approximately five to six elapsed weeks.
-- Two focused engineers: approximately eight to ten elapsed weeks.
-- One engineer: approximately fourteen to eighteen elapsed weeks.
+- Four focused engineers: approximately fourteen to seventeen elapsed weeks.
+- Three focused engineers: approximately nineteen to twenty-three elapsed weeks.
+- Two focused engineers: approximately twenty-eight to thirty-five elapsed weeks.
+- One engineer: approximately forty-five to fifty-five elapsed weeks.
 
 These estimates assume managed OIDC, PostgreSQL, object storage, and secret storage are available. Building identity or secret infrastructure, supporting interactive OAuth, or enabling hosted `stdio` materially expands the estimate.
 
@@ -853,15 +863,15 @@ These estimates assume managed OIDC, PostgreSQL, object storage, and secret stor
 - **Part-time security reviewer:** threat model, SSRF, credentials, content isolation, release gate.
 - **Product owner:** scope decisions and acceptance of workflows.
 
-### 13.3 Five-week target sequence
+### 13.3 Target sequence for three focused engineers
 
-| Week | Target |
+| Elapsed weeks | Target |
 |---|---|
-| 1 | ADRs, scaffolding, CI, local infrastructure, identity skeleton, fixture servers |
-| 2 | Registry persistence, safe MCP transport, protocol negotiation, upstream adapter |
-| 3 | Capability materialization, durable jobs, invocation ledger, API contracts |
-| 4 | Invocation completion, server/capability UI, playground, run timeline |
-| 5 | Security hardening, telemetry, accessibility, failure testing, runbooks, release qualification |
+| 1–3 | ADRs, scaffolding, CI, local infrastructure, identity skeleton, fixture servers |
+| 4–7 | Registry persistence, safe MCP transport, protocol negotiation, upstream adapter |
+| 8–12 | Capability materialization, durable jobs, invocation ledger, API contracts |
+| 13–17 | Invocation completion, server/capability UI, playground, run timeline |
+| 18–22 | Security hardening, telemetry, accessibility, failure testing, runbooks, release qualification |
 
 The schedule is capability-based, not date-based. If the critical path slips, cut upstream search polish or overview analytics before cutting version lineage, SSRF defenses, run durability, or release tests.
 

@@ -389,7 +389,7 @@ Adapter-specific raw output is stored as a restricted artifact. The normalized o
 
 A routing decision is append-only and includes:
 
-- request and organization policy IDs;
+- request and workspace policy IDs;
 - taxonomy and feature-extractor versions;
 - all discovered candidates;
 - filter pass/fail results and reason codes;
@@ -462,8 +462,9 @@ Each case contains:
 
 - immutable source snapshot and license/provenance;
 - base/head revisions and canonical diff;
-- one or more labeled concurrency defects;
+- zero or more labeled concurrency defects plus an explicit `clean` or `defective` case kind;
 - allowed category aliases and span tolerances;
+- case-specific false-positive limit, with clean cases defaulting to zero;
 - task dimensions computable before execution;
 - pinned Swift toolchain and environment image/runner label;
 - public setup metadata and private grading metadata;
@@ -548,7 +549,9 @@ Match findings to labels using category compatibility, file identity, and config
 - provider-reported and platform-calculated cost;
 - optional patch build/test result.
 
-A task-level binary success should be fixed before the hidden run. Recommended definition:
+A task-level binary success should be fixed before the hidden run. Defective and clean cases use separate, total definitions so recall is never evaluated with a zero denominator.
+
+For a defective case:
 
 ```text
 all critical defects found
@@ -557,6 +560,16 @@ AND no more than the case-specific false-positive limit
 AND output schema valid
 AND no execution failure
 ```
+
+For a clean case:
+
+```text
+false-positive count <= the case-specific limit (default 0)
+AND output schema valid
+AND no execution failure
+```
+
+A false positive is a reportable candidate finding that does not match a label after the frozen matching and adjudication rules. Weighted and critical-defect recall are recorded as not applicable for clean cases, not as zero or one. Aggregate recall is calculated over defective cases; the overall task-success rate includes both clean and defective cases.
 
 Use a blinded human adjudication queue only for ambiguous matches. Freeze adjudication rules before test evaluation and report human-review frequency.
 
@@ -632,18 +645,18 @@ The final report is generated from committed result snapshots and a versioned an
 | P0-04 Harness | Durable execution and artifact capture | Resumable, idempotent matrix runs; pinned environment; per-run cost/latency | Platform |
 | P0-04A Budget pilot | Separate 20-PR candidate matrix and frozen limits | Pilot cases excluded from official splits; cost/latency/resource ceilings approved before official matrix | Platform/product |
 | P0-05 Adapter SDK | Common adapter protocol and eight candidates | Contract suite passes; raw and normalized outputs retained | Backend/AI |
-| P0-06 Graders | Deterministic matching and adjudication queue | Golden tests; rerun agreement >=98%; versioned rules | Evaluation |
+| P0-06 Graders | Deterministic matching and adjudication queue | Golden tests include empty-label clean cases and false-positive failures; rerun agreement >=98%; versioned rules | Evaluation |
 | P0-07 Router V0 | Filter/rank/reason implementation | Deterministic replay from snapshots; no hidden data access | Backend/data |
 | P0-08 Analysis | Baseline comparison and confidence intervals | Reproducible report; paired grouped bootstrap; sensitivity analysis | Data/full-stack |
 | P0-09 Policy decision | Written static-versus-task-aware release review | Evidence, limitations, shadow plan, and policy recommendation signed off | Tech/product leads |
 
-### 8.9 Phase 0 schedule
+### 8.9 Post-registry Phase 0 schedule
 
-With the assumed team, target three elapsed weeks for initial calibration while Phase 1 foundations start in parallel:
+This schedule begins only after the MCP Registry Alpha release gate passes. With the assumed follow-on team, target three elapsed weeks for initial calibration while the post-registry Phase 1 routing foundations start in parallel:
 
-- **Week 1:** ADRs, contracts, corpus rubric, harness skeleton, API/persistence scaffold
-- **Week 2:** first adapters and graders, 20-PR budget pilot, frozen execution limits, first 40–50 cases
-- **Week 3:** all eight adapters, 75–100-case initial matrix, strongest static policy, router shadow policy, reproducible report
+- **Post-registry Week 1:** ADRs, contracts, corpus rubric, harness skeleton, extensions to the existing API/persistence foundation
+- **Post-registry Week 2:** first adapters and graders, 20-PR budget pilot, frozen execution limits, first 40–50 cases
+- **Post-registry Week 3:** all eight adapters, 75–100-case initial matrix, strongest static policy, router shadow policy, reproducible report
 
 After Week 3, corpus expansion and shadow evaluation continue as an evaluation workstream alongside productization. Reach 200–300 cases and pass G1 before task-aware selection controls live traffic. Do not compress by weakening holdout, label quality, or reproducibility requirements.
 
@@ -651,7 +664,7 @@ After Week 3, corpus expansion and shadow evaluation continue as an evaluation w
 
 ## 9. Phase 1 closed-alpha implementation
 
-Begin Phase 1 foundations in Week 1 rather than waiting for G1. Target closed-alpha readiness eight to ten weeks from kickoff, with evaluation and product streams running in parallel. G1 determines whether the alpha uses task-aware selection or the strongest eligible static policy; G2 determines whether the alpha is operationally safe to release.
+Begin Phase 1 routing foundations in post-registry Week 1 rather than waiting for G1. This work reuses the Registry Alpha identity, capability, invocation, artifact, job, and audit modules. Target router closed-alpha readiness eight to ten weeks after the Registry Alpha gate, with evaluation and routing streams running in parallel. G1 determines whether the router alpha uses task-aware selection or the strongest eligible static policy; G2 determines whether that alpha is operationally safe to release.
 
 ### 9.1 API and identity
 
@@ -664,12 +677,12 @@ Endpoints:
 - `POST /v1/invocations/{id}/outcomes` — attributable outcome evidence
 - `GET /v1/capabilities/{id}/versions/{version}` — exact public/authorized metadata
 
-Generate OpenAPI and SDK types from one schema source. Require an `Idempotency-Key` for mutating client calls. Scope API credentials to organization, environment, action, and optional spending/quota policy. All errors use stable machine codes and correlation IDs.
+Generate OpenAPI and SDK types from one schema source. Require an `Idempotency-Key` for mutating client calls. Scope API credentials to workspace, environment, action, and optional spending/quota policy. All errors use stable machine codes and correlation IDs.
 
 Acceptance criteria:
 
 - identical idempotent requests produce one route/invocation;
-- cross-organization access tests fail closed;
+- cross-workspace access tests fail closed;
 - p95 route-only latency is under 300 ms with 100 curated versions, excluding external task-artifact upload;
 - compatibility and constraint failures expose safe reason codes without private provider data.
 
@@ -682,7 +695,7 @@ Acceptance criteria:
 - every response references an immutable router version and feature snapshot;
 - route replay returns the same selection from the same candidate/health snapshot;
 - no-candidate and all-candidates-unhealthy paths are tested;
-- provider disable, organization denylist, and policy rollback take effect without deployment.
+- provider disable, workspace denylist, and policy rollback take effect without deployment.
 
 ### 9.3 Invocation and provider runtime
 
@@ -715,7 +728,7 @@ Build only internal workflows needed to operate the alpha:
 - provider health and disable control;
 - benchmark and production performance kept in separate views;
 - outcome coverage and dispute queue;
-- organization quotas and access;
+- workspace quotas and access;
 - router/capability version rollback.
 
 ### 9.6 Phase 1 epics
@@ -819,8 +832,8 @@ Never train directly from mutable production tables. Materialize versioned datas
 
 ### 11.2 Phase 1 additions
 
-- `users`, `organizations`, `organization_members`, `api_credentials`
-- `permission_grants`, `organization_policies`
+- `users`, `workspaces`, `workspace_memberships`, `api_credentials`
+- `permission_grants`, `workspace_policies`
 - `task_instances`
 - `invocations`, `invocation_attempts`, `invocation_events`, `invocation_artifacts`
 - `outcome_evidence`, `outcome_labels`, `outcome_label_history`
@@ -835,7 +848,7 @@ Never train directly from mutable production tables. Materialize versioned datas
 - Timestamps are UTC and server-assigned for security/audit events.
 - Money is stored as integer minor units plus currency, never floating point.
 - Raw request, source, model transcript, and output retention is separate from operational metadata retention.
-- Sensitive artifact access uses short-lived signed URLs and organization authorization.
+- Sensitive artifact access uses short-lived signed URLs and workspace authorization.
 - JSONB is appropriate for immutable snapshots and provider-specific metadata; fields used in constraints, joins, or policy are normalized and indexed.
 - Schema migrations are forward-compatible during rolling deployment and tested against production-sized fixtures.
 
@@ -869,7 +882,7 @@ The initial threat model must cover malicious repository content, prompt injecti
 - request, artifact, and output size limits;
 - outbound destination allowlists for workers;
 - signed integration webhooks with replay protection;
-- organization-level data retention and deletion jobs;
+- workspace-level data retention and deletion jobs;
 - per-credential rate, concurrency, and spend/quota controls;
 - prompt-injection-aware agent instructions and separation of code data from platform control messages.
 
@@ -918,7 +931,7 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 - route-only success and no-candidate paths;
 - run through terminal result and outcome;
 - retry, timeout, fallback, cancellation, and provider degradation;
-- organization isolation;
+- workspace isolation;
 - version disable and router rollback.
 
 ### Non-functional
@@ -929,7 +942,7 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 - static analysis, dependency scanning, secret scanning, and periodic penetration testing;
 - cost-budget tests that prevent unbounded retry or ensemble execution.
 
-No merge is releasable with failing migration, contract, replay, or organization-isolation tests.
+No merge is releasable with failing migration, contract, replay, or workspace-isolation tests.
 
 ---
 
@@ -947,7 +960,7 @@ Required metrics:
 
 - route latency and candidate counts;
 - filter counts by reason;
-- selections by capability version and organization;
+- selections by capability version and workspace;
 - predicted/estimated versus actual cost and latency;
 - provider success, timeout, schema failure, and circuit state;
 - task success, cost per success, retry, fallback, and correction;
@@ -996,9 +1009,9 @@ Capability disable, deployment disable, and router rollback must be separate con
 4. **Internal execution:** route curated, non-sensitive tasks with the static policy until G1 passes, then canary task-aware selection.
 5. **Design-partner shadowing:** collect feature distributions and eligibility without executing.
 6. **Design-partner canary:** enable low-risk repositories and strict quotas for 5% of eligible tasks.
-7. **Closed alpha:** expand by organization and task segment when success, cost, outcome coverage, and incident metrics remain within bounds.
+7. **Closed alpha:** expand by workspace and task segment when success, cost, outcome coverage, and incident metrics remain within bounds.
 
-Use feature flags at organization, task type, policy, capability version, and deployment levels. Every rollout step has an owner, start/end time, comparison cohort, abort threshold, and rollback procedure.
+Use feature flags at workspace, task type, policy, capability version, and deployment levels. Every rollout step has an owner, start/end time, comparison cohort, abort threshold, and rollback procedure.
 
 ---
 
@@ -1119,7 +1132,7 @@ Create and approve these ADRs in Week 1:
 8. V0 score normalization, shrinkage, and tie-breaking
 9. Outcome evidence hierarchy and label supersession
 10. Data classification, retention, and deletion
-11. Authentication and organization isolation for the alpha
+11. Authentication and workspace isolation for the alpha
 12. Build-versus-buy decision for sandboxing before third-party execution
 
 ADRs 1–9 block authoritative benchmark runs and task-aware activation, but not API/runtime scaffolding. ADRs 10–11 block the closed alpha. ADR 12 blocks hosted third-party publishing, not earlier phases.
@@ -1152,7 +1165,9 @@ Creator, payment, Studio, and learned-routing phases are complete only when thei
 
 ---
 
-## 23. First ten working days
+## 23. First ten working days after Registry Alpha
+
+This schedule starts only after Milestone 1 satisfies its release definition of done. Registry implementation follows `MCP_REGISTRY_ALPHA_IMPLEMENTATION_PLAN.md`; no corpus, model-adapter, or routing work below is on the Milestone 1 critical path.
 
 ### Days 1–2
 
@@ -1165,13 +1180,13 @@ Creator, payment, Studio, and learned-routing phases are complete only when thei
 ### Days 3–5
 
 - Preregister the quality-first objective, cost guardrail, success definition, baselines, split, and statistics.
-- Stand up Python workspace, CI, PostgreSQL, object storage emulator, migrations, and test conventions.
+- Extend the Registry Alpha workspace, CI, PostgreSQL, object storage, migrations, and test conventions for evaluation data.
 - Implement manifest/task schemas and the provider adapter contract.
 - Produce the first ten gold benchmark cases and grader golden tests.
 
 ### Days 6–8
 
-- Implement job leasing, heartbeats, retries, and artifact capture.
+- Extend the existing job leasing, heartbeat, retry-policy, and artifact modules for benchmark execution.
 - Integrate the strong-default and low-cost model capabilities.
 - Add static-analysis and hybrid adapter skeletons.
 - Run reproducibility and reviewer-agreement checks on the pilot corpus.
