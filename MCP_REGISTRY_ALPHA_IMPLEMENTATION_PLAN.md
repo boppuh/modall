@@ -199,7 +199,7 @@ Internal admins and operators who understand that MCP tools may read or mutate e
 
 #### Scenario F — recover a disabled connection and capability
 
-1. Operator disables a connection during an incident.
+1. Operator disables a connection during an incident; in the same transaction Modall marks every currently enabled capability version on that connection `disabled` with reason `connection_disabled` and cancels its undispatched runs.
 2. Operator requests re-enable; the connection moves to `verifying` rather than directly to `active`.
 3. Successful fresh discovery returns the connection to `active`.
 4. Operator explicitly re-enables the latest non-superseded capability version after confirming that its stored binding still matches the current discovery snapshot.
@@ -228,7 +228,7 @@ Internal admins and operators who understand that MCP tools may read or mutate e
 ### 4.2 Reliability gate
 
 - API or worker restart does not lose queued runs.
-- Duplicate `Idempotency-Key` requests create one run.
+- Duplicate or delayed `Idempotency-Key` requests never create a second mutation, including after the full replay response expires.
 - No automatic retry occurs after upstream execution becomes ambiguous.
 - Discovery retries are bounded and use backoff because discovery is read-only.
 - Per-server concurrency and circuit-breaker behavior pass fault-injection tests.
@@ -238,8 +238,8 @@ Internal admins and operators who understand that MCP tools may read or mutate e
 
 - Cross-workspace authorization tests exist even though the alpha seeds one workspace.
 - Endpoint validation blocks loopback, link-local, cloud metadata, and private-network destinations unless deployment configuration explicitly allows them.
-- Redirect destinations and resolved IPs are revalidated to mitigate SSRF and DNS rebinding.
-- Credential-bearing requests require a valid HTTPS certificate. HTTPS-to-HTTP redirects are rejected; redirects are bounded and must remain on the credential-bound origin. Scheme, host, port, certificate, and resolved IP are revalidated before each request, and credentials are retrieved and attached only after those checks pass.
+- Every request and redirect hop is resolved through the policy resolver, rejects any forbidden answer, and binds the transport dial to a selected validated IP without a second library DNS lookup while preserving the original hostname for TLS SNI, certificate verification, and the HTTP `Host`. Connection-pool reuse is allowed only for that validated origin/address tuple; new dials repeat resolution and policy checks. An enforced egress policy provides a second boundary against DNS rebinding and TOCTOU races.
+- Credential-bearing requests require a valid HTTPS certificate. HTTPS-to-HTTP redirects are rejected; redirects are bounded and must remain on the credential-bound origin. Scheme, host, port, certificate, and the dialed validated IP are checked for every hop, and credentials are retrieved and attached only after those checks pass.
 - Credentials, authorization headers, and secret values do not appear in logs, traces, API responses, or audit payloads.
 - Hosted `stdio` execution and automatic package installation are impossible through the API.
 - Tool input/output, JSON Schema depth, artifact count, artifact size, and total response size are bounded.
@@ -401,6 +401,7 @@ queued -> running -> succeeded
 
 - A disabled or degraded connection does not accept new dispatches; operators may allow read-only refresh while degraded.
 - Re-enabling a disabled connection transitions it to `verifying`, never directly to `active`; successful protocol negotiation and discovery are required before it can serve new runs.
+- Disabling a connection atomically transitions every currently `enabled` capability version on that connection to `disabled` with reason `connection_disabled` and cancels queued runs before setting the connection `disabled`. Connection reverification never clears those capability states; each intended version requires a later explicit enable action.
 - A material connection change, including endpoint or credential binding, atomically creates a connection-configuration version, moves the connection to `verifying`, suspends new dispatch, and transitions every capability version tied to the prior configuration to `superseded`. Fresh verification and complete discovery are required before the connection can become `active`; versions materialized against the new configuration remain `pending_review` until explicitly enabled.
 - Refresh matches tools by connection plus remote tool name. When a complete current snapshot omits a previously present tool, its version transitions to persisted `unavailable`, becomes non-invocable immediately, and is rejected before enqueue. If the exact same digest and binding later reappear in a fresh complete snapshot, the unavailable version may return only to `pending_review`; a changed digest creates a new `pending_review` version and supersedes the old one.
 - Any changed tool digest creates a new `pending_review` version. The old binding becomes `superseded` and historical-only because a remote MCP endpoint cannot guarantee that its prior implementation remains addressable.
@@ -445,12 +446,14 @@ queued -> running -> succeeded
 - Default maximum input: 256 KiB serialized JSON.
 - Default maximum result: 1 MiB inline only after content scanning; bounded larger content becomes an artifact up to the configured hard limit.
 - Stream every result first into a bounded ephemeral quarantine buffer. Before database persistence, artifact publication, or UI/API display, scan text, structured content, and decoded artifact metadata for tokens, credentials, secrets, and policy-defined PII.
-- Clean results may be persisted under the declared run classification. A sensitive match upgrades the output classification and is never stored inline: store it only as an encrypted restricted artifact when policy explicitly permits, otherwise discard the raw value after retaining a digest and audit event. Return only a redacted placeholder and safe metadata to ordinary run APIs.
+- Clean, output-schema-valid results may be persisted under the declared run classification. A sensitive match upgrades the output classification and is never stored inline: store it only as an encrypted restricted artifact when policy explicitly permits, otherwise discard the raw value after retaining a digest and audit event. Return only a redacted placeholder and safe metadata to ordinary run APIs.
+- Before any result is published or the run is marked successful, validate structured content against the immutable capability version's advertised output schema with the same bounded depth, reference, size, and processing-time controls used for input. A missing advertised output schema is recorded as `not_declared`; a declared-schema violation fails the attempt/run with stable code `mcp_output_schema_invalid`, keeps raw content in the quarantine policy path only, and excludes the result from success or evidence aggregation.
 - A scanner error or unsupported content type fails closed to quarantine. Neither raw nor quarantined content enters logs, traces, browser caches, or ordinary snapshot/run responses.
 - Never follow resource links or render active content automatically.
 - Persist an attempt-level `dispatch_fenced` state before any upstream network send. The alpha never automatically retries a fenced tool call, regardless of tool annotations.
 - If dispatch may have reached the server but no definitive response is available, mark the attempt `indeterminate`.
 - Lease recovery may redispatch only an attempt still durably in `created`. A recovered `dispatch_fenced` or `awaiting_result` attempt without a durable result records any provider receipt and transitions to `indeterminate` with `reconciliation_required`.
+- Cancellation before the dispatch fence can terminally cancel the attempt. After the fence, record `cancellation_requested` and propagate best effort, but transition to `cancelled` only when definitive upstream evidence proves the operation did not execute or was fully rolled back. Otherwise continue awaiting a definitive result; a lost acknowledgement or deadline with uncertain execution becomes `indeterminate` with `reconciliation_required`, never a successful cancellation.
 
 ### 6.4 Unsupported features
 
@@ -485,7 +488,7 @@ The official MCP Registry is in preview, so its adapter is treated as an unrelia
 | `server_connections` | Stable connection identity and current status | Audited mutable |
 | `server_connection_versions` | Immutable endpoint, policy, environment, and optional credential binding snapshot | Append-only |
 | `credential_bindings` | Stable identity for an opaque secret-manager reference | Audited mutable |
-| `credential_binding_versions` | Immutable secret reference and rotation lineage, never secret value | Append-only |
+| `credential_binding_versions` | Immutable secret-manager provider/resource/version reference and rotation lineage, never secret value or mutable alias | Append-only |
 | `connection_status_events` | Connection lifecycle history | Append-only |
 | `discovery_snapshots` | Immutable normalized and sanitized discovery result | Append-only |
 | `capabilities` | Stable logical tool identity | Mutable display metadata |
@@ -495,10 +498,10 @@ The official MCP Registry is in preview, so its adapter is treated as an unrelia
 | `runs` | Operator-requested invocation | Append/supersede status |
 | `run_attempts` | Exact dispatch attempt, receipt, and output-scan decision | Append-only events/status |
 | `run_events` | Timeline and state-transition evidence | Append-only |
-| `run_preflights` | Request hash, prospective run idempotency key, authorization/lifecycle snapshot, expiry, and atomic consumption lineage | Append/consume-once |
+| `consumed_run_preflights` | Unique signed-token JTI, request hash, prospective run idempotency key, and run lineage inserted atomically with run creation | Append-only |
 | `artifacts` | Content-addressed large result metadata pinned to an immutable object version and digest | Append-only |
 | `artifact_access_grants` | Short-lived, subject-bound viewer/download authorization | Expiring append-only |
-| `idempotency_records` | Request deduplication | Expiring immutable result |
+| `idempotency_records` | Full replay response plus workspace-lifetime HMAC-keyed tombstone, request hash, and original resource/result reference | Response expires; tombstone append-only until workspace hard deletion |
 | `audit_events` | Actor-attributed control-plane activity | Append-only |
 
 ### 7.2 Required constraints
@@ -508,6 +511,7 @@ The official MCP Registry is in preview, so its adapter is treated as an unrelia
 - A discovery snapshot digest is unique within a server connection.
 - Every MCP tool binding references the exact `server_connection_version_id`; that identifier participates in the capability-version digest even when a discovery snapshot is deduplicated.
 - A run references one immutable capability version and server-connection version. Its credential-binding version is nullable for unauthenticated servers and exact when credentials are used.
+- A credential-binding version names an immutable provider-native secret version or generation. Mutable aliases such as `current` are resolved only in the control plane; a changed resolved version creates a new credential binding and server-connection version and triggers the material-change reverification flow. Workers request only the pinned secret version and fail closed if it is unavailable.
 - Every run attempt persists its pre-send dispatch fence, exact input digest, nullable credential-binding version, optional provider receipt, reconciliation state, output classification, scan status, and content digest.
 - State transitions use compare-and-set version columns or explicit row locks.
 - Audit, snapshot, run event, and attempt tables cannot be updated through application repositories except to append terminal metadata defined by their state machine.
@@ -520,6 +524,7 @@ The official MCP Registry is in preview, so its adapter is treated as an unrelia
 - Tool inputs and outputs: 14 days by default.
 - Discovery metadata and immutable schemas: retained for the life of referenced runs.
 - Large artifacts: 14 days, then tombstoned with digest and deletion event retained.
+- Idempotency replay payloads follow the referenced resource retention, but the HMAC-keyed key/request-hash tombstone remains for the workspace lifetime so an expired response cannot authorize the same mutation again.
 - Authentication and secret material: never copied into run or discovery storage.
 
 Retention jobs and deletion audit events are required for release even though the alpha accepts only non-confidential test data.
@@ -528,7 +533,7 @@ Retention jobs and deletion audit events are required for release even though th
 
 ## 8. HTTP API contract
 
-The OpenAPI document is generated from the backend schema source and checked into release artifacts. Every mutating `POST`—including resource creation, import, verification, refresh, enable/disable, run creation, and cancellation—requires an `Idempotency-Key` scoped to workspace, actor, method, and route. The same key and request hash returns the original result; reuse with a different hash returns `409 idempotency_conflict`. Mutable `PATCH` operations require an entity version or `If-Match` precondition.
+The OpenAPI document is generated from the backend schema source and checked into release artifacts. Every mutating `POST`—including resource creation, import, verification, refresh, enable/disable, run creation, and cancellation—requires an `Idempotency-Key` scoped to workspace, actor, method, and route. The same key and request hash returns the original result while its replay representation exists. Reuse with a different hash returns `409 idempotency_conflict`; after the full response/resource representation expires, same-hash reuse returns `409 idempotency_replay_expired` with safe original-reference metadata and never executes again. A minimal HMAC-keyed tombstone enforces this for the workspace lifetime. Mutable `PATCH` operations require an entity version or `If-Match` precondition.
 
 ### 8.1 Upstream catalog
 
@@ -546,9 +551,11 @@ The OpenAPI document is generated from the backend schema source and checked int
 - `POST /v1/server-connections/{id}/verify` — enqueue verification and discovery.
 - `POST /v1/server-connections/{id}/refresh` — enqueue discovery refresh.
 - `POST /v1/server-connections/{id}/enable` — move a disabled connection to verification; only successful rediscovery returns it to active service.
-- `POST /v1/server-connections/{id}/disable` — prevent new discovery execution and runs.
+- `POST /v1/server-connections/{id}/disable` — atomically prevent new discovery execution/runs, disable currently enabled capability versions with reason `connection_disabled`, and cancel undispatched runs.
 
 Connection endpoint and credential changes create a new audited connection configuration version even if the public connection ID remains stable. Applying one is a material lifecycle transition: it suspends dispatch, moves the connection to `verifying`, supersedes prior-configuration capability versions, and requires fresh complete discovery plus explicit capability review before new runs.
+
+Credential configuration persists only a provider, resource identifier, and immutable provider-native version/generation. If an Admin supplies an alias such as `current`, the control plane resolves and displays its immutable version before applying the configuration; later alias movement has no effect until it is detected and applied as a new credential-binding and connection version through the same material-change flow.
 
 ### 8.3 Capabilities
 
@@ -560,7 +567,7 @@ Connection endpoint and credential changes create a new audited connection confi
 
 ### 8.4 Runs
 
-- `POST /v1/run-preflights` — perform authoritative validation and authorization without creating or enqueueing a run; accept the prospective run `Idempotency-Key` and return a canonical confirmation summary plus a short-lived, single-use token bound to that key and the exact request. The preflight call itself is non-mutating and does not need a separate idempotency key.
+- `POST /v1/run-preflights` — perform authoritative validation and authorization without creating, persisting, or enqueueing a run; accept the prospective run `Idempotency-Key` and return a canonical confirmation summary plus a signed short-lived token with a unique JTI bound to that key and the exact request. The stateless preflight call itself is non-mutating and does not need a separate idempotency key, but it rejects a proposed key with an expired-response tombstone so it cannot authorize a second run.
 - `POST /v1/runs` — validate the preflight token against an identical request and `Idempotency-Key`, recheck current authorization, policy, connection, snapshot, and capability state, then atomically consume the preflight while creating the idempotency record and invocation; requires a declared data classification and returns `202`. Same-key replay returns the original run, while token reuse with any different key fails without enqueue.
 - `GET /v1/runs` — filter by status, capability, connection, actor, and time.
 - `GET /v1/runs/{id}` — immutable request plus current status and result metadata.
@@ -572,8 +579,8 @@ All identity-scoped responses set `Cache-Control: no-store`. `GET /v1/session` a
 ### 8.5 Artifacts
 
 - `GET /v1/artifacts/{id}` — return authorized metadata, classification, immutable object-version/digest identity, readiness, and permitted viewer modes.
-- `POST /v1/artifacts/{id}/access-grants` — after current subject, workspace, classification, and retention checks, mint an audited, short-lived, single-use grant bound to that subject and exact artifact version.
-- `GET /v1/artifacts/{id}/content?grant=` — require normal authentication plus the bound grant and stream only the exact immutable object version through the isolated artifact path. Text and JSON are parsed, escaped, and rendered in the sandboxed viewer; every other type is attachment-only. Responses use `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, restrictive sandbox CSP, and same-origin/cross-origin isolation headers.
+- `POST /v1/artifacts/{id}/access-grants` — after current subject, workspace, classification, and retention checks, mint an audited, short-lived grant bound to that subject and exact artifact version. The grant is not sufficient without the same authenticated subject and expires quickly, allowing content retrieval to remain a safe `GET`.
+- `GET /v1/artifacts/{id}/content` — require normal authentication plus the bound grant in the redacted `X-Modall-Artifact-Grant` header, never a URL, and stream only the exact immutable object version through the isolated artifact path. Text and JSON are parsed, escaped, and rendered in the sandboxed viewer; every other type is attachment-only. Ingress, proxy, application, and trace configuration must redact the grant header. Responses use `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, restrictive sandbox CSP, and same-origin/cross-origin isolation headers.
 
 Result publication writes to a unique non-overwritable object key or a versioned bucket and records the exact storage version plus content digest. A finalized artifact never follows a mutable key: reads verify the pinned version and digest (or a storage checksum with equivalent integrity) before release, and a still-valid upload credential cannot replace finalized content.
 
@@ -593,7 +600,7 @@ Every error includes:
 }
 ```
 
-Stable codes cover authentication, authorization, endpoint policy, upstream registry availability, protocol negotiation, schema validation, connection state, capability state, timeout, cancellation, response limit, unsupported feature, upstream error, and indeterminate execution.
+Stable codes cover authentication, authorization, endpoint policy, upstream registry availability, protocol negotiation, input/output schema validation, connection state, capability state, timeout, cancellation, response limit, idempotency conflict/expired replay, unsupported feature, upstream error, and indeterminate execution.
 
 ### 8.7 Alpha role matrix
 
@@ -684,7 +691,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 | E1-T2 | Create workspace, user, membership, and role migrations/repositories | M | E0 | Cross-workspace repository tests fail closed |
 | E1-T3 | Implement OIDC validation, authorization epochs, and local development principal | M | E1-T2 | Invalid issuer/audience/signature tests fail closed; claim, membership, role, and deployment-policy changes advance the effective epoch |
 | E1-T4 | Implement append-only audit service and middleware | M | E1-T1, E1-T2 | All listed control actions emit actor-attributed events |
-| E1-T5 | Add secret-reference abstraction and one deployment adapter | M | E1-T2 | API never accepts or returns stored secret values |
+| E1-T5 | Add immutable-version secret-reference abstraction and one deployment adapter | M | E1-T2 | Workers fetch only provider-native pinned versions; alias rotation creates audited binding/connection versions and mutable aliases never enter immutable bindings |
 
 ### E2 — Registry domain and versioning
 
@@ -697,7 +704,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 | E2-T3 | Implement canonical JSON normalization and snapshot hashing | M | E0 | Golden cross-process digests are stable |
 | E2-T4 | Implement sanitized discovery snapshot persistence | M | E2-T2, E2-T3 | Duplicate snapshot is deduplicated; old data immutable; secret/token/cookie/PII fixtures never persist unsanitized |
 | E2-T5 | Implement capability, version, exact connection-version MCP binding, and remote-identity-assurance models | L | E2-T4 | Schema, connection-version, or attested implementation-revision drift produces a new version; identical tools after credential rotation materialize without digest collision; unverified remotes are excluded from authoritative evidence |
-| E2-T6 | Implement enable/disable, unavailable/superseded, safe re-enable, and material-change review policy | M | E2-T5, E1-T4 | Disabled, disappeared, stale-configuration, and unreviewed bindings cannot run; only a current non-superseded binding can be re-enabled |
+| E2-T6 | Implement connection-disable overlay, capability enable/disable, unavailable/superseded, safe re-enable, and material-change review policy | M | E2-T5, E1-T4 | Connection disable atomically disables enabled versions; recovery never auto-enables them; disappeared, stale, and unreviewed bindings cannot run |
 
 ### E3 — MCP client and discovery
 
@@ -707,7 +714,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 |---|---|---:|---|---|
 | E3-T1 | Build MCP fixture servers for both supported protocol eras | M | E0 | Fixtures expose paging, schema drift, errors, and auth |
 | E3-T2 | Wrap the official SDK behind `McpClientAdapter` | M | E0 | No SDK type appears in domain or public API contracts |
-| E3-T3 | Implement safe Streamable HTTP transport factory | L | E1-T5 | All credential-bearing endpoints and redirects enforce HTTPS; SSRF, redirect downgrade, DNS, certificate, and secret tests pass |
+| E3-T3 | Implement safe Streamable HTTP transport factory with policy-resolved address pinning | L | E1-T5 | Every request/redirect dials only its validated IP while preserving TLS hostname checks; rebinding, SSRF, downgrade, certificate, pooling, and secret tests pass |
 | E3-T4 | Implement negotiation/discovery and normalized server metadata | M | E3-T2, E3-T3 | Both target revisions pass contract tests |
 | E3-T5 | Implement paginated tool discovery and schema bounds | L | E3-T4 | 100-tool, cursor-loop, duplicate, and schema-bomb tests pass |
 | E3-T6 | Implement cache hints, refresh scheduling, explicit cache bypass, and change handling | M | E3-T5, E2 | Scheduled reads respect expiry; operator refresh proves a fresh complete listing, persists disappeared tools as unavailable, and never mutates snapshots |
@@ -734,9 +741,9 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 | E5-T2 | Implement run, attempt, event, receipt/reconciliation, output-scan, and immutable artifact/access-grant models | L | E1, E2-T5 | Every terminal, indeterminate, quarantined, and artifact-access state has complete lineage; credentials are optional but exactly versioned when present |
 | E5-T3 | Implement single-use preflight consumption, idempotent run creation, role authorization, and fail-closed classification policy | M | E5-T2, E1 | Preflight consumption and run/idempotency creation are atomic; same-key replay returns one run, while another key or disallowed classification never enqueues |
 | E5-T4 | Implement JSON Schema input validation with resource bounds | M | E2-T5 | Invalid and pathological schemas fail safely |
-| E5-T5 | Implement MCP tool dispatch, dispatch-time policy recheck, deadline, and cancellation | L | E3, E5-T1, E5-T2 | Success, policy-change, error, timeout, cancel, and worker-loss tests pass |
+| E5-T5 | Implement MCP tool dispatch, dispatch-time policy recheck, deadline, and evidence-aware cancellation | L | E3, E5-T1, E5-T2 | Pre-fence cancel, confirmed post-fence cancel, unsupported/lost cancel, timeout, policy-change, and worker-loss tests preserve execution truth |
 | E5-T6 | Implement durable pre-send dispatch fence, indeterminate reconciliation, and no-retry policy | M | E5-T5 | Crash tests before send, after send, and before response persistence never duplicate a fenced call |
-| E5-T7 | Quarantine, classify, normalize, redact, and store bounded result content | L | E5-T2, E0-T4 | Secret/token/credential/PII, scanner-failure, content-type, size, and active-content tests prove no sensitive inline storage or display |
+| E5-T7 | Quarantine, classify, bounded-output-schema-validate, normalize, redact, and store result content | L | E5-T2, E0-T4 | Schema-invalid output fails with a stable code and never counts as success; secret/PII, scanner-failure, size, type, and active-content tests prove safe publication |
 
 ### E6 — Control-plane API
 
@@ -744,7 +751,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 
 | ID | Task | Size | Depends on | Acceptance |
 |---|---|---:|---|---|
-| E6-T1 | Establish error, pagination, filtering, optimistic concurrency, and idempotency conventions | M | E0, E1 | Every mutating POST, including connection creation, passes replay and conflicting-payload idempotency contract tests |
+| E6-T1 | Establish error, pagination, filtering, optimistic concurrency, and durable idempotency conventions | M | E0, E1 | Every mutating POST passes immediate replay, conflicting-payload, expired-response, and workspace-lifetime tombstone tests without duplicate execution |
 | E6-T2 | Implement upstream catalog and import endpoints | M | E4, E6-T1 | Role and degraded-upstream paths pass |
 | E6-T3 | Implement server connection lifecycle endpoints | L | E2, E3, E6-T1 | Create/verify/refresh/disable/re-enable and endpoint-change suspension/reverification flows pass |
 | E6-T4 | Implement capability catalog/version endpoints | M | E2, E6-T1 | Historical versions remain queryable |
@@ -774,7 +781,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 |---|---|---:|---|---|
 | E8-T1 | Complete threat model and abuse-case review | M | E0-T1 | Security owner accepts mitigations or blocks release |
 | E8-T2 | Add request/output limits, rate limits, and concurrency controls | M | E3, E5, E6 | Cost/volume amplification tests pass |
-| E8-T3 | Add CSP, output escaping, subject-bound artifact grants, integrity checks, headers, and download isolation | M | E5-T7, E6-T5, E7 | Overwrite, cross-workspace, expired-grant, and active-content suites pass |
+| E8-T3 | Add CSP, output escaping, subject-bound artifact grants, header redaction, integrity checks, and download isolation | M | E5-T7, E6-T5, E7 | Grants never enter URLs/logs/traces; overwrite, cross-workspace, expired-grant, and active-content suites pass |
 | E8-T4 | Add correlated traces across API, jobs, worker, and MCP | M | E3, E5, E6 | One trace spans request through terminal run |
 | E8-T5 | Add service and product metrics with alert thresholds | M | E8-T4 | Dashboards expose sync, run, error, and queue health |
 | E8-T6 | Implement retention/deletion jobs and audit evidence | M | E2, E5 | Expired test artifacts are deleted and recorded |
@@ -792,15 +799,15 @@ PRs should be vertically reviewable, generally stay below roughly 600 changed im
 | 01 | `docs: lock registry alpha decisions and contracts` | ADRs, scope, state diagrams, initial OpenAPI conventions | — | Architecture review |
 | 02 | `build: scaffold api worker web and CI` | Python/TypeScript workspaces, lockfiles, quality gates, local commands | 01 | Green CI from clean checkout |
 | 03 | `infra: add local postgres object storage and migrations` | Compose stack, health, Alembic harness, backup/restore smoke test | 02 | Clean setup and migration test |
-| 04 | `feat(identity): add workspace roles auth and audit foundation` | OIDC/local auth, workspace repositories, RBAC, audit service | 03 | Authorization matrix |
+| 04 | `feat(identity): add workspace roles auth and audit foundation` | OIDC/local auth, workspace repositories, RBAC, immutable secret-version adapter, audit service | 03 | Authorization and secret-rotation matrix |
 | 05 | `feat(registry): add entries connections and immutable snapshots` | Core registry migrations, repositories, lifecycle, canonical hashing | 03, 04 | Versioning golden tests |
 | 06 | `test(mcp): add dual-era conformance fixture servers` | Modern/legacy fixtures, paging, auth, drift, errors, schema limits | 02 | Fixture contract suite |
-| 07 | `feat(mcp): connect and discover remote Streamable HTTP servers` | SDK wrapper, negotiation, safe transport, paginated tools, health | 05, 06 | Both protocol eras and SSRF suite |
+| 07 | `feat(mcp): connect and discover remote Streamable HTTP servers` | SDK wrapper, negotiation, address-pinned safe transport, paginated tools, health | 05, 06 | Both protocol eras and DNS-rebinding/SSRF suites |
 | 08 | `feat(registry): materialize capability versions from discovery` | Capability/version/exact-connection-version binding models, drift/disappearance policy, enable/disable | 05, 07 | Drift, disappearance, endpoint-change, and credential-rotation E2E tests |
 | 09 | `feat(catalog): search and import official registry entries` | Upstream adapter, cache, import, provenance, catalog-only state | 05 | Recorded upstream contract tests |
 | 10 | `feat(jobs): add durable jobs and run ledger` | Leases, events, attempts, idempotency, artifact metadata | 03, 04, 08 | Crash-recovery test |
-| 11 | `feat(invocation): execute MCP tools with bounded results` | Validation, dispatch, deadlines, cancellation, indeterminate state, immutable artifacts | 07, 10 | Invocation fault and artifact-integrity suites |
-| 12 | `feat(api): expose registry capability and run APIs` | REST resources, single-use run preflight, artifact access, auth epochs, filters, errors, generated frontend client | 08–11 | OpenAPI and API E2E suite |
+| 11 | `feat(invocation): execute MCP tools with bounded results` | Input/output validation, dispatch, evidence-aware cancellation, indeterminate state, immutable artifacts | 07, 10 | Invocation fault, invalid-output, and artifact-integrity suites |
+| 12 | `feat(api): expose registry capability and run APIs` | REST resources, durable idempotency, single-use run preflight, header-based artifact access, auth epochs, generated client | 08–11 | OpenAPI and API E2E suite |
 | 13 | `feat(web): add operator shell discovery and server flows` | Auth shell, overview, upstream search/import, connection screens | 04, 12 | Playwright scenarios A/B under the admin/operator role split |
 | 14 | `feat(web): add capability catalog playground and runs` | Version detail, JSON editor, preflight confirmation, safe artifact access, run polling/timeline | 11–13 | Playwright scenarios C–E |
 | 15 | `feat(ops): add telemetry limits retention and security hardening` | OTel, metrics, CSP, rate/concurrency limits, deletion jobs, worker isolation | 11–14 | Security, worker-isolation, and trace gates |
@@ -853,7 +860,7 @@ PR-01 decisions
 
 - `2026-07-28` discovery and invocation;
 - `2025-11-25` fallback discovery and invocation;
-- pagination, cache hints, tool change, authentication, timeout, and invalid responses;
+- pagination, cache hints, tool change, authentication, timeout, cancellation acknowledgement/loss, and output-schema-invalid responses;
 - official Registry OpenAPI recorded fixtures;
 - generated frontend client against checked OpenAPI;
 - stable public error codes.
@@ -863,12 +870,15 @@ PR-01 decisions
 - PostgreSQL transaction boundaries and migration upgrades;
 - job leasing, worker death, and recovery;
 - dispatch-fence crashes before send, after send, after receipt, and before response persistence;
+- DNS answer changes between validation and dial, including redirects and pooled/new connections;
 - object-store authorization and deletion;
-- secret retrieval without disclosure;
+- immutable-version secret retrieval without disclosure and alias rotation through new binding/connection versions;
 - OIDC claim and role enforcement with authorization-epoch changes for claim, membership, role, and deployment-policy revisions;
 - subject/workspace/authorization-epoch cache partitioning, no-store responses, and purge on logout, token refresh, authorization change/failure, visibility recheck, and workspace change;
 - audit completeness;
 - connection refresh, schema drift, and byte-identical discovery after endpoint or credential rotation without capability-version collision;
+- connection disable atomically disables enabled capabilities and reverification never auto-enables them;
+- replay after full idempotency-response expiry is rejected by the workspace-lifetime tombstone without executing;
 - circuit breaker and scheduled health probes.
 
 ### 12.4 End-to-end tests

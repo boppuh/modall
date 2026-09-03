@@ -372,6 +372,8 @@ The normalized review output is:
     {
       "category": "data_race",
       "severity": "high",
+      "revision": "head",
+      "diff_side": "right",
       "path": "Sources/App/Store.swift",
       "start_line": 42,
       "end_line": 48,
@@ -383,6 +385,8 @@ The normalized review output is:
   "patch": null
 }
 ```
+
+Every finding location is mandatory and revision-aware. `revision` is `base` or `head` and resolves to the corresponding immutable task revision; `diff_side` is respectively `left` or `right`, and `path` plus line coordinates are interpreted in that tree. Deleted-line findings use `base`/`left`; added-line findings use `head`/`right`. Renames and moves use the path on the declared side. Labels use the same convention, and adapters that cannot produce a valid location return invalid output rather than guessing coordinates.
 
 Adapter-specific raw output first enters the Registry Alpha quarantine and classification path. Retain it as an encrypted restricted artifact only when policy allows; ordinary APIs expose only the validated normalized output or a safe quarantine placeholder. Normalization failures count against reliability and are not silently repaired by the platform unless the repair step is declared as part of the capability version.
 
@@ -431,6 +435,8 @@ An attempt failure or timeout does not by itself authorize fallback. The orchest
 Execution status and outcome status are separate projections. Execution reaches a terminal state regardless of whether downstream outcome evidence arrives. At execution completion, an eligible invocation receives an outcome record with `pending` plus a fixed `evidence_due_at`; it transitions to `finalized` when adequate evidence arrives or `unavailable` when the deadline expires. An ineligible invocation receives terminal `not_expected`. Late evidence creates a superseding outcome version without reopening execution state.
 
 Before any provider network send, persist `dispatch_fenced` in the same transaction that records the attempt ownership. Record an evidence-backed execution disposition of `not_executed`, `executed`, or `unknown` separately from transport status. A recovered `created` attempt is safe to dispatch. A recovered `dispatch_fenced` or `awaiting_result` attempt without a durable terminal response has disposition `unknown` and must not be sent again or fall back: persist any available provider receipt and move it to `indeterminate` with `reconciliation_required`. This deliberately prefers manual reconciliation to duplicating an external side effect.
+
+Cancellation is a request event, not proof of execution state. A `created` attempt may become `cancelled` before its dispatch fence. After fencing, emit `cancellation_requested` and propagate best effort, but allow `cancelled` only when definitive provider evidence proves that execution did not occur or was fully rolled back. Otherwise keep awaiting a definitive terminal response; an unsupported request, lost acknowledgement, or deadline with uncertain external execution becomes `indeterminate` with `reconciliation_required`. The parent invocation can be `cancelled` only when every attempt has a definitive non-execution/cancelled disposition.
 
 ### 7.6 Outcome contract and truth hierarchy
 
@@ -561,7 +567,7 @@ Run stochastic capabilities at least three times per task/capability pair. Treat
 
 ### 8.5 Grading
 
-Match findings to labels using category compatibility, file identity, and configured line-span overlap. Record:
+Match findings to labels using category compatibility, declared base/head revision and diff side, file identity in that revision, and configured line-span overlap. Reject inconsistent revision/side pairs before scoring. Record:
 
 - weighted defect recall;
 - precision and false-positive count;
@@ -667,8 +673,8 @@ The final report is generated from committed result snapshots and a versioned an
 | P0-03 Corpus | 75–100-case calibration suite plus an activation benchmark whose first authoring tranche is 200–300 cases and whose final size follows the preregistered power calculation | Initial revealed test is excluded from G1; expanded version passes G0 and reserves a fresh untouched grouped holdout giving the CI test at least 90% power to detect a true five-point lift | Swift/evaluation |
 | P0-04 Harness | Durable execution and artifact capture | Resumable, idempotent matrix runs; pinned environment; per-run cost/latency | Platform |
 | P0-04A Budget pilot | Separate 20-PR candidate matrix and frozen limits | Pilot cases excluded from official splits; cost/latency/resource ceilings approved before official matrix | Platform/product |
-| P0-05 Adapter SDK | Common adapter protocol and eight candidates | Contract suite passes; policy-permitted raw artifacts are quarantined/restricted and normalized outputs retained | Backend/AI |
-| P0-06 Graders | Deterministic matching and adjudication queue | Golden tests include empty-label clean cases and false-positive failures; rerun agreement >=98%; versioned rules | Evaluation |
+| P0-05 Adapter SDK | Common adapter protocol and eight candidates | Contract suite requires base/head revision-aware finding locations; policy-permitted raw artifacts are quarantined/restricted and normalized outputs retained | Backend/AI |
+| P0-06 Graders | Deterministic revision/side-aware matching and adjudication queue | Golden tests cover added, deleted, renamed, and moved lines plus empty-label clean cases and false-positive failures; rerun agreement >=98%; versioned rules | Evaluation |
 | P0-07 Router V0 | Filter/rank/reason implementation | Deterministic replay from snapshots; no hidden data access | Backend/data |
 | P0-08 Analysis | Baseline comparison and confidence intervals | Reproducible report; the same paired repository-grouped bootstrap used for G1 sizing and activation; sensitivity analysis | Data/full-stack |
 | P0-09 Policy decision | Written static-versus-task-aware release review | Evidence, limitations, shadow plan, and policy recommendation signed off | Tech/product leads |
@@ -696,8 +702,8 @@ Endpoints:
 - `POST /v1/artifact-uploads` — authorize metadata and return a short-lived, workspace-scoped, create-only target for a unique object key or storage version
 - `POST /v1/artifact-uploads/{id}/complete` — close the upload, verify the exact storage version's digest, size, content type, and scan status, then mint the authoritative `artifact://` URI
 - `GET /v1/artifacts/{id}` — return authorized metadata, readiness, and exact immutable storage-version/digest identity, never ambient object-store credentials
-- `POST /v1/artifacts/{id}/access-grants` — authorize the current subject, workspace, classification, and retention state, then mint an audited short-lived single-use grant bound to the exact artifact version
-- `GET /v1/artifacts/{id}/content?grant=` — require ordinary authentication plus the subject-bound grant and stream the exact artifact version through an isolated viewer/download path with no-store, nosniff, sandbox CSP, and cross-origin isolation headers
+- `POST /v1/artifacts/{id}/access-grants` — authorize the current subject, workspace, classification, and retention state, then mint an audited short-lived grant bound to that subject and exact artifact version; the grant is insufficient without the same ordinary authentication
+- `GET /v1/artifacts/{id}/content` — require ordinary authentication plus the subject-bound grant in a redacted `X-Modall-Artifact-Grant` header, never a URL, and stream the exact artifact version through an isolated viewer/download path with no-store, nosniff, sandbox CSP, and cross-origin isolation headers
 - `POST /v1/routes` — create and persist a route-only decision
 - `POST /v1/run` — route, authorize, enqueue, and return `202 Accepted`
 - `GET /v1/invocations/{id}` — current state and normalized result metadata
@@ -705,7 +711,7 @@ Endpoints:
 - `POST /v1/invocations/{id}/outcomes` — attributable outcome evidence
 - `GET /v1/capabilities/{id}/versions/{version}` — exact public/authorized metadata
 
-Generate OpenAPI and SDK types from one schema source. Require an `Idempotency-Key` for mutating client calls. Scope API credentials to workspace, environment, action, and optional spending/quota policy. All errors use stable machine codes and correlation IDs.
+Generate OpenAPI and SDK types from one schema source. Require an `Idempotency-Key` for mutating client calls. Retain an HMAC-keyed key/request-hash tombstone for the workspace lifetime: while the replay response exists, same-key/same-hash calls return it; after response expiry they fail with `idempotency_replay_expired`, and a different hash always conflicts, so a delayed retry never executes again. Scope API credentials to workspace, environment, action, and optional spending/quota policy. All errors use stable machine codes and correlation IDs.
 
 Routing and run requests accept only finalized, unexpired artifacts owned by the same workspace and allowed by the request/provider data policy. Each upload uses a unique non-overwritable object key or versioned-bucket write. Completion closes the upload, verifies a client-declared digest and length against the exact storage version, detects archive expansion/path traversal, applies malware and secret policy, and records that immutable storage version plus digest in the authoritative artifact version. Consumption reauthorizes the artifact and reads only that pinned version, verifying its digest or an integrity-equivalent storage checksum; a still-valid upload credential cannot replace finalized content. HTTP/SDK clients upload through the presigned target; the MCP facade exposes `create_artifact_upload` so an agent can obtain the same bounded workflow without direct object-store credentials. Large or retained non-text results use the same immutable artifact and authorized-access contract, so the console never reads object storage directly.
 
@@ -737,7 +743,7 @@ Acceptance criteria:
 
 - worker termination before the dispatch fence safely requeues; termination at or after the fence without a durable result produces `indeterminate` plus `reconciliation_required` rather than an automatic repeat;
 - fault injection covers termination before send, after send, after provider receipt, and before response persistence;
-- deadline and cancellation propagate where the provider supports them;
+- deadline and cancellation propagate where the provider supports them; post-fence cancellation becomes `cancelled` only with definitive non-execution/rollback evidence and otherwise remains awaiting or becomes `indeterminate`;
 - circuit breaker removes a degraded deployment from new candidate snapshots;
 - permitted fallback creates a new child attempt linked to the original invocation and route; fault tests prove that post-fence timeout, lost response, and ambiguous failure paths never fall back.
 
@@ -769,7 +775,7 @@ Build only internal workflows needed to operate the alpha:
 | Epic | Scope | Depends on | Exit condition |
 |---|---|---|---|
 | P1-01 Identity | Workspaces, workspace memberships, API keys, RBAC, audit log | Registry Alpha identity | Authorization test matrix passes |
-| P1-01A Artifacts | Non-overwritable presigned ingestion, completion validation, scanning, immutable workspace artifact URI, and subject-bound read grants | Identity, object storage | Authorized upload-to-route/view contract passes without direct store credentials; overwrite and wrong-version tests fail closed |
+| P1-01A Artifacts | Non-overwritable presigned ingestion, completion validation, scanning, immutable workspace artifact URI, and header-redeemed subject-bound read grants | Identity, object storage | Authorized upload-to-route/view contract passes without direct store credentials or grant material in URLs/logs; overwrite and wrong-version tests fail closed |
 | P1-02 Routing API | `/routes`, schemas, idempotency | P0 router, P1-01A | Replayable decision under latency target |
 | P1-03 Run API | `/run`, job creation, state API | Identity, artifacts, jobs | End-to-end curated invocation passes |
 | P1-04 Runtime | Adapter pools, deadlines, evidence-gated fallback, circuit breakers | P0 adapters | Fault injection proves fallback only after definitive non-execution or tested end-to-end idempotency |
@@ -883,7 +889,8 @@ Never train directly from mutable production tables. Materialize versioned datas
 - Timestamps are UTC and server-assigned for security/audit events.
 - Money is stored as integer minor units plus currency, never floating point.
 - Raw request, source, model transcript, and output retention is separate from operational metadata retention.
-- Sensitive artifact access uses audited, short-lived, single-use grants bound to the authenticated subject, workspace, and exact immutable artifact version; possession does not bypass the ordinary authorization check.
+- Sensitive artifact access uses audited, short-lived grants bound to the authenticated subject, workspace, and exact immutable artifact version; possession does not bypass the ordinary authorization check.
+- Mutating-call idempotency retains a minimal HMAC-keyed key/request-hash tombstone until workspace hard deletion even after the full replay response expires; an old key can never authorize a new mutation.
 - JSONB is appropriate for immutable snapshots and provider-specific metadata; fields used in constraints, joins, or policy are normalized and indexed.
 - Schema migrations are forward-compatible during rolling deployment and tested against production-sized fixtures.
 
@@ -968,9 +975,11 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 ### End to end
 
 - artifact upload, completion, authoritative URI issuance, authorized viewer/download grants, and rejection of unsafe, mutable/overwritten, wrong-version, digest-mismatched, unfinalized, expired, or cross-workspace artifacts;
+- artifact grants are carried only in redacted headers and never appear in URLs, access logs, traces, history, or referrers;
 - route-only success and no-candidate paths;
 - run through terminal result and outcome;
 - retry, timeout, evidence-gated fallback, ambiguous post-fence execution, cancellation, and provider degradation;
+- same-key delayed mutation replay after full response expiry is rejected without execution;
 - workspace isolation;
 - version disable and router rollback.
 
