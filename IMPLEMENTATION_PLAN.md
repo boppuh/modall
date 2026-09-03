@@ -168,11 +168,12 @@ Proceed to the full experiment only when:
 - measured inter-rater agreement reaches at least 0.80 Cohen's kappa on the stratified sample before label freeze; otherwise refine the rubric and expand dual review;
 - train, validation, and hidden test groups are split by source repository and defect family to prevent near-duplicate leakage;
 - the harness reproduces the same deterministic grading result in at least 98% of reruns;
+- every candidate used for authoritative comparison has an immutable platform-controlled version or an attested remote implementation revision; unverified mutable remotes are excluded from G1 evidence;
 - no candidate capability has received hidden labels or hidden-case artifacts.
 
 ### Gate G1 — task-aware policy activation
 
-Enable task-aware selection in the live request path only when, on the locked universally eligible hidden test set, the quality-first policy produces at least 5 percentage points higher task success than the strongest static capability, with no more than 20% higher cost per successful task. A paired bootstrap over tasks must show a 95% confidence interval that excludes no improvement in task success.
+Enable task-aware selection in the live request path only when, on the fresh universally eligible G1 activation holdout, the quality-first policy produces at least 5 percentage points higher task success than the strongest static capability, with no more than 20% higher cost per successful task. A paired bootstrap over tasks must show a 95% confidence interval that excludes no improvement in task success. This holdout contains no case whose candidate outputs or labels were revealed in the initial calibration report.
 
 A value-oriented policy should still be reported as secondary analysis, including whether it achieves at least 20% lower cost per successful task while remaining non-inferior within a 2 percentage-point success margin. It cannot substitute for the quality-first activation gate. Report all baselines and all attempted policy variants, including failures. If G1 does not pass, the closed alpha uses the strongest eligible static quality policy while task-aware decisions run in shadow mode.
 
@@ -383,7 +384,7 @@ The normalized review output is:
 }
 ```
 
-Adapter-specific raw output is stored as a restricted artifact. The normalized output is schema validated. Normalization failures count against reliability and are not silently repaired by the platform unless the repair step is declared as part of the capability version.
+Adapter-specific raw output first enters the Registry Alpha quarantine and classification path. Retain it as an encrypted restricted artifact only when policy allows; ordinary APIs expose only the validated normalized output or a safe quarantine placeholder. Normalization failures count against reliability and are not silently repaired by the platform unless the repair step is declared as part of the capability version.
 
 ### 7.4 Routing decision
 
@@ -407,20 +408,27 @@ The V0 API response calls its quality field `benchmark_success_estimate` and inc
 ```text
 Invocation
 accepted -> queued -> preparing -> running
+accepted | queued | preparing -> cancelled
 running -> fallback_queued -> running
+fallback_queued -> cancelled
 running -> execution_succeeded | execution_failed | execution_timed_out
 running -> cancelled | indeterminate
-any invocation execution-terminal state -> outcome_pending -> outcome_finalized
 
 Attempt
 created -> dispatch_fenced -> awaiting_result
 created -> cancelled
 dispatch_fenced | awaiting_result -> succeeded | failed | timed_out | cancelled | indeterminate
+
+Outcome (orthogonal to invocation execution state)
+not_expected
+pending -> finalized | unavailable
 ```
 
 Every transition is an append-only event guarded by an allowed-transition table. The current state is a materialized projection. Duplicate worker delivery must be safe.
 
-An attempt failure or timeout does not itself finalize the invocation. The orchestrator either enters `fallback_queued` and creates a child attempt linked by `parent_attempt_id`, or—only after fallback is unavailable or exhausted—moves the invocation to the corresponding execution-terminal state. `outcome_pending` is unreachable until the invocation, rather than an individual attempt, is execution-terminal.
+An attempt failure or timeout does not itself finalize the invocation. The orchestrator either enters `fallback_queued` and creates a child attempt linked by `parent_attempt_id`, or—only after fallback is unavailable or exhausted—moves the invocation to the corresponding execution-terminal state.
+
+Execution status and outcome status are separate projections. Execution reaches a terminal state regardless of whether downstream outcome evidence arrives. At execution completion, an eligible invocation receives an outcome record with `pending` plus a fixed `evidence_due_at`; it transitions to `finalized` when adequate evidence arrives or `unavailable` when the deadline expires. An ineligible invocation receives terminal `not_expected`. Late evidence creates a superseding outcome version without reopening execution state.
 
 Before any provider network send, persist `dispatch_fenced` in the same transaction that records the attempt ownership. A recovered `created` attempt is safe to dispatch. A recovered `dispatch_fenced` or `awaiting_result` attempt without a durable terminal response must not be sent again: persist any available provider receipt and move it to `indeterminate` with `reconciliation_required`. This deliberately prefers manual reconciliation to duplicating an external side effect.
 
@@ -461,11 +469,15 @@ For the hidden experiment, set cost and latency ceilings to the observed p95 of 
 
 ### 8.3 Corpus
 
-Start with 75–100 universally eligible, non-confidential tasks to calibrate graders, candidate behavior, feature extraction, and the static production policy. Continue expanding the versioned corpus toward 200–300 cases while the closed-alpha platform is built. Do not activate task-aware routing under G1 with fewer than 200 cases unless an explicit statistical-power review demonstrates adequate power.
+Start with a 75–100-case universally eligible, non-confidential calibration suite to calibrate graders, candidate behavior, feature extraction, and the static production policy. This suite has its own grouped split:
 
 - 60% training
 - 20% validation
-- 20% locked test
+- 20% locked calibration test
+
+The calibration test remains hidden until the initial report, then is permanently marked revealed and cannot contribute to the G1 activation holdout.
+
+Continue expanding to a separate 200–300-case activation benchmark version while the router alpha is built. Reserve at least 20% of that version as a fresh activation holdout drawn from newly added, grouped cases. Freeze its membership and labels before final policy selection; do not run candidates on it or reveal any artifact until the static baseline and task-aware policy are frozen. Previously revealed calibration-test cases may enter a later training pool with explicit provenance but never the activation holdout. Do not activate task-aware routing under G1 with fewer than 200 total activation-version cases unless an explicit statistical-power review demonstrates adequate power.
 
 Split by repository and defect archetype group, not by individual diff, so close variants cannot cross groups. Keep the test labels encrypted or access-controlled from capability authors and router development.
 
@@ -500,7 +512,7 @@ Use two separate data strata.
 - 30% purpose-built realistic iOS fixtures;
 - 15% defect patterns re-authored from internal experience only when a data owner confirms that the resulting code is non-confidential and cannot reconstruct the original source.
 
-Every candidate in both cohorts must be eligible for every case in this corpus. Gate G1 is calculated only on this stratum. The initial 75–100 cases support calibration and shadow routing; the expanded, adequately powered corpus supports live task-aware activation.
+Every candidate in both cohorts must be eligible for every case in this corpus. Gate G1 is calculated only on the fresh activation holdout in the universal-eligibility stratum. The initial 75–100 cases support calibration and shadow routing; their revealed test cases never count as unseen G1 evidence. The expanded, adequately powered activation benchmark supports live task-aware activation.
 
 **Private generalization corpus**
 
@@ -539,7 +551,7 @@ Differentiated candidates may use distinct prompts, tools, stages, and runtimes,
 
 Grok, Muse, multi-agent orchestration, and Tangle are explicitly deferred from the initial matrix. They may enter as post-calibration challengers through the same adapter contract and evaluation process; none is a dependency of the closed alpha.
 
-The primary router selects across both cohorts. The strongest static baseline is the best single candidate from either cohort, selected on validation data and frozen before the hidden test. The experiment report must also show Cohort A alone, Cohort B alone, and the combined set so model-routing lift and full capability-routing lift are distinguishable.
+The primary router selects across both cohorts. The strongest static baseline is the best single candidate from either cohort, selected on the applicable validation data and frozen before each hidden test. The experiment report must also show Cohort A alone, Cohort B alone, and the combined set so model-routing lift and full capability-routing lift are distinguishable.
 
 The preceding comparison applies to the universal-eligibility corpus. Model-based routing on the private generalization corpus is deferred until controlled GPU infrastructure or approved provider processing is available. CPU-only deterministic runs are harness diagnostics, not a substitute for a multi-candidate routing experiment.
 
@@ -652,10 +664,10 @@ The final report is generated from committed result snapshots and a versioned an
 |---|---|---|---|
 | P0-01 Protocol | Preregistered calibration and activation gate | Metrics, split, baselines, success definition, exclusions, and statistics approved before hidden runs | Staff/data |
 | P0-02 Taxonomy | Versioned task and feature schema | JSON Schema validation; feature provenance; no post-outcome fields | Backend/domain |
-| P0-03 Corpus | 75–100 initial cases, expanding to 200–300 | Initial set supports static policy and shadowing; expanded set passes G0 and has a reproducible grouped split before G1 | Swift/evaluation |
+| P0-03 Corpus | 75–100-case calibration suite plus 200–300-case activation benchmark | Initial revealed test is excluded from G1; expanded version passes G0 and reserves a fresh untouched grouped activation holdout | Swift/evaluation |
 | P0-04 Harness | Durable execution and artifact capture | Resumable, idempotent matrix runs; pinned environment; per-run cost/latency | Platform |
 | P0-04A Budget pilot | Separate 20-PR candidate matrix and frozen limits | Pilot cases excluded from official splits; cost/latency/resource ceilings approved before official matrix | Platform/product |
-| P0-05 Adapter SDK | Common adapter protocol and eight candidates | Contract suite passes; raw and normalized outputs retained | Backend/AI |
+| P0-05 Adapter SDK | Common adapter protocol and eight candidates | Contract suite passes; policy-permitted raw artifacts are quarantined/restricted and normalized outputs retained | Backend/AI |
 | P0-06 Graders | Deterministic matching and adjudication queue | Golden tests include empty-label clean cases and false-positive failures; rerun agreement >=98%; versioned rules | Evaluation |
 | P0-07 Router V0 | Filter/rank/reason implementation | Deterministic replay from snapshots; no hidden data access | Backend/data |
 | P0-08 Analysis | Baseline comparison and confidence intervals | Reproducible report; paired grouped bootstrap; sensitivity analysis | Data/full-stack |
@@ -669,7 +681,7 @@ This schedule begins only after the MCP Registry Alpha release gate passes. With
 - **Post-registry Week 2:** first adapters and graders, 20-PR budget pilot, frozen execution limits, first 40–50 cases
 - **Post-registry Week 3:** all eight adapters, 75–100-case initial matrix, strongest static policy, router shadow policy, reproducible report
 
-After Week 3, corpus expansion and shadow evaluation continue as an evaluation workstream alongside productization. Reach 200–300 cases and pass G1 before task-aware selection controls live traffic. Do not compress by weakening holdout, label quality, or reproducibility requirements.
+After Week 3, activation-benchmark authoring and shadow evaluation continue as an evaluation workstream alongside productization. Freeze a fresh untouched activation holdout within the 200–300-case version and pass G1 on that holdout before task-aware selection controls live traffic. Do not compress by reusing the revealed calibration test or weakening holdout, label quality, or reproducibility requirements.
 
 ---
 
@@ -681,6 +693,9 @@ Begin Phase 1 routing foundations in post-registry Week 1 rather than waiting fo
 
 Endpoints:
 
+- `POST /v1/artifact-uploads` — authorize metadata and return a short-lived, workspace-scoped presigned upload target
+- `POST /v1/artifact-uploads/{id}/complete` — verify digest, size, content type, and scan status, then mint the authoritative `artifact://` URI
+- `GET /v1/artifacts/{id}` — return authorized metadata and readiness, never ambient object-store credentials
 - `POST /v1/routes` — create and persist a route-only decision
 - `POST /v1/run` — route, authorize, enqueue, and return `202 Accepted`
 - `GET /v1/invocations/{id}` — current state and normalized result metadata
@@ -690,10 +705,13 @@ Endpoints:
 
 Generate OpenAPI and SDK types from one schema source. Require an `Idempotency-Key` for mutating client calls. Scope API credentials to workspace, environment, action, and optional spending/quota policy. All errors use stable machine codes and correlation IDs.
 
+Routing and run requests accept only finalized, unexpired artifacts owned by the same workspace and allowed by the request/provider data policy. Completion verifies a client-declared digest and length, detects archive expansion/path traversal, applies malware and secret policy, and records an immutable artifact version. HTTP/SDK clients upload through the presigned target; the MCP facade exposes `create_artifact_upload` so an agent can obtain the same bounded workflow without direct object-store credentials.
+
 Acceptance criteria:
 
 - identical idempotent requests produce one route/invocation;
 - cross-workspace access tests fail closed;
+- unfinalized, expired, digest-mismatched, unsafe, and cross-workspace artifacts are rejected before routing or enqueue;
 - p95 route-only latency is under 300 ms with 100 curated versions, excluding external task-artifact upload;
 - compatibility and constraint failures expose safe reason codes without private provider data.
 
@@ -710,7 +728,7 @@ Acceptance criteria:
 
 ### 9.3 Invocation and provider runtime
 
-Use curated HTTP/model/CLI adapters behind one async interface. Separate benchmark and production worker pools. Enforce per-provider concurrency, circuit breaking, retry budgets, absolute deadlines, and result-size limits. For a non-idempotent execution, persist a dispatch fence before the network send; never automatically repeat a fenced attempt when provider acceptance is uncertain.
+Use curated HTTP/model/CLI adapters behind one async interface. Separate benchmark and production worker pools. Enforce per-provider concurrency, circuit breaking, retry budgets, absolute deadlines, and result-size limits. For a non-idempotent execution, persist a dispatch fence before the network send; never automatically repeat a fenced attempt when provider acceptance is uncertain. Every result passes the Registry Alpha quarantine, classification, redaction, and artifact policy before ordinary persistence or display; scanner failure fails closed.
 
 Acceptance criteria:
 
@@ -747,14 +765,15 @@ Build only internal workflows needed to operate the alpha:
 
 | Epic | Scope | Depends on | Exit condition |
 |---|---|---|---|
-| P1-01 Identity | Organizations, API keys, RBAC, audit log | Domain foundation | Authorization test matrix passes |
-| P1-02 Routing API | `/routes`, schemas, idempotency | P0 router | Replayable decision under latency target |
-| P1-03 Run API | `/run`, job creation, state API | Identity, jobs | End-to-end curated invocation passes |
+| P1-01 Identity | Workspaces, workspace memberships, API keys, RBAC, audit log | Registry Alpha identity | Authorization test matrix passes |
+| P1-01A Artifacts | Presigned ingestion, completion validation, scanning, immutable workspace artifact URI | Identity, object storage | Authorized upload-to-route contract passes without direct store credentials |
+| P1-02 Routing API | `/routes`, schemas, idempotency | P0 router, P1-01A | Replayable decision under latency target |
+| P1-03 Run API | `/run`, job creation, state API | Identity, artifacts, jobs | End-to-end curated invocation passes |
 | P1-04 Runtime | Adapter pools, deadlines, fallback, circuit breakers | P0 adapters | Fault-injection suite passes |
 | P1-05 Outcomes | Evidence API, SDKs, CI integration, label derivation | Invocation lineage | >=90% expected alpha coverage in staging trial |
-| P1-06 MCP | Six meta-tools mapped to API | Stable HTTP contracts | MCP contract and auth tests pass |
+| P1-06 MCP | Seven meta-tools, including `create_artifact_upload`, mapped to API | Stable HTTP contracts | MCP contract and auth tests pass |
 | P1-07 Console | Operations and experiment views | Core APIs | On-call can diagnose/disable/replay without SQL |
-| P1-08 Telemetry | Traces, logs, metrics, cost reconciliation | All request paths | One trace spans route through terminal outcome |
+| P1-08 Telemetry | Traces, logs, metrics, cost reconciliation | All request paths | Correlated trace/span-link chain covers route, terminal execution, and later outcome |
 | P1-09 Security | Threat model, retention, secret flow, dependency scans | Runtime/API | G2 security checks pass |
 | P1-10 Alpha rollout | Shadow, canary, design partners | All above | G2 approved and runbook exercised |
 
@@ -895,6 +914,7 @@ The initial threat model must cover malicious repository content, prompt injecti
 - artifact authorization independent of signed URL possession;
 - log and trace redaction with tests;
 - request, artifact, and output size limits;
+- presigned upload expiry, declared digest/length verification, archive traversal/expansion protection, malware scanning, and finalized-artifact state before routing;
 - outbound destination allowlists for workers;
 - signed integration webhooks with replay protection;
 - workspace-level data retention and deletion jobs;
@@ -943,6 +963,7 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 
 ### End to end
 
+- artifact upload, completion, authoritative URI issuance, and rejection of unsafe, unfinalized, expired, or cross-workspace artifacts;
 - route-only success and no-candidate paths;
 - run through terminal result and outcome;
 - retry, timeout, fallback, cancellation, and provider degradation;
@@ -963,7 +984,7 @@ No merge is releasable with failing migration, contract, replay, or workspace-is
 
 ## 14. Observability and experiment integrity
 
-One trace must connect:
+One correlation chain must connect the following stages. Propagate trace context through short asynchronous work and use span links plus immutable invocation/outcome IDs for evidence that arrives after the original trace lifetime; do not hold a span open while awaiting downstream outcome evidence.
 
 ```text
 request -> classification -> features -> candidates -> filters -> selection
@@ -1167,6 +1188,7 @@ ADRs 1–9 block authoritative benchmark runs and task-aware activation, but not
 
 ### Phase 1 is done when
 
+- an authorized client can ingest a repository snapshot and diff and receive finalized workspace-scoped `artifact://` identifiers without direct object-store credentials;
 - an authorized HTTP or MCP client can route and execute a supported task idempotently;
 - the exact decision, version, attempts, costs, artifacts, and evidence are traceable;
 - automatic fallback and provider disablement work under fault injection;
