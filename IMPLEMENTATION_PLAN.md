@@ -564,7 +564,7 @@ The primary router selects across both cohorts. The strongest static baseline is
 
 The preceding comparison applies to the universal-eligibility corpus. Model-based routing on the private generalization corpus is deferred until controlled GPU infrastructure or approved provider processing is available. CPU-only deterministic runs are harness diagnostics, not a substitute for a multi-candidate routing experiment.
 
-Pin model identifiers, prompts, tool definitions, supported sampling/reasoning configuration or explicit omission, maximum output, adapter code, and provider routing settings. If the upstream provider cannot pin a model revision, record that limitation and the exact execution timestamp.
+Pin model identifiers, prompts, tool definitions, supported sampling/reasoning configuration or explicit omission, maximum output, adapter code, and provider routing settings. An official comparison candidate must expose one immutable model revision or provider-attested deployment revision that remains identical across its entire randomized matrix. A provider alias plus timestamps is insufficient: such a candidate is diagnostic-only and excluded from static-baseline selection, routing training, G1, and official cost/quality comparisons. If an attested revision changes mid-matrix, invalidate that candidate's results for the benchmark version and rerun its full matrix only after freezing a new candidate version; never combine revisions in one estimate.
 
 Before execution, assign every candidate/task pair a primary attempt slot and randomize matrix execution order. G1, policy comparisons, task success, and gated cost/latency use exactly that primary attempt: success is the deterministic grader result for the slot, while timeout, failed, invalid, or missing execution counts as failure under the preregistered exclusion rules and its incurred cost remains charged. A policy's per-task outcome is the primary result of the capability it selected; when two policies select the same capability they reuse the same primary result. This produces exactly one paired outcome and one cost/latency observation per policy/task.
 
@@ -603,9 +603,9 @@ AND output schema valid
 AND no execution failure
 ```
 
-A false positive is a reportable candidate finding that does not match a label after the frozen matching and adjudication rules. Weighted and critical-defect recall are recorded as not applicable for clean cases, not as zero or one. Aggregate recall is calculated over defective cases; the overall task-success rate includes both clean and defective cases.
+A false positive is a reportable candidate finding that does not match a label after the frozen matching and blinded label-gap adjudication rules below. Weighted and critical-defect recall are recorded as not applicable for clean cases, not as zero or one. Aggregate recall is calculated over defective cases; the overall task-success rate includes both clean and defective cases.
 
-Use a blinded human adjudication queue only for ambiguous matches. Freeze adjudication rules before test evaluation and report human-review frequency.
+Send every substantive unmatched finding, including findings in nominally clean cases, to a label-gap queue before final scoring. Define `substantive` before hidden evaluation using candidate-blind minimum severity, confidence, location validity, and explanation-completeness rules. Strip candidate, provider, policy, and aggregate-result identity; mix findings with blinded negative controls; and have two qualified reviewers independently decide whether each is a genuine rubric-covered defect using only the frozen source and rubric. A rejected finding becomes a false positive. A genuine omitted defect marks the case `label_incomplete`: exclude that case for every candidate and policy from the current benchmark result, rerun the preregistered power check, and block G1 if remaining power is inadequate. Never patch frozen labels in place. Publish a new benchmark version with the added label and rescore every candidate uniformly from immutable outputs when valid, or rerun every candidate when rescoring is not valid. Unresolved material disagreements go to a third reviewer or trigger the same all-candidate case exclusion under the preregistered rule. Report queue frequency, controls, decisions, exclusions, and version lineage.
 
 The project owner is the primary Swift concurrency reviewer and labels every case against the frozen rubric. A second qualified reviewer, blinded to candidate identity and the primary label during independent review, covers a stratified 20% sample across clean/single/complex cases and defect families plus every disputed high/critical candidate finding. If the two reviewers cannot resolve a material disagreement, use a third reviewer or exclude the case under a preregistered rule; the primary reviewer cannot unilaterally break ties after seeing candidate outputs.
 
@@ -678,8 +678,8 @@ The final report is generated from committed result snapshots and a versioned an
 | P0-03 Corpus | 75–100-case calibration suite plus an activation benchmark whose first authoring tranche is 200–300 cases and whose final size follows the preregistered power calculation | Fixed case×family rating matrix and span adjudication pass G0; revealed test is excluded; fresh grouped holdout gives the CI test 90% power for a true five-point lift | Swift/evaluation |
 | P0-04 Harness | Durable execution and artifact capture | Resumable, idempotent matrix runs; preregistered primary/diagnostic attempt slots; pinned environment; per-attempt cost/latency | Platform |
 | P0-04A Budget pilot | Separate 20-PR candidate matrix and frozen limits | Pilot cases excluded from official splits; cost/latency/resource ceilings approved before official matrix | Platform/product |
-| P0-05 Adapter SDK | Common adapter protocol and eight candidates | Contract suite requires base/head revision-aware finding locations; policy-permitted raw artifacts are quarantined/restricted and normalized outputs retained | Backend/AI |
-| P0-06 Graders | Deterministic revision/side-aware matching and adjudication queue | Golden tests cover added, deleted, renamed, and moved lines plus empty-label clean cases and false-positive failures; rerun agreement >=98%; versioned rules | Evaluation |
+| P0-05 Adapter SDK | Common adapter protocol and eight candidates | Official candidates attest one revision across the full matrix; aliases are diagnostic-only; contract suite requires revision-aware findings and safe normalized outputs | Backend/AI |
+| P0-06 Graders | Deterministic matching and blinded label-gap adjudication | Golden tests cover added/deleted/renamed/moved lines, genuine omitted defects, all-candidate exclusion/versioning, clean cases, and false positives; rerun agreement >=98% | Evaluation |
 | P0-07 Router V0 | Filter/rank/reason implementation | Deterministic replay from snapshots; no hidden data access | Backend/data |
 | P0-08 Analysis | Baseline comparison and confidence intervals | Reproducible report; the same paired repository-grouped bootstrap used for G1 sizing and activation; sensitivity analysis | Data/full-stack |
 | P0-09 Policy decision | Written static-versus-task-aware release review | Evidence, limitations, shadow plan, and policy recommendation signed off | Tech/product leads |
@@ -716,9 +716,11 @@ Endpoints:
 - `POST /v1/invocations/{id}/outcomes` — attributable outcome evidence
 - `GET /v1/capabilities/{id}/versions/{version}` — exact public/authorized metadata
 
-Generate OpenAPI and SDK types from one schema source. Require an `Idempotency-Key` for mutating client calls. Retain an HMAC-keyed key/request-hash tombstone for the workspace lifetime: while the replay response exists, same-key/same-hash calls return it; after response expiry they fail with `idempotency_replay_expired`, and a different hash always conflicts, so a delayed retry never executes again. Scope API credentials to workspace, environment, action, and optional spending/quota policy. All errors use stable machine codes and correlation IDs.
+Generate OpenAPI and SDK types from one schema source. Require an `Idempotency-Key` for mutating client calls. Retain an HMAC-keyed key/request-hash tombstone plus its HMAC key-version ID for the workspace lifetime: while the replay response exists, same-key/same-hash calls return it; after response expiry they fail with `idempotency_replay_expired`, and a different hash always conflicts, so a delayed retry never executes again. Lookup tries the current and retained retired verification-key versions; older keys remain encrypted and non-retirable until all protected workspaces are hard-deleted, and missing key material fails closed. Scope API credentials to workspace, environment, action, and optional spending/quota policy. All errors use stable machine codes and correlation IDs.
 
-Routing and run requests accept only finalized, unexpired artifacts owned by the same workspace and allowed by the request/provider data policy. Each upload uses a unique non-overwritable object key or versioned-bucket write. Completion closes the upload, verifies a client-declared digest and length against the exact storage version, detects archive expansion/path traversal, applies malware and secret policy, and records that immutable storage version plus digest in the authoritative artifact version. Consumption reauthorizes the artifact and reads only that pinned version, verifying its digest or an integrity-equivalent storage checksum; a still-valid upload credential cannot replace finalized content. HTTP/SDK clients upload through the presigned target; the MCP facade exposes both `create_artifact_upload` and `complete_artifact_upload`, with the latter applying the authenticated completion contract and returning the authoritative `artifact://` URI so an MCP-only client needs no REST credential. Large or retained non-text results use the same immutable artifact and authorized-access contract, so the console never reads object storage directly.
+Routing and run requests accept only finalized, unexpired artifacts owned by the same workspace and allowed by the request/provider data policy. Each upload uses a unique non-overwritable object key or versioned-bucket write. Completion closes the upload, verifies a client-declared digest and length against the exact storage version, detects archive expansion/path traversal, applies malware and secret policy, and records that immutable storage version plus digest in the authoritative artifact version. Consumption reauthorizes the artifact and reads only that pinned version, verifying its digest or an integrity-equivalent storage checksum; a still-valid upload credential cannot replace finalized content. HTTP/SDK clients upload through the presigned target; the MCP facade exposes both `create_artifact_upload` and `complete_artifact_upload`, with the latter applying the authenticated completion contract and returning the authoritative `artifact://` URI so an MCP control-plane client needs no REST credential. Large or retained non-text results use the same immutable artifact and authorized-access contract, so the console never reads object storage directly.
+
+For result consumption without REST credentials, `read_artifact(artifact_uri, offset, max_bytes)` uses the authenticated MCP session to recheck subject, workspace, classification, retention, scan status, and exact version/digest on every call. It returns at most 256 KiB per chunk with total length, detected content type, digest, and next offset; safe text/JSON uses typed content and other permitted bytes use base64. Repeated bounded calls can consume a large result, while active, quarantined, expired, cross-workspace, integrity-failed, or policy-forbidden content fails closed. The tool never returns an ambient object-store URL or credential.
 
 Acceptance criteria:
 
@@ -726,7 +728,8 @@ Acceptance criteria:
 - cross-workspace access tests fail closed;
 - unfinalized, expired, overwritten, wrong-version, digest-mismatched, unsafe, and cross-workspace artifacts are rejected before routing, enqueue, viewing, or download;
 - an authorized subject can view safe text/JSON or download other content only through an unexpired subject-bound grant for the exact immutable artifact version and required isolation headers;
-- an MCP-only client can create an upload, transfer bytes to its bounded target, call `complete_artifact_upload`, and use the returned authoritative URI without REST credentials;
+- an MCP control-plane client can create an upload, transfer bytes to its bounded target, call `complete_artifact_upload`, and use the returned authoritative URI without REST credentials;
+- an MCP-only result client can consume safe text/JSON or bounded base64 chunks through `read_artifact` using only its MCP session, with the same authorization and integrity decisions as HTTP retrieval;
 - p95 route-only latency is under 300 ms with 100 curated versions, excluding external task-artifact upload;
 - compatibility and constraint failures expose safe reason codes without private provider data.
 
@@ -787,7 +790,7 @@ Build only internal workflows needed to operate the alpha:
 | P1-03 Run API | `/run`, job creation, state API | Identity, artifacts, jobs | End-to-end curated invocation passes |
 | P1-04 Runtime | Adapter pools, dispatch-time eligibility, deadlines, evidence-gated fallback, circuit breakers | P0 adapters | Kill-switch/policy/artifact changes before the first fence send no data; fallback requires definitive non-execution or tested idempotency; exhaustion and guard races terminate |
 | P1-05 Outcomes | Evidence API, SDKs, CI integration, label derivation | Invocation lineage | >=90% expected alpha coverage in staging trial |
-| P1-06 MCP | Eight meta-tools—`route_task`, `run_task`, `search_capabilities`, `get_capability`, `get_invocation`, `report_outcome`, `create_artifact_upload`, and `complete_artifact_upload`—mapped to API | Stable HTTP contracts | An MCP-only client uploads, completes, routes, runs, and reports without REST credentials; contract and auth tests pass |
+| P1-06 MCP | Nine meta-tools—`route_task`, `run_task`, `search_capabilities`, `get_capability`, `get_invocation`, `report_outcome`, `create_artifact_upload`, `complete_artifact_upload`, and `read_artifact`—mapped to API/services | Stable HTTP and artifact contracts | With MCP auth plus the presigned byte-transfer target, a client uploads/completes without REST credentials and reads results solely through bounded MCP chunks; contract/auth tests pass |
 | P1-07 Console | Operations and experiment views | Core APIs | On-call can diagnose/disable/replay without SQL |
 | P1-08 Telemetry | Traces, logs, metrics, cost reconciliation | All request paths | Correlated trace/span-link chain covers route, terminal execution, and later outcome |
 | P1-09 Security | Threat model, retention, secret flow, dependency scans | Runtime/API | G2 security checks pass |
@@ -897,7 +900,7 @@ Never train directly from mutable production tables. Materialize versioned datas
 - Money is stored as integer minor units plus currency, never floating point.
 - Raw request, source, model transcript, and output retention is separate from operational metadata retention.
 - Sensitive artifact access uses audited, short-lived grants bound to the authenticated subject, workspace, and exact immutable artifact version; possession does not bypass the ordinary authorization check.
-- Mutating-call idempotency retains a minimal HMAC-keyed key/request-hash tombstone until workspace hard deletion even after the full replay response expires; an old key can never authorize a new mutation.
+- Mutating-call idempotency retains a minimal HMAC-keyed key/request-hash tombstone and HMAC key-version ID until workspace hard deletion even after the full replay response expires. Retired verification keys remain available for lookup until no live tombstone references them; missing key material fails closed, so rotation cannot make an old request key reusable.
 - JSONB is appropriate for immutable snapshots and provider-specific metadata; fields used in constraints, joins, or policy are normalized and indexed.
 - Schema migrations are forward-compatible during rolling deployment and tested against production-sized fixtures.
 
@@ -960,14 +963,17 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 ### Contract
 
 - every provider adapter passes one shared success, invalid output, timeout, cancellation, and idempotency suite;
+- official-matrix admission rejects alias-only models, and an attested mid-matrix revision change invalidates rather than mixes that candidate's results;
 - matrix protocol tests prove primary-slot failures cannot be replaced or outvoted by diagnostic repeats and produce one paired policy/task outcome;
-- generated Python, TypeScript, and MCP interfaces match OpenAPI semantics;
+- blinded label-gap fixtures prove genuine omitted defects exclude/rescore every candidate consistently and rejected findings become false positives;
+- generated Python, TypeScript, and MCP interfaces match OpenAPI semantics, including upload completion and bounded `read_artifact` parity;
 - persisted domain events validate against versioned schemas.
 
 ### Integration
 
 - PostgreSQL transactions and migrations;
 - object upload/download authorization;
+- idempotency replay lookup across HMAC-key rotation and fail-closed behavior when a required retired key is unavailable;
 - durable job recovery;
 - provider circuit breakers and health snapshots;
 - webhook verification and deduplication;
@@ -984,7 +990,8 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 
 - artifact upload, completion, authoritative URI issuance, authorized viewer/download grants, and rejection of unsafe, mutable/overwritten, wrong-version, digest-mismatched, unfinalized, expired, or cross-workspace artifacts;
 - artifact grants are carried only in redacted headers and never appear in URLs, access logs, traces, history, or referrers;
-- MCP-only artifact creation and completion produces the same authoritative URI and validation failures as the HTTP workflow;
+- MCP-authenticated artifact creation and completion produces the same authoritative URI and validation failures as the HTTP workflow without REST credentials;
+- `read_artifact` returns authorized, integrity-checked bounded chunks through MCP and rejects active, quarantined, expired, or cross-workspace results;
 - route-only success and no-candidate paths;
 - run through terminal result and outcome;
 - retry, timeout, evidence-gated fallback, ambiguous post-fence execution, cancellation, and provider degradation;
@@ -1019,16 +1026,16 @@ Required metrics:
 
 - route latency and candidate counts;
 - filter counts by reason;
-- selections by capability version and workspace;
+- selection counts by bounded environment, task-family, provider-family, and experiment-cohort dimensions;
 - predicted/estimated versus actual cost and latency;
-- provider success, timeout, schema failure, and circuit state;
+- provider-family success, timeout, schema failure, and circuit state;
 - task success, cost per success, retry, fallback, and correction;
 - outcome coverage, evidence type, confidence, age, and dispute rate;
 - benchmark versus production performance by task segment;
 - policy concentration and exploration allocation;
 - artifact bytes and retention backlog.
 
-Do not place raw source, prompts, outputs, secrets, or customer identifiers in metric labels. High-cardinality IDs belong in traces or restricted logs.
+Metric labels come from an explicit bounded enum allowlist with per-metric series budgets. Do not place raw source, prompts, outputs, secrets, workspace/customer identifiers, capability/deployment/router version IDs, or other high-cardinality values in metric labels. Exact workspace and version attribution belongs in access-controlled operational tables and restricted logs/traces, linked by opaque correlation IDs rather than exported as dimensions.
 
 ---
 
@@ -1211,7 +1218,8 @@ ADRs 1–9 block authoritative benchmark runs and task-aware activation, but not
 
 ### Phase 1 is done when
 
-- an authorized HTTP or MCP-only client can ingest and complete a repository snapshot and diff, receive finalized workspace-scoped `artifact://` identifiers pinned to immutable object versions, and retrieve permitted artifacts through subject-bound short-lived access without direct object-store credentials;
+- an authorized HTTP client or MCP-authenticated control-plane client can ingest and complete a repository snapshot and diff and receive finalized workspace-scoped `artifact://` identifiers pinned to immutable object versions without REST credentials in the MCP path;
+- an MCP-only result client can retrieve permitted text/JSON or bounded binary chunks through `read_artifact` using its MCP session, while HTTP clients use subject-bound short-lived access and neither path receives object-store credentials;
 - an authorized HTTP or MCP client can route and execute a supported task idempotently;
 - the exact decision, version, attempts, costs, artifacts, and evidence are traceable;
 - evidence-gated fallback and provider disablement work under fault injection, while uncertain fenced execution never falls back;
