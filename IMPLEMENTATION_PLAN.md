@@ -443,6 +443,20 @@ not_expected
 pending -> finalized | unavailable
 ```
 
+These Invocation states are internal orchestration phases, not additions to the public `Run.status` enum. The shared API preserves the Registry Alpha enum and projects internal state as follows:
+
+| Internal Invocation state | Public `Run.status` |
+|---|---|
+| `accepted`, `queued`, `preparing` | `queued` |
+| `running`, `fallback_queued` | `running` |
+| `execution_succeeded` | `succeeded` |
+| `execution_failed` | `failed` |
+| `execution_timed_out` | `timed_out` |
+| `cancelled` | `cancelled` |
+| `indeterminate` | `indeterminate` |
+
+List filters and terminal checks operate on this public projection. Phase 1 detail is exposed only through additive optional reason/phase metadata and the forward-compatible event envelope; it never leaks a new value into the closed Alpha status enum or makes status regress from `running` to `queued` during fallback.
+
 Every transition is an append-only event guarded by an allowed-transition table. The current state is a materialized projection. Duplicate worker delivery must be safe.
 
 An attempt failure or timeout does not by itself authorize fallback. The orchestrator may enter `fallback_queued` and create a child attempt linked by `parent_attempt_id` only when durable evidence proves the prior attempt did not execute, or when every candidate in the fallback chain honors the same tested end-to-end idempotency key for the external operation. A failure response alone is not proof of non-execution. Any post-fence timeout or lost response with uncertain acceptance moves the invocation to `indeterminate` with `reconciliation_required`; it never creates a fallback attempt. Recheck the execution-disposition guard and candidate eligibility after entering `fallback_queued` and before creating the child attempt. If no eligible candidate remains or the chain is exhausted, transition to `execution_failed` or `execution_timed_out` according to the last definitive attempt and record `fallback_unavailable` or `fallback_exhausted`; if the prior disposition has become unknown, transition to `indeterminate` with reconciliation required. No path may remain terminally parked in `fallback_queued`.
@@ -735,6 +749,8 @@ Generate OpenAPI and SDK types from one schema source. Require an `Idempotency-K
 
 `Run` is the sole public execution resource and maps one-to-one to the internal Invocation aggregate. Registry Alpha's plural `/v1/runs` family remains backward compatible for direct capability execution; Phase 1 adds `/v1/routed-runs` only as a creation command and returns the same Run schema and ID. The previously planned singular `/v1/run` and `/v1/invocations/*` paths are replaced before implementation and never ship as aliases. Generated OpenAPI/SDK mappings are `createRun` for direct execution, `createRoutedRun` for routed execution, and `getRun`, `cancelRun`, and `createRunOutcome` for the shared resource paths. The MCP meta-tool name `get_invocation` is a protocol compatibility name that calls `getRun`; it does not create a second HTTP resource. Contract tests reject accidental legacy routes and compile both existing direct-run and new routed-run clients against the checked schema.
 
+The public `Run.status` remains exactly `queued|running|succeeded|failed|timed_out|cancelled|indeterminate` for direct, evaluation, and routed runs. Phase 1 internal states use the projection in Section 7.5, and public run-event types use the Alpha forward-compatible known-or-unknown string representation so new routed/fallback details cannot break an already generated Alpha client.
+
 Routing and run requests accept only finalized, unexpired artifacts owned by the same workspace and allowed by the request/provider data policy. Each upload uses a unique non-overwritable object key or versioned-bucket write. Completion closes the upload, verifies an ephemeral client integrity proof and length against the exact storage version, detects archive expansion/path traversal, and applies malware and secret policy. Clean artifacts persist a content digest; encrypted restricted artifacts persist a ciphertext integrity checksum plus a purpose-separated versioned HMAC plaintext fingerprint whose key remains in the secret manager, never an ordinary plaintext digest. Consumption reauthorizes the artifact and reads only that pinned version, verifying its kind-appropriate integrity value; a still-valid upload credential cannot replace finalized content. HTTP/SDK clients upload through the `EphemeralUploadTarget`; the MCP facade exposes both `create_artifact_upload` and `complete_artifact_upload`, with target delivery allowed only through the non-recording transfer channel above and completion returning the authoritative `artifact://` URI so an eligible MCP control-plane client needs no REST credential. Large or retained non-text results use the same immutable artifact and authorized-access contract, so the console never reads object storage directly.
 
 For result consumption without REST credentials, `read_artifact(artifact_uri, offset, max_bytes)` uses the authenticated MCP session to recheck subject, workspace, classification, retention, scan status, and exact immutable version/kind-appropriate integrity state on every call. It returns at most 256 KiB per chunk with total length, detected content type, a clean-content digest only when policy permits, and the next offset; restricted plaintext fingerprints remain internal. Safe text/JSON uses typed content and only explicitly allowlisted fully scanned bytes use base64. Repeated bounded calls can consume a large result, while active, unknown, unsupported, type-mismatched, quarantined, expired, cross-workspace, integrity-failed, or policy-forbidden content fails closed. The tool never returns an ambient object-store URL or credential.
@@ -814,7 +830,7 @@ Build only internal workflows needed to operate the alpha:
 | P1-01 Identity | Workspaces, workspace memberships, API keys, RBAC, audit log | Registry Alpha identity | Authorization test matrix passes |
 | P1-01A Artifacts | Non-overwritable presigned ingestion through the sealed `EphemeralUploadTarget`, completion validation, scanning, immutable workspace artifact URI, and sealed header-redeemed `ArtifactAccessGrantToken` | Identity, object storage | Upload-target and access-grant creation/replay use TTL-matched encrypted envelopes plus non-secret ordinary records; no-store/redaction/deletion tests pass, and overwrite, redirect, over-scope, expiry, and wrong-version tests fail closed |
 | P1-02 Routing API | `/routes`, schemas, idempotency | P0 router, P1-01A | Replayable decision under latency target |
-| P1-03 Run API | `/routed-runs`, shared `/runs` state API, exclusive execution binding, in-place ledger migration, job creation | Identity, artifacts, jobs | Existing direct rows/SDK remain compatible; every run/attempt has exactly one MCP-connection or provider/local deployment version; mixed direct/routed operations use one ledger and legacy parallel paths/tables are absent |
+| P1-03 Run API | `/routed-runs`, shared `/runs` status projection, exclusive execution binding, in-place ledger migration, job creation | Identity, artifacts, jobs | An Alpha client deserializes every routed lifecycle state through the unchanged public status enum and forward-compatible event envelope; every run/attempt has exactly one MCP-connection or provider/local deployment version; one ledger serves all kinds |
 | P1-04 Runtime | Input scanning/scrubbing, adapter pools, quote/price freshness, dispatch-time eligibility, atomic quota/budget reservation, deadlines, evidence-gated fallback, circuit breakers | P0 adapters | Newly rejected queued content is scrubbed before terminal state; every fence has a live unchanged price version and one worst-case reservation in the same transaction; expiry/repricing sends nothing and concurrency cannot overspend |
 | P1-05 Outcomes | Evidence API, SDKs, CI integration, label derivation | Invocation lineage | >=90% expected alpha coverage in staging trial |
 | P1-06 MCP | Nine meta-tools—`route_task`, `run_task`, `search_capabilities`, `get_capability`, `get_invocation`, `report_outcome`, `create_artifact_upload`, `complete_artifact_upload`, and `read_artifact`—mapped to API/services | Stable HTTP and artifact contracts | A host with a tested non-recording secret-result channel transfers the target directly to the upload primitive; unsupported hosts fail closed, and result reads use only bounded MCP chunks; contract/auth/leakage tests pass |
@@ -917,7 +933,7 @@ The released Registry Alpha schema is the migration baseline, not a parallel sub
 - `task_instances`
 - the additive `routed` value for the existing `run_kind` constraint, nullable `routing_decision_id`/`task_instance_id`, and routing lineage on existing `runs`
 - additive exclusive execution-target binding, parent-attempt, execution-disposition, and fallback lineage on existing `run_attempts`; each initial/fallback attempt points to exactly one immutable `server_connection_version` or `deployment_version`
-- new routed/fallback event kinds in existing `run_events`; event ordering and projection replay remain one stream per run
+- new routed/fallback event detail strings in existing `run_events`; the public known-or-unknown event wrapper remains compatible, and event ordering/projection replay remain one stream per run
 - `run_artifacts` as a role-qualified link to existing immutable `artifacts`; `artifact_uploads` retains only opaque upload ID, safe configured-origin ID, immutable key/version scope, constraints, and expiry—never an `EphemeralUploadTarget` credential; upload-target and canonical `artifact_access_grants` rows store only non-secret metadata/versioned HMAC verifiers while general idempotency records point to TTL-matched encrypted replay envelopes in the dedicated secret store and retain only non-secret tombstones after erasure
 - append-only `usage_reservations` linked one-to-one with a dispatch fence/attempt, plus reservation/commit/release/reconciliation events and workspace/provider quota-budget account balances
 - `outcome_evidence`, `outcome_labels`, `outcome_label_history`
@@ -932,6 +948,7 @@ The Phase 0 rolling migration first adds nullable `run_kind`, `execution_binding
 - Event and decision tables are append-only; corrections supersede prior records.
 - Every run/attempt has one exact execution binding enforced by a database XOR constraint: an immutable MCP `server_connection_version_id` or immutable provider/local `deployment_version_id`, never both or neither.
 - A run's initial attempt must match its stored initial binding; every fallback child records its own binding, references an eligible candidate in the immutable route/fallback snapshot, and cannot rewrite the parent run's historical selection.
+- Internal run phases project through the fixed Alpha public status enum; database/API constraints reject any unmapped phase, and public list filters use only the projected value.
 - G1 reveal state and alpha spend are monotonic: a revealed component can never be assigned to another activation attempt, and an attempt cannot claim more than its preregistered allocation or the remaining family budget.
 - Dispatch fencing locks the relevant quota/budget accounts and atomically moves the approved worst-case amount from available to reserved; reconciliation commits actual usage and releases only the proven remainder through append-only reservation events.
 - A fence can reference only an unexpired quote whose immutable price version still matches the locked current selector; repricing appends a new version and never mutates the version a historical route recorded.
@@ -1010,6 +1027,7 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 - matrix protocol tests prove primary-slot failures cannot be replaced or outvoted by diagnostic repeats and produce one paired policy/task outcome;
 - blinded label-gap fixtures prove genuine omitted defects exclude/rescore every candidate consistently and rejected findings become false positives;
 - generated Python, TypeScript, and MCP interfaces match OpenAPI semantics, including sealed upload-target/access-grant handling, upload completion, unsupported-host failure, and bounded `read_artifact` parity;
+- a client generated from the Registry Alpha schema deserializes list/get/event responses for every Phase 1 internal and fallback state; public status never leaves the Alpha enum and unknown event detail strings remain readable;
 - persisted domain events validate against versioned schemas.
 
 ### Integration
@@ -1044,6 +1062,7 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 - `read_artifact` returns authorized, integrity-checked bounded chunks through MCP and rejects active, unknown, unsupported, type-mismatched, quarantined, expired, or cross-workspace results without exposing restricted plaintext fingerprints;
 - route-only success and no-candidate paths;
 - run through terminal result and outcome;
+- every routed internal phase projects monotonically through the stable Alpha `Run.status` values, including `fallback_queued -> running`;
 - retry, timeout, evidence-gated fallback, ambiguous post-fence execution, cancellation, and provider degradation;
 - same-key delayed mutation replay after full response expiry is rejected without execution;
 - deployment/capability disable, policy revocation, and artifact invalidation between enqueue and the initial dispatch fence each terminate without a provider send;
