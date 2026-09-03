@@ -375,6 +375,8 @@ For `v0.1.0`, one discovered MCP tool maps to one logical capability scoped to i
 
 ### 5.6 Lifecycle rules
 
+Connection and capability states below are operational projections, not fields in immutable version content. Every transition appends a status event with prior state, next state, reason, actor/system source, and correlation ID, then compare-and-set updates the current projection in the same transaction. Capability schema, digest, and binding rows never change.
+
 ```text
 Server connection
 draft -> verifying
@@ -492,8 +494,10 @@ The official MCP Registry is in preview, so its adapter is treated as an unrelia
 | `connection_status_events` | Connection lifecycle history | Append-only |
 | `discovery_snapshots` | Immutable normalized and sanitized discovery result | Append-only |
 | `capabilities` | Stable logical tool identity | Mutable display metadata |
-| `capability_versions` | Immutable discovered tool version | Append-only |
+| `capability_versions` | Immutable discovered schema, digest, and binding identity; excludes lifecycle status | Append-only |
 | `mcp_tool_bindings` | Version-to-exact-server-connection-version/snapshot/tool binding | Immutable |
+| `capability_status_events` | Per-version operational lifecycle transitions with reason and actor/system source | Append-only |
+| `capability_status_projections` | Current per-version operational state materialized from events | Compare-and-set mutable projection |
 | `jobs` | Durable worker coordination | State machine |
 | `runs` | Operator-requested invocation | Append/supersede status |
 | `run_attempts` | Exact dispatch attempt, receipt, and output-scan decision | Append-only events/status |
@@ -510,6 +514,7 @@ The official MCP Registry is in preview, so its adapter is treated as an unrelia
 - A capability version digest is unique within its logical capability.
 - A discovery snapshot digest is unique within a server connection.
 - Every MCP tool binding references the exact `server_connection_version_id`; that identifier participates in the capability-version digest even when a discovery snapshot is deduplicated.
+- Capability lifecycle writes never mutate `capability_versions` or bindings. They append `capability_status_events` and atomically compare-and-set the matching current projection; replay from events must reproduce every projection.
 - A run references one immutable capability version and server-connection version. Its credential-binding version is nullable for unauthenticated servers and exact when credentials are used.
 - A credential-binding version names an immutable provider-native secret version or generation. Mutable aliases such as `current` are resolved only in the control plane; a changed resolved version creates a new credential binding and server-connection version and triggers the material-change reverification flow. Workers request only the pinned secret version and fail closed if it is unavailable.
 - Every run attempt persists its pre-send dispatch fence, exact input digest, nullable credential-binding version, optional provider receipt, reconciliation state, output classification, scan status, and content digest.
@@ -704,7 +709,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 | E2-T3 | Implement canonical JSON normalization and snapshot hashing | M | E0 | Golden cross-process digests are stable |
 | E2-T4 | Implement sanitized discovery snapshot persistence | M | E2-T2, E2-T3 | Duplicate snapshot is deduplicated; old data immutable; secret/token/cookie/PII fixtures never persist unsanitized |
 | E2-T5 | Implement capability, version, exact connection-version MCP binding, and remote-identity-assurance models | L | E2-T4 | Schema, connection-version, or attested implementation-revision drift produces a new version; identical tools after credential rotation materialize without digest collision; unverified remotes are excluded from authoritative evidence |
-| E2-T6 | Implement connection-disable overlay, capability enable/disable, unavailable/superseded, safe re-enable, and material-change review policy | M | E2-T5, E1-T4 | Connection disable atomically disables enabled versions; recovery never auto-enables them; disappeared, stale, and unreviewed bindings cannot run |
+| E2-T6 | Implement capability status events/projections, connection-disable overlay, unavailable/superseded, and safe re-enable policy | M | E2-T5, E1-T4 | Event replay reproduces projections; immutable version content never changes; connection disable atomically disables enabled projections and recovery never auto-enables them |
 
 ### E3 — MCP client and discovery
 
@@ -803,7 +808,7 @@ PRs should be vertically reviewable, generally stay below roughly 600 changed im
 | 05 | `feat(registry): add entries connections and immutable snapshots` | Core registry migrations, repositories, lifecycle, canonical hashing | 03, 04 | Versioning golden tests |
 | 06 | `test(mcp): add dual-era conformance fixture servers` | Modern/legacy fixtures, paging, auth, drift, errors, schema limits | 02 | Fixture contract suite |
 | 07 | `feat(mcp): connect and discover remote Streamable HTTP servers` | SDK wrapper, negotiation, address-pinned safe transport, paginated tools, health | 05, 06 | Both protocol eras and DNS-rebinding/SSRF suites |
-| 08 | `feat(registry): materialize capability versions from discovery` | Capability/version/exact-connection-version binding models, drift/disappearance policy, enable/disable | 05, 07 | Drift, disappearance, endpoint-change, and credential-rotation E2E tests |
+| 08 | `feat(registry): materialize capability versions from discovery` | Immutable capability/version/binding models, status events/projections, drift/disappearance policy, enable/disable | 05, 07 | Event-replay, drift, disappearance, endpoint-change, and credential-rotation E2E tests |
 | 09 | `feat(catalog): search and import official registry entries` | Upstream adapter, cache, import, provenance, catalog-only state | 05 | Recorded upstream contract tests |
 | 10 | `feat(jobs): add durable jobs and run ledger` | Leases, events, attempts, idempotency, artifact metadata | 03, 04, 08 | Crash-recovery test |
 | 11 | `feat(invocation): execute MCP tools with bounded results` | Input/output validation, dispatch, evidence-aware cancellation, indeterminate state, immutable artifacts | 07, 10 | Invocation fault, invalid-output, and artifact-integrity suites |
@@ -876,6 +881,7 @@ PR-01 decisions
 - OIDC claim and role enforcement with authorization-epoch changes for claim, membership, role, and deployment-policy revisions;
 - subject/workspace/authorization-epoch cache partitioning, no-store responses, and purge on logout, token refresh, authorization change/failure, visibility recheck, and workspace change;
 - audit completeness;
+- capability status-event replay exactly reconstructs current projections without mutating immutable version/binding rows;
 - connection refresh, schema drift, and byte-identical discovery after endpoint or credential rotation without capability-version collision;
 - connection disable atomically disables enabled capabilities and reverification never auto-enables them;
 - replay after full idempotency-response expiry is rejected by the workspace-lifetime tombstone without executing;

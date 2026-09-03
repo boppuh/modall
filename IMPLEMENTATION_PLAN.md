@@ -173,7 +173,7 @@ Proceed to the full experiment only when:
 
 ### Gate G1 — task-aware policy activation
 
-Enable task-aware selection in the live request path only when, on the fresh universally eligible G1 activation holdout, the quality-first policy produces at least 5 percentage points higher task success than the strongest static capability, with no more than 20% higher cost per successful task. A paired, repository-grouped bootstrap that resamples repositories and preserves paired task results within each sampled repository must show a 95% confidence interval that excludes no improvement in task success. Before freezing or executing that holdout, preregister a simulation-based power analysis using that exact resampling procedure, observed group-size distribution, and a conservative calibration-derived bound on candidate discordance. The holdout must provide at least 90% power for that confidence-interval test to detect a true five-percentage-point lift; the observed five-point threshold remains a separate activation requirement. If the available corpus is smaller than the calculated sample, expand it or keep task-aware routing in shadow mode. This holdout contains no case whose candidate outputs or labels were revealed in the initial calibration report.
+Enable task-aware selection in the live request path only when, on the fresh universally eligible G1 activation holdout, the quality-first policy produces at least 5 percentage points higher task success than the strongest static capability, with no more than 20% higher cost per successful task. The paired task outcome is the preregistered primary-attempt estimand defined in Section 8.4; diagnostic repeats never change it. A paired, repository-grouped bootstrap that resamples repositories and preserves those paired task results within each sampled repository must show a 95% confidence interval that excludes no improvement in task success. Before freezing or executing that holdout, preregister a simulation-based power analysis using that exact estimand and resampling procedure, observed group-size distribution, and a conservative calibration-derived bound on candidate discordance. The holdout must provide at least 90% power for that confidence-interval test to detect a true five-percentage-point lift; the observed five-point threshold remains a separate activation requirement. If the available corpus is smaller than the calculated sample, expand it or keep task-aware routing in shadow mode. This holdout contains no case whose candidate outputs or labels were revealed in the initial calibration report.
 
 A value-oriented policy should still be reported as secondary analysis, including whether it achieves at least 20% lower cost per successful task while remaining non-inferior within a 2 percentage-point success margin. It cannot substitute for the quality-first activation gate. Report all baselines and all attempted policy variants, including failures. If G1 does not pass, the closed alpha uses the strongest eligible static quality policy while task-aware decisions run in shadow mode.
 
@@ -564,7 +564,9 @@ The preceding comparison applies to the universal-eligibility corpus. Model-base
 
 Pin model identifiers, prompts, tool definitions, supported sampling/reasoning configuration or explicit omission, maximum output, adapter code, and provider routing settings. If the upstream provider cannot pin a model revision, record that limitation and the exact execution timestamp.
 
-Run stochastic capabilities at least three times per task/capability pair. Treat repeated runs as nested observations, not independent tasks, in confidence intervals.
+Before execution, assign every candidate/task pair a primary attempt slot and randomize matrix execution order. G1, policy comparisons, task success, and gated cost/latency use exactly that primary attempt: success is the deterministic grader result for the slot, while timeout, failed, invalid, or missing execution counts as failure under the preregistered exclusion rules and its incurred cost remains charged. A policy's per-task outcome is the primary result of the capability it selected; when two policies select the same capability they reuse the same primary result. This produces exactly one paired outcome and one cost/latency observation per policy/task.
+
+Run stochastic capabilities in two additional diagnostic slots, for three attempts total; deterministic capabilities may remain at one after the pilot verifies their determinism. Diagnostic repeats estimate within-capability variance and reliability using nested models, but they never vote, average, replace a failed primary, change policy selection, or enter the G1 activation estimand or its cost denominator. Report diagnostic execution cost separately. The protocol freezes slot assignment, failure handling, and aggregation before hidden execution, and the power simulation uses this same primary-attempt Bernoulli estimand.
 
 ### 8.5 Grading
 
@@ -657,7 +659,7 @@ Report:
 - controlled-model, differentiated-capability, and combined-cohort routing results;
 - an ablation showing the incremental lift from adding differentiated capabilities to the controlled model set;
 - universal and private-stratum results reported separately, with candidate eligibility made explicit;
-- paired bootstrap confidence intervals grouped by repository, with paired task results and nested stochastic reruns preserved within each resampled repository;
+- G1 paired bootstrap confidence intervals grouped by repository using exactly one primary outcome per policy/task, plus separately labeled nested-repeat variability intervals that cannot affect activation;
 - sensitivity to policy weights and missing features;
 - oracle headroom;
 - train/validation/test divergence;
@@ -669,10 +671,10 @@ The final report is generated from committed result snapshots and a versioned an
 
 | Epic | Deliverable | Acceptance criteria | Owner profile |
 |---|---|---|---|
-| P0-01 Protocol | Preregistered calibration and activation gate | Metrics, split, baselines, success definition, exclusions, and statistics approved before hidden runs | Staff/data |
+| P0-01 Protocol | Preregistered calibration and activation gate | Metrics, split, baselines, primary-attempt pairing/failed-slot rules, diagnostic repeats, exclusions, and statistics approved before hidden runs | Staff/data |
 | P0-02 Taxonomy | Versioned task and feature schema | JSON Schema validation; feature provenance; no post-outcome fields | Backend/domain |
 | P0-03 Corpus | 75–100-case calibration suite plus an activation benchmark whose first authoring tranche is 200–300 cases and whose final size follows the preregistered power calculation | Initial revealed test is excluded from G1; expanded version passes G0 and reserves a fresh untouched grouped holdout giving the CI test at least 90% power to detect a true five-point lift | Swift/evaluation |
-| P0-04 Harness | Durable execution and artifact capture | Resumable, idempotent matrix runs; pinned environment; per-run cost/latency | Platform |
+| P0-04 Harness | Durable execution and artifact capture | Resumable, idempotent matrix runs; preregistered primary/diagnostic attempt slots; pinned environment; per-attempt cost/latency | Platform |
 | P0-04A Budget pilot | Separate 20-PR candidate matrix and frozen limits | Pilot cases excluded from official splits; cost/latency/resource ceilings approved before official matrix | Platform/product |
 | P0-05 Adapter SDK | Common adapter protocol and eight candidates | Contract suite requires base/head revision-aware finding locations; policy-permitted raw artifacts are quarantined/restricted and normalized outputs retained | Backend/AI |
 | P0-06 Graders | Deterministic revision/side-aware matching and adjudication queue | Golden tests cover added, deleted, renamed, and moved lines plus empty-label clean cases and false-positive failures; rerun agreement >=98%; versioned rules | Evaluation |
@@ -714,7 +716,7 @@ Endpoints:
 
 Generate OpenAPI and SDK types from one schema source. Require an `Idempotency-Key` for mutating client calls. Retain an HMAC-keyed key/request-hash tombstone for the workspace lifetime: while the replay response exists, same-key/same-hash calls return it; after response expiry they fail with `idempotency_replay_expired`, and a different hash always conflicts, so a delayed retry never executes again. Scope API credentials to workspace, environment, action, and optional spending/quota policy. All errors use stable machine codes and correlation IDs.
 
-Routing and run requests accept only finalized, unexpired artifacts owned by the same workspace and allowed by the request/provider data policy. Each upload uses a unique non-overwritable object key or versioned-bucket write. Completion closes the upload, verifies a client-declared digest and length against the exact storage version, detects archive expansion/path traversal, applies malware and secret policy, and records that immutable storage version plus digest in the authoritative artifact version. Consumption reauthorizes the artifact and reads only that pinned version, verifying its digest or an integrity-equivalent storage checksum; a still-valid upload credential cannot replace finalized content. HTTP/SDK clients upload through the presigned target; the MCP facade exposes `create_artifact_upload` so an agent can obtain the same bounded workflow without direct object-store credentials. Large or retained non-text results use the same immutable artifact and authorized-access contract, so the console never reads object storage directly.
+Routing and run requests accept only finalized, unexpired artifacts owned by the same workspace and allowed by the request/provider data policy. Each upload uses a unique non-overwritable object key or versioned-bucket write. Completion closes the upload, verifies a client-declared digest and length against the exact storage version, detects archive expansion/path traversal, applies malware and secret policy, and records that immutable storage version plus digest in the authoritative artifact version. Consumption reauthorizes the artifact and reads only that pinned version, verifying its digest or an integrity-equivalent storage checksum; a still-valid upload credential cannot replace finalized content. HTTP/SDK clients upload through the presigned target; the MCP facade exposes both `create_artifact_upload` and `complete_artifact_upload`, with the latter applying the authenticated completion contract and returning the authoritative `artifact://` URI so an MCP-only client needs no REST credential. Large or retained non-text results use the same immutable artifact and authorized-access contract, so the console never reads object storage directly.
 
 Acceptance criteria:
 
@@ -722,6 +724,7 @@ Acceptance criteria:
 - cross-workspace access tests fail closed;
 - unfinalized, expired, overwritten, wrong-version, digest-mismatched, unsafe, and cross-workspace artifacts are rejected before routing, enqueue, viewing, or download;
 - an authorized subject can view safe text/JSON or download other content only through an unexpired subject-bound grant for the exact immutable artifact version and required isolation headers;
+- an MCP-only client can create an upload, transfer bytes to its bounded target, call `complete_artifact_upload`, and use the returned authoritative URI without REST credentials;
 - p95 route-only latency is under 300 ms with 100 curated versions, excluding external task-artifact upload;
 - compatibility and constraint failures expose safe reason codes without private provider data.
 
@@ -738,14 +741,15 @@ Acceptance criteria:
 
 ### 9.3 Invocation and provider runtime
 
-Use curated HTTP/model/CLI adapters behind one async interface. Separate benchmark and production worker pools. Enforce per-provider concurrency, circuit breaking, retry budgets, absolute deadlines, and result-size limits. Persist a dispatch fence before every provider network send and record an evidence-backed execution disposition separately from transport status. Fallback is allowed only when durable evidence proves the preceding attempt did not execute, or when all candidates share a tested end-to-end idempotency contract for the external operation. A fenced attempt with uncertain provider acceptance becomes `indeterminate` and can neither retry nor fall back. Every result passes the Registry Alpha quarantine, classification, redaction, and artifact policy before ordinary persistence or display; scanner failure fails closed.
+Use curated HTTP/model/CLI adapters behind one async interface. Separate benchmark and production worker pools. Enforce per-provider concurrency, circuit breaking, retry budgets, absolute deadlines, and result-size limits. A persisted route is historical selection evidence, not continuing dispatch authorization. In the same transaction that would create the initial dispatch fence—and again for every fallback child fence—lock and recheck the current deployment and capability states, workspace/provider/data policy, artifact ownership/classification/retention/integrity, destination allowlist, and applicable quota/budget; write the fence only if every check passes. If any check fails, terminate the still-undispatched invocation with stable `dispatch_eligibility_revoked` evidence and send no provider data. Record an evidence-backed execution disposition separately from transport status. Fallback is allowed only when durable evidence proves the preceding attempt did not execute, or when all candidates share a tested end-to-end idempotency contract for the external operation. A fenced attempt with uncertain provider acceptance becomes `indeterminate` and can neither retry nor fall back. Every result passes the Registry Alpha quarantine, classification, redaction, and artifact policy before ordinary persistence or display; scanner failure fails closed.
 
 Acceptance criteria:
 
 - worker termination before the dispatch fence safely requeues; termination at or after the fence without a durable result produces `indeterminate` plus `reconciliation_required` rather than an automatic repeat;
+- disabling the selected deployment/capability, revoking workspace/provider policy, or invalidating an artifact after enqueue but before the initial fence produces `dispatch_eligibility_revoked` and zero provider sends;
 - fault injection covers termination before send, after send, after provider receipt, and before response persistence;
 - deadline and cancellation propagate where the provider supports them; post-fence cancellation becomes `cancelled` only with definitive non-execution/rollback evidence and otherwise remains awaiting or becomes `indeterminate`;
-- circuit breaker removes a degraded deployment from new candidate snapshots;
+- circuit breaker removes a degraded deployment from new candidate snapshots, and the fence transaction blocks a stale queued selection after degradation;
 - permitted fallback creates a new child attempt linked to the original invocation and route; fault tests prove that post-fence timeout, lost response, and ambiguous failure paths never fall back, and that no-candidate, exhausted-chain, and guard-race paths leave `fallback_queued` through the specified terminal edge.
 
 ### 9.4 Outcome collection
@@ -779,9 +783,9 @@ Build only internal workflows needed to operate the alpha:
 | P1-01A Artifacts | Non-overwritable presigned ingestion, completion validation, scanning, immutable workspace artifact URI, and header-redeemed subject-bound read grants | Identity, object storage | Authorized upload-to-route/view contract passes without direct store credentials or grant material in URLs/logs; overwrite and wrong-version tests fail closed |
 | P1-02 Routing API | `/routes`, schemas, idempotency | P0 router, P1-01A | Replayable decision under latency target |
 | P1-03 Run API | `/run`, job creation, state API | Identity, artifacts, jobs | End-to-end curated invocation passes |
-| P1-04 Runtime | Adapter pools, deadlines, evidence-gated fallback, circuit breakers | P0 adapters | Fault injection proves fallback only after definitive non-execution or tested end-to-end idempotency; exhaustion and guard races terminate without a stuck state |
+| P1-04 Runtime | Adapter pools, dispatch-time eligibility, deadlines, evidence-gated fallback, circuit breakers | P0 adapters | Kill-switch/policy/artifact changes before the first fence send no data; fallback requires definitive non-execution or tested idempotency; exhaustion and guard races terminate |
 | P1-05 Outcomes | Evidence API, SDKs, CI integration, label derivation | Invocation lineage | >=90% expected alpha coverage in staging trial |
-| P1-06 MCP | Seven meta-tools, including `create_artifact_upload`, mapped to API | Stable HTTP contracts | MCP contract and auth tests pass |
+| P1-06 MCP | Eight meta-tools—`route_task`, `run_task`, `search_capabilities`, `get_capability`, `get_invocation`, `report_outcome`, `create_artifact_upload`, and `complete_artifact_upload`—mapped to API | Stable HTTP contracts | An MCP-only client uploads, completes, routes, runs, and reports without REST credentials; contract and auth tests pass |
 | P1-07 Console | Operations and experiment views | Core APIs | On-call can diagnose/disable/replay without SQL |
 | P1-08 Telemetry | Traces, logs, metrics, cost reconciliation | All request paths | Correlated trace/span-link chain covers route, terminal execution, and later outcome |
 | P1-09 Security | Threat model, retention, secret flow, dependency scans | Runtime/API | G2 security checks pass |
@@ -954,6 +958,7 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 ### Contract
 
 - every provider adapter passes one shared success, invalid output, timeout, cancellation, and idempotency suite;
+- matrix protocol tests prove primary-slot failures cannot be replaced or outvoted by diagnostic repeats and produce one paired policy/task outcome;
 - generated Python, TypeScript, and MCP interfaces match OpenAPI semantics;
 - persisted domain events validate against versioned schemas.
 
@@ -977,10 +982,12 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 
 - artifact upload, completion, authoritative URI issuance, authorized viewer/download grants, and rejection of unsafe, mutable/overwritten, wrong-version, digest-mismatched, unfinalized, expired, or cross-workspace artifacts;
 - artifact grants are carried only in redacted headers and never appear in URLs, access logs, traces, history, or referrers;
+- MCP-only artifact creation and completion produces the same authoritative URI and validation failures as the HTTP workflow;
 - route-only success and no-candidate paths;
 - run through terminal result and outcome;
 - retry, timeout, evidence-gated fallback, ambiguous post-fence execution, cancellation, and provider degradation;
 - same-key delayed mutation replay after full response expiry is rejected without execution;
+- deployment/capability disable, policy revocation, and artifact invalidation between enqueue and the initial dispatch fence each terminate without a provider send;
 - workspace isolation;
 - version disable and router rollback.
 
@@ -1202,7 +1209,7 @@ ADRs 1–9 block authoritative benchmark runs and task-aware activation, but not
 
 ### Phase 1 is done when
 
-- an authorized client can ingest a repository snapshot and diff, receive finalized workspace-scoped `artifact://` identifiers pinned to immutable object versions, and retrieve permitted artifacts through subject-bound short-lived access without direct object-store credentials;
+- an authorized HTTP or MCP-only client can ingest and complete a repository snapshot and diff, receive finalized workspace-scoped `artifact://` identifiers pinned to immutable object versions, and retrieve permitted artifacts through subject-bound short-lived access without direct object-store credentials;
 - an authorized HTTP or MCP client can route and execute a supported task idempotently;
 - the exact decision, version, attempts, costs, artifacts, and evidence are traceable;
 - evidence-gated fallback and provider disablement work under fault injection, while uncertain fenced execution never falls back;
