@@ -405,13 +405,24 @@ The V0 API response calls its quality field `benchmark_success_estimate` and inc
 ### 7.5 Invocation lifecycle
 
 ```text
+Invocation
 accepted -> queued -> preparing -> running
-running -> succeeded | failed | timed_out | cancelled
-failed | timed_out -> fallback_queued -> running
-any terminal state -> outcome_pending -> outcome_finalized
+running -> fallback_queued -> running
+running -> execution_succeeded | execution_failed | execution_timed_out
+running -> cancelled | indeterminate
+any invocation execution-terminal state -> outcome_pending -> outcome_finalized
+
+Attempt
+created -> dispatch_fenced -> awaiting_result
+created -> cancelled
+dispatch_fenced | awaiting_result -> succeeded | failed | timed_out | cancelled | indeterminate
 ```
 
 Every transition is an append-only event guarded by an allowed-transition table. The current state is a materialized projection. Duplicate worker delivery must be safe.
+
+An attempt failure or timeout does not itself finalize the invocation. The orchestrator either enters `fallback_queued` and creates a child attempt linked by `parent_attempt_id`, or—only after fallback is unavailable or exhausted—moves the invocation to the corresponding execution-terminal state. `outcome_pending` is unreachable until the invocation, rather than an individual attempt, is execution-terminal.
+
+Before any provider network send, persist `dispatch_fenced` in the same transaction that records the attempt ownership. A recovered `created` attempt is safe to dispatch. A recovered `dispatch_fenced` or `awaiting_result` attempt without a durable terminal response must not be sent again: persist any available provider receipt and move it to `indeterminate` with `reconciliation_required`. This deliberately prefers manual reconciliation to duplicating an external side effect.
 
 ### 7.6 Outcome contract and truth hierarchy
 
@@ -699,11 +710,12 @@ Acceptance criteria:
 
 ### 9.3 Invocation and provider runtime
 
-Use curated HTTP/model/CLI adapters behind one async interface. Separate benchmark and production worker pools. Enforce per-provider concurrency, circuit breaking, retry budgets, absolute deadlines, and result-size limits. Retries that may create a provider charge require provider idempotency or an explicit at-most-once policy.
+Use curated HTTP/model/CLI adapters behind one async interface. Separate benchmark and production worker pools. Enforce per-provider concurrency, circuit breaking, retry budgets, absolute deadlines, and result-size limits. For a non-idempotent execution, persist a dispatch fence before the network send; never automatically repeat a fenced attempt when provider acceptance is uncertain.
 
 Acceptance criteria:
 
-- worker termination does not lose jobs or duplicate non-idempotent execution;
+- worker termination before the dispatch fence safely requeues; termination at or after the fence without a durable result produces `indeterminate` plus `reconciliation_required` rather than an automatic repeat;
+- fault injection covers termination before send, after send, after provider receipt, and before response persistence;
 - deadline and cancellation propagate where the provider supports them;
 - circuit breaker removes a degraded deployment from new candidate snapshots;
 - a fallback creates a new child attempt linked to the original invocation and route.
@@ -869,7 +881,10 @@ The initial threat model must cover malicious repository content, prompt injecti
 - allowlisted providers and adapters;
 - no third-party containers;
 - least-privilege provider keys;
-- isolated working directories, resource limits, and no ambient host credentials;
+- default-deny tool access with a capability-version allowlist for every file, process, shell, and network tool;
+- outbound traffic restricted to declared provider and tool destinations through an enforced allowlist;
+- provider credentials isolated from tool-capable CLI subprocesses and never inherited by child processes unless the exact adapter contract requires a named, least-privilege secret;
+- isolated working directories, resource and process limits, and no ambient host credentials;
 - dependency and secret scanning in CI;
 - hidden-label access separated from adapter development.
 
