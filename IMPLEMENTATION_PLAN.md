@@ -193,7 +193,7 @@ A value-oriented policy should still be reported as secondary analysis, includin
 
 Proceed to design partners only when:
 
-- tenant authorization, idempotency, audit logs, data retention, and secret handling have passed review;
+- tenant authorization—including the Registry Alpha end-to-end 60-second IdP propagation/lookup/cache freshness budget and authoritative cache bypass for privileged actions—idempotency, audit logs, data retention, and secret handling have passed review;
 - the invocation SLO and recovery tests in Section 15 pass in staging;
 - concurrent dispatch proves every fence atomically owns sufficient worst-case quota/budget reservation, and indeterminate liabilities remain reserved until reconciled;
 - queued-run tests prove quote expiry or provider price-version change is detected under the fence locks before reservation/send and requires fresh user-approved routing;
@@ -735,6 +735,8 @@ Begin Phase 1 routing foundations in post-registry Week 1 rather than waiting fo
 
 ### 9.1 API and identity
 
+Phase 1 inherits the Registry Alpha authorization-freshness contract without resetting any timer: the conservative provider propagation bound `P`, qualified-source lookup allowance `R`, server snapshot TTL/poll interval `L`, and safety margin `M` must satisfy `P + R + L + M <= 60 seconds`. Privileged mutations, artifact grant mint/redemption, and every `read_artifact` chunk synchronously bypass the shared authorization cache and require `P + R + M <= 60 seconds`; timeout or incomplete source data fails closed. Server-authored snapshot expiry propagates to clients so browser caching cannot add another freshness interval.
+
 Endpoints:
 
 - `POST /v1/artifact-uploads` — authorize metadata and return one dedicated short-lived `EphemeralUploadTarget`, scoped to a unique create-only object key or storage version
@@ -836,7 +838,7 @@ Build only internal workflows needed to operate the alpha:
 
 | Epic | Scope | Depends on | Exit condition |
 |---|---|---|---|
-| P1-01 Identity | Workspaces, workspace memberships, API keys, RBAC, audit log | Registry Alpha identity | Authorization test matrix passes |
+| P1-01 Identity | Workspaces, workspace memberships, API keys, RBAC, audit log | Registry Alpha identity | Authorization matrix proves the inherited end-to-end 60-second budget, derived cache expiry, and privileged cache bypass |
 | P1-01A Artifacts | Non-overwritable presigned ingestion, expiry-driven abandoned-upload cleanup, completion/scanning, immutable artifact URI, and sealed `ArtifactAccessGrantToken` | Identity, object storage | Secret controls and redemption checks pass; incomplete exact object versions/multipart uploads delete within 15 minutes with race-safe retries/alerts; finalized artifacts survive cleanup; revocation, overwrite, expiry, and wrong-version tests fail closed |
 | P1-02 Routing API | `/routes`, schemas, idempotency, stratum-scoped activation evidence | P0 router, P1-01A | Replayable decision records exact `evaluation_stratum_id`; unvalidated/changed/private strata cannot consume a universal activation flag |
 | P1-03 Run API | `/routed-runs`, shared `/runs` status projection, exclusive execution binding, in-place ledger migration, job creation | Identity, artifacts, jobs | An Alpha client deserializes every routed lifecycle state through the unchanged public status enum and forward-compatible event envelope; every run/attempt has exactly one MCP-connection or provider/local deployment version; one ledger serves all kinds |
@@ -1069,6 +1071,7 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 - artifact upload, completion, authoritative URI issuance, authorized viewer/download grants, and rejection of unsafe, mutable/overwritten, wrong-version, integrity-mismatched, unfinalized, expired, or cross-workspace artifacts;
 - artifact grants are carried only in redacted headers and never appear in URLs, access logs, traces, history, or referrers;
 - access-grant and upload-target mint/replay crash matrices prove the encrypted envelope is durably prepared before the domain/idempotency/outbox commit, same-key recovery promotes/replays exactly that credential, rollback/uniqueness orphans expire inaccessible, and missing committed or expired envelopes fail without reminting; ordinary rows retain only HMAC verifiers/non-secret references;
+- fake-clock IdP propagation and lookup races prove cached authorization plus frontend display expires within the single inherited 60-second budget, and mutations, grant mint/redemption, and each `read_artifact` chunk bypass the shared cache and fail closed on source timeout/incompleteness;
 - post-mint membership/role removal, authorization-epoch change, visibility/classification/retention-policy revocation, quarantine, or integrity-state change denies artifact bytes even with an otherwise valid grant;
 - HTTP upload targets are returned only on authorized creation or matching idempotency replay with no-store; tests prove TTL-matched replay-envelope erasure and credential redaction/disabled capture across app, proxy, CDN, object-store audit, logs, traces, browser navigation/referrers/history/DOM, errors, and analytics, while redirect, expiry, overwrite, over-size, wrong-type/checksum, and broader-authority attempts fail closed; uploaded-but-uncompleted exact object versions are non-completable and deleted within the expiry SLO, including crash/retry and completion-race cases;
 - an MCP host with the required non-recording secret-result channel transfers `EphemeralUploadTarget` directly to its upload primitive and completes without REST credentials; a host without that channel receives no target and fails closed;
