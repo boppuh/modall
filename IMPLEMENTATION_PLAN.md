@@ -429,6 +429,7 @@ The V0 API response calls its quality field `benchmark_success_estimate` and inc
 Invocation
 accepted -> queued -> preparing -> running
 accepted | queued | preparing -> cancelled
+accepted | queued | preparing -> execution_failed
 running -> fallback_queued -> running
 fallback_queued -> cancelled
 fallback_queued -> execution_failed | execution_timed_out | indeterminate
@@ -437,7 +438,7 @@ running -> cancelled | indeterminate
 
 Attempt
 created -> dispatch_fenced -> awaiting_result
-created -> cancelled
+created -> cancelled | failed
 dispatch_fenced | awaiting_result -> succeeded | failed | timed_out | cancelled | indeterminate
 
 Outcome (orthogonal to invocation execution state)
@@ -460,6 +461,8 @@ These Invocation states are internal orchestration phases, not additions to the 
 List filters and terminal checks operate on this public projection. Phase 1 detail is exposed only through additive optional reason/phase metadata and the forward-compatible event envelope; it never leaks a new value into the closed Alpha status enum or makes status regress from `running` to `queued` during fallback.
 
 Every transition is an append-only event guarded by an allowed-transition table. The current state is a materialized projection. Duplicate worker delivery must be safe.
+
+The pre-running transition to `execution_failed`, and any corresponding `created -> failed` attempt transition, is legal only for a definitive pre-dispatch failure while no attempt has a dispatch fence, including request-key activation failure, completed security erasure, expired quote, or rejected reservation/eligibility. Security reclassification cannot take that edge until the inherited content state is attested `erased`. Any possibility that a provider send occurred uses the running/attempt evidence rules and may require `indeterminate`; it never uses this shortcut.
 
 An attempt failure or timeout does not by itself authorize fallback. The orchestrator may enter `fallback_queued` and create a child attempt linked by `parent_attempt_id` only when durable evidence proves the prior attempt did not execute, or when every candidate in the fallback chain honors the same tested end-to-end idempotency key for the external operation. A failure response alone is not proof of non-execution. Any post-fence timeout or lost response with uncertain acceptance moves the invocation to `indeterminate` with `reconciliation_required`; it never creates a fallback attempt. Recheck the execution-disposition guard and candidate eligibility after entering `fallback_queued` and before creating the child attempt. If no eligible candidate remains or the chain is exhausted, transition to `execution_failed` or `execution_timed_out` according to the last definitive attempt and record `fallback_unavailable` or `fallback_exhausted`; if the prior disposition has become unknown, transition to `indeterminate` with reconciliation required. No path may remain terminally parked in `fallback_queued`.
 
@@ -1071,7 +1074,7 @@ Require a dedicated sandbox boundary, non-root/read-only images, seccomp, defaul
 - `read_artifact` returns authorized, integrity-checked bounded chunks only after complete content-aware classification and rejects active, encrypted/uninspectable, unknown, unsupported, type-mismatched, coverage-incomplete, quarantined, expired, or cross-workspace results without exposing restricted plaintext fingerprints;
 - route-only success and no-candidate paths;
 - run through terminal result and outcome;
-- every routed internal phase projects monotonically through the stable Alpha `Run.status` values, including `fallback_queued -> running`;
+- every routed internal phase projects monotonically through the stable Alpha `Run.status` values, including `fallback_queued -> running` and definitive pre-dispatch `execution_failed -> failed`; security-erasure failure cannot become terminal before attestation and no pre-dispatch failure edge is legal after a fence;
 - retry, timeout, evidence-gated fallback, ambiguous post-fence execution, cancellation, and provider degradation;
 - same-key delayed mutation replay after full response expiry is rejected without execution;
 - deployment/capability disable, policy revocation, and artifact invalidation between enqueue and the initial dispatch fence each terminate without a provider send;

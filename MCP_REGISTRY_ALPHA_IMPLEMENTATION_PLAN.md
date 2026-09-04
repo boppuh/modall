@@ -418,9 +418,11 @@ queued -> running -> succeeded
    |         |-----> cancelled
    |         |-----> indeterminate
    +---------------> cancelled
+   +---------------> failed
 ```
 
 - A disabled or degraded connection does not accept new dispatches; operators may allow read-only refresh while degraded.
+- `queued -> failed` is allowed only before a dispatch fence exists, for a definitive pre-dispatch failure such as provisional request-key activation failure or a security reclassification whose key destruction has completed. It appends the stable safe reason, projects to the existing public `failed` status, and cannot bypass the requirement that `erasure_pending` reach attested `erased` first. Control-plane disablement continues to use `queued -> cancelled`.
 - Re-enabling a disabled connection transitions it to `verifying`, never directly to `active`; successful protocol negotiation and discovery are required before it can serve new runs.
 - Disabling a connection atomically transitions every currently `enabled` capability version on that connection to `disabled` with reason `connection_disabled` and cancels queued runs before setting the connection `disabled`. Connection reverification never clears those capability states; each intended version requires a later explicit enable action.
 - Run admission and every connection disable, material configuration change, capability-state change, discovery-observation replacement, input-scan-policy change, and connection-policy update acquire the affected rows/advisory locks in one documented global order. Where client idempotency applies, its scoped key lock precedes the lifecycle lock sequence; the worker fence uses that same lifecycle subsequence without an idempotency lock. Admission inserts its run/queue row before releasing lifecycle locks. Therefore a control mutation that locks second must observe and cancel the admitted undispatched run, while admission that locks second must observe the new state and reject before enqueue; there is no read/enqueue gap or inverted lock order.
@@ -800,7 +802,7 @@ Estimates are relative: **S** is up to two focused engineering days, **M** is th
 | E5-T2 | Implement run, request-content key/erasure, attempt, event, receipt/reconciliation, output-scan, and immutable artifact/access-grant models | L | E1, E2-T5 | Retained requests use unique external erasure keys and ciphertext-only durable storage; every terminal, pending-erasure, indeterminate, quarantined, and artifact-access state has complete lineage; grant and fingerprint key handling remains explicit |
 | E5-T3 | Implement idempotency-first replay, lock-serialized run admission, encrypted request persistence, single-use preflight consumption, role authorization, and fail-closed classification policy | M | E5-T2, E1 | After bounded scan/fingerprint, lookup precedes preflight validation; the no-record branch shares lifecycle locks and writes one encrypted request plus reference-only queue/replay state; a lost-`202` replay returns one run, while conflicts, expiry, sensitive input, or stale state never enqueue another |
 | E5-T4 | Implement bounded pre-persistence input secret/PII scanning and local-only JSON Schema validation | M | E2-T5, E0-T4 | Local `$ref`/`$dynamicRef` validate from the immutable document; unresolved external targets are non-invocable without network access; pathological schemas/scanner failures fail safely |
-| E5-T5 | Implement MCP dispatch, lock-serialized input rescanning, cryptographic-erasure workflow, deadline, and evidence-aware cancellation | L | E3, E5-T1, E5-T2 | A newly sensitive queued input becomes unreadable/non-dispatchable immediately and terminal only after attested per-run key destruction plus cache/ciphertext cleanup; pre-fence cancel, stale discovery, cancellation, timeout, concurrent changes, and worker loss preserve execution truth without leaking input |
+| E5-T5 | Implement MCP dispatch, lock-serialized input rescanning, cryptographic-erasure workflow, deadline, and evidence-aware cancellation | L | E3, E5-T1, E5-T2 | A newly sensitive queued input becomes unreadable/non-dispatchable immediately, then legally transitions `queued -> failed` only after attested erasure; key-activation failure, pre-fence cancel, stale discovery, cancellation, timeout, concurrent changes, and worker loss preserve execution truth without leaking input |
 | E5-T6 | Implement shared ordered lock-plan helper, durable pre-send dispatch fence, indeterminate reconciliation, and no-retry policy | M | E5-T5 | Admission/fence/control paths use the enumerated order; helper and reverse-order barrier tests prevent inversion, while crash tests before/after send and response persistence prove linearization and never duplicate a fenced call |
 | E5-T7 | Quarantine; malware/type/archive plus per-MIME extraction/render/OCR classification; validate, redact, and store results | L | E5-T2, E0-T4 | Images/PDFs/archives with visible, metadata, or embedded secrets/PII are restricted/discarded; encrypted, partial-coverage, timeout, executable, archive-bomb, mismatch, schema-invalid, and scanner-failure fixtures cannot publish |
 
@@ -911,7 +913,7 @@ PR-01 decisions
 - schema bounds and argument validation;
 - fail-closed input secret/PII scanning before canonicalization, HMAC fingerprinting, persistence, or dispatch;
 - MCP error normalization;
-- run/attempt terminal-state rules;
+- run/attempt terminal-state rules, including pre-fence `queued -> failed`, post-erasure ordering, and rejection of that edge after a dispatch fence;
 - content and artifact limits;
 - result-content classification, quarantine, redaction, per-MIME required-coverage accounting, and fail-closed extraction/OCR/scanner behavior;
 - upstream registry normalization and keyed fingerprint provenance without raw-payload digests;
@@ -965,6 +967,7 @@ PR-01 decisions
 - image, PDF, and archive fixtures prove every required page/frame/metadata/embedded object is extracted or OCR-classified before publication; credential/PII matches follow restricted/discard policy, while encryption, unsupported embedding, truncation, timeout, or incomplete coverage remains quarantined and undownloadable;
 - low-entropy credential and scanner-failure argument fixtures leave no request row, idempotency payload, content-derived audit value, log/trace body, confirmation token, queue item, or provider send;
 - retained clean-request fixtures prove PostgreSQL/base backups, WAL-restored databases, replicas, queues, idempotency responses, and durable caches contain only ciphertext or references and no recoverable key; transaction rollback leaves only a provisional key that self-destructs, activation-handler crashes retry idempotently, and no run dispatches before activation; after scan-policy reclassification, restored pre-erasure ciphertext cannot decrypt once the destruction attestation exists, while delayed/failed destruction remains `erasure_pending`, unreadable, quarantined, and unsent across crashes/retries.
+- provisional-key activation expiry and dispatch-time reclassification fixtures reach `queued -> failed` with the public status `failed` only after no fence exists and required key destruction is attested; the transition is rejected before erasure completion or after a dispatch fence.
 
 ### 12.4 End-to-end tests
 
