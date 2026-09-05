@@ -203,28 +203,42 @@ class PinnedHTTPTransport(httpx.AsyncHTTPTransport):
 
 
 class LimitedByteStream(httpx.AsyncByteStream):
-    def __init__(self, stream: httpx.AsyncByteStream, limit: int) -> None:
+    def __init__(self, stream: httpx.AsyncByteStream, budget: "RawByteBudget") -> None:
         self._stream = stream
-        self._limit = limit
+        self._budget = budget
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        consumed = 0
         async for chunk in self._stream:
-            consumed += len(chunk)
-            if consumed > self._limit:
-                raise ResponseLimitExceeded("upstream response exceeded byte limit")
+            self._budget.consume(len(chunk))
             yield chunk
 
     async def aclose(self) -> None:
         await self._stream.aclose()
 
 
-class LimitedTransport(httpx.AsyncBaseTransport):
-    """Apply a raw byte limit even when the response omits Content-Length."""
+class RawByteBudget:
+    def __init__(self, limit: int) -> None:
+        self.remaining = limit
 
-    def __init__(self, inner: httpx.AsyncBaseTransport, response_bytes: int) -> None:
+    def consume(self, size: int) -> None:
+        self.remaining -= size
+        if self.remaining < 0:
+            raise ResponseLimitExceeded("upstream response exceeded byte limit")
+
+
+class LimitedTransport(httpx.AsyncBaseTransport):
+    """Apply one raw byte budget across every response in a client session."""
+
+    def __init__(
+        self,
+        inner: httpx.AsyncBaseTransport,
+        response_bytes: int,
+        *,
+        forbidden_response_values: tuple[str, ...] = (),
+    ) -> None:
         self._inner = inner
-        self._response_bytes = response_bytes
+        self._budget = RawByteBudget(response_bytes)
+        self._forbidden_response_values = forbidden_response_values
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         response = await self._inner.handle_async_request(request)
@@ -232,10 +246,18 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         if content_encoding != "identity":
             await response.aclose()
             raise ResponseLimitExceeded("encoded upstream responses are not accepted")
+        if any(
+            forbidden in header_name or forbidden in header_value
+            for header_name, header_value in response.headers.multi_items()
+            for forbidden in self._forbidden_response_values
+        ):
+            await response.aclose()
+            raise EndpointPolicyError("sensitive upstream response header")
         declared = response.headers.get("content-length")
         if declared is not None:
             try:
-                if int(declared) > self._response_bytes:
+                declared_size = int(declared)
+                if declared_size < 0 or declared_size > self._budget.remaining:
                     await response.aclose()
                     raise ResponseLimitExceeded("upstream response exceeded byte limit")
             except ValueError as exc:
@@ -244,9 +266,7 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         return httpx.Response(
             response.status_code,
             headers=response.headers,
-            stream=LimitedByteStream(
-                cast(httpx.AsyncByteStream, response.stream), self._response_bytes
-            ),
+            stream=LimitedByteStream(cast(httpx.AsyncByteStream, response.stream), self._budget),
             extensions=response.extensions,
             request=request,
         )

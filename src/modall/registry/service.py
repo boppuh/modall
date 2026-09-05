@@ -428,6 +428,8 @@ class ConnectionService:
             decoded_path = unquote(parsed.path, errors="strict")
         except UnicodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
+        if re.search(r"%[0-9A-Fa-f]{2}", decoded_path):
+            raise ValueError("invalid endpoint URL")
         canonical_endpoint = (
             f"{parsed.scheme}://{hostname}{f':{port}' if port is not None else ''}{decoded_path}"
         )

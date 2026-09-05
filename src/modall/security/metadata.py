@@ -27,6 +27,7 @@ _SENSITIVE_JSON_FIELD = re.compile(
 
 def _is_sensitive_field(key: str) -> bool:
     normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", normalized)
     return _SENSITIVE_JSON_FIELD.search(normalized) is not None
 
 

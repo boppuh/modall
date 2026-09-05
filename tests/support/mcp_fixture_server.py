@@ -24,6 +24,7 @@ AUTHENTICATED_PROFILES = {
     "credential-numeric-leak",
     "credential-common-key",
     "credential-key-leak",
+    "credential-session-id-leak",
 }
 SUPPORTED_PROFILES = {
     "default",
@@ -257,7 +258,11 @@ def create_mcp_fixture_app() -> FastAPI:
             if requested_revision != PROTOCOL_REVISION:
                 return JSONResponse({"error": "unsupported requested protocol"}, status_code=400)
             revision = "2025-11-25" if profile == "protocol-mismatch" else PROTOCOL_REVISION
-            session_id = f"{profile}-session-{next(next_session)}"
+            session_id = (
+                FIXTURE_TOKEN
+                if profile == "credential-session-id-leak"
+                else f"{profile}-session-{next(next_session)}"
+            )
             tool_profile = profile
             if profile in {"schema-drift", "metadata-drift"}:
                 generation = drift_generations.get(profile, 0) + 1

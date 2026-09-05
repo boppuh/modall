@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import math
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
@@ -122,7 +123,13 @@ class McpClientAdapter:
             async with asyncio.timeout(self._limits.total_seconds):
                 resolution = await self._endpoint_policy.validate(endpoint)
                 inner = self._transport or PinnedHTTPTransport(resolution)
-                transport = LimitedTransport(inner, self._limits.response_bytes)
+                transport = LimitedTransport(
+                    inner,
+                    self._limits.response_bytes,
+                    forbidden_response_values=(
+                        (credential_text,) if credential_text is not None else ()
+                    ),
+                )
                 timeout = httpx.Timeout(
                     self._limits.read_seconds,
                     connect=self._limits.connect_seconds,
@@ -287,7 +294,10 @@ def _canonical_json(value: object) -> bytes:
 
 
 def _schema_is_supported(
-    input_schema: dict[str, Any], output_schema: dict[str, Any] | None
+    input_schema: dict[str, Any],
+    output_schema: dict[str, Any] | None,
+    *,
+    deadline: float | None = None,
 ) -> bool:
     stack: list[tuple[object, int, bool, dict[str, Any]]] = [(input_schema, 1, True, input_schema)]
     if output_schema is not None:
@@ -295,6 +305,8 @@ def _schema_is_supported(
     local_references: list[tuple[dict[str, Any], str]] = []
     nodes = 0
     while stack:
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
         value, depth, schema_position, root_schema = stack.pop()
         nodes += 1
         if depth > 32 or nodes > 4096:
@@ -303,6 +315,8 @@ def _schema_is_supported(
             if len(value) > 1024:
                 return False
             for key, child in value.items():
+                if deadline is not None and time.monotonic() >= deadline:
+                    return False
                 if not isinstance(key, str) or len(key) > 8192:
                     return False
                 if (
@@ -391,6 +405,8 @@ def _schema_is_supported(
         elif value is not None and not isinstance(value, (bool, int, float)):
             return False
     try:
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
         Draft202012Validator.check_schema(input_schema)
         if output_schema is not None:
             Draft202012Validator.check_schema(output_schema)
@@ -410,6 +426,8 @@ def _schema_is_supported(
         )
         try:
             for root_schema, reference in local_references:
+                if deadline is not None and time.monotonic() >= deadline:
+                    return False
                 if root_schema is schema:
                     resolved = resolver.lookup(reference).contents
                     if not isinstance(resolved, (dict, bool)):
@@ -422,9 +440,15 @@ def _schema_is_supported(
 async def _schema_support_with_deadline(
     input_schema: dict[str, Any], output_schema: dict[str, Any] | None
 ) -> bool:
+    deadline = time.monotonic() + 0.2
     try:
         async with asyncio.timeout(0.25):
-            return await asyncio.to_thread(_schema_is_supported, input_schema, output_schema)
+            return await asyncio.to_thread(
+                _schema_is_supported,
+                input_schema,
+                output_schema,
+                deadline=deadline,
+            )
     except TimeoutError:
         return False
 

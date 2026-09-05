@@ -1,5 +1,6 @@
 import asyncio
 import gzip
+import time
 from collections.abc import Awaitable, Callable, Iterable
 from socket import gaierror
 
@@ -12,6 +13,7 @@ from modall.mcp_adapter.client import (
     DiscoveryError,
     McpClientAdapter,
     ProtocolMismatch,
+    _schema_is_supported,
 )
 from modall.mcp_adapter.policy import (
     EndpointPolicy,
@@ -73,6 +75,8 @@ def adapter_for(
         "clientSecret",
         "authorization",
         "privateKey",
+        "api.key",
+        "http.authorization",
     ),
 )
 def test_structured_secret_screen_recognizes_common_field_spellings(
@@ -141,7 +145,17 @@ def test_adapter_discovers_bounded_domain_types_and_drift() -> None:
     asyncio.run(scenario())
 
 
-def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> None:
+def test_schema_qualification_honors_an_expired_cooperative_deadline() -> None:
+    assert not _schema_is_supported(
+        {"type": "object"},
+        None,
+        deadline=time.monotonic() - 1,
+    )
+
+
+def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     async def scenario() -> None:
         mismatch, endpoint = adapter_for("protocol-mismatch")
         with pytest.raises(ProtocolMismatch):
@@ -186,6 +200,10 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
         key_leaking, endpoint = adapter_for("credential-key-leak")
         with pytest.raises(DiscoveryError, match="secret screening"):
             await key_leaking.discover(endpoint, bearer_token=KEY_LEAK_FIXTURE_TOKEN.encode())
+
+        session_leaking, endpoint = adapter_for("credential-session-id-leak")
+        with pytest.raises(DiscoveryError):
+            await session_leaking.discover(endpoint, bearer_token=FIXTURE_TOKEN.encode())
 
         for profile in (
             "structured-secret",
@@ -233,6 +251,7 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
             await invalid_credential.discover(endpoint, bearer_token=b"bad\x7ftoken")
 
     asyncio.run(scenario())
+    assert FIXTURE_TOKEN not in caplog.text
 
 
 def test_endpoint_policy_rejects_unsafe_resolution_and_scheme_combinations() -> None:
@@ -451,6 +470,15 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
         ) as client:
             with pytest.raises(ResponseLimitExceeded):
                 await client.get("https://example.test")
+
+        async def paginated(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"123456", request=request)
+
+        shared_transport = LimitedTransport(httpx.MockTransport(paginated), 10)
+        async with httpx.AsyncClient(transport=shared_transport) as client:
+            assert (await client.get("https://example.test/page-1")).content == b"123456"
+            with pytest.raises(ResponseLimitExceeded):
+                await client.get("https://example.test/page-2")
 
     asyncio.run(scenario())
 
