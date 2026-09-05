@@ -11,10 +11,17 @@
     }
   },
   "recorded": {
-    "sourceUrl": "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.domdomegg%2Fairtable-mcp-server&limit=1",
-    "capturedAt": "2026-09-05T13:40:00Z",
     "files": {
-      "official_search_sample.json": "fb8633b6e6eb549d2841dbb2691a4da6ddd4e8e50877a2e4f38015790adf4392"
+      "official_search_sample.json": {
+        "sha256": "fb8633b6e6eb549d2841dbb2691a4da6ddd4e8e50877a2e4f38015790adf4392",
+        "sourceUrl": "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.domdomegg%2Fairtable-mcp-server&limit=1",
+        "capturedAt": "2026-09-05T13:40:00Z"
+      },
+      "official_remote_sample.json": {
+        "sha256": "b3f8ceb1cf946338047c26ca424848653f3b7d32f546585603d6bc35cf58cd13",
+        "sourceUrl": "https://registry.modelcontextprotocol.io/v0.1/servers?search=ac.inference.sh%2Fmcp&limit=1",
+        "capturedAt": "2026-09-05T14:02:00Z"
+      }
     }
   }
 }

@@ -10,6 +10,28 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 
 PROTOCOL_REVISION = "2025-06-18"
 FIXTURE_TOKEN = "fixture-token-not-a-real-secret"
+AUTHENTICATED_PROFILES = {
+    "authenticated",
+    "authenticated-redirect",
+    "authenticated-redirect-after-init",
+    "authenticated-redirect-on-call",
+}
+SUPPORTED_PROFILES = {
+    "default",
+    "schema-drift",
+    "metadata-drift",
+    "protocol-mismatch",
+    "malformed",
+    "oversized",
+    "timeout",
+    "disconnect",
+    "headers",
+    "sdk",
+    "redirect",
+    "redirect-after-init",
+    "redirect-on-call",
+    *AUTHENTICATED_PROFILES,
+}
 
 
 def _tools(profile: str) -> list[dict[str, Any]]:
@@ -90,24 +112,30 @@ def create_mcp_fixture_app() -> FastAPI:
         mcp_protocol_version: str | None = Header(default=None),
         mcp_session_id: str | None = Header(default=None),
     ) -> Response:
-        if (
-            profile
-            in {
-                "authenticated",
-                "authenticated-redirect",
-                "authenticated-redirect-after-init",
-                "authenticated-redirect-on-call",
-            }
-            and authorization != f"Bearer {FIXTURE_TOKEN}"
-        ):
+        if profile not in SUPPORTED_PROFILES:
+            return JSONResponse({"error": "unknown fixture profile"}, status_code=404)
+        if profile in AUTHENTICATED_PROFILES and authorization != f"Bearer {FIXTURE_TOKEN}":
             return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if profile not in AUTHENTICATED_PROFILES and authorization is not None:
+            return JSONResponse({"error": "unexpected authorization"}, status_code=400)
         accepted_types = {item.strip() for item in (accept or "").split(",")}
         if not {"application/json", "text/event-stream"}.issubset(accepted_types):
             return JSONResponse({"error": "invalid accept header"}, status_code=406)
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].strip()
+        if content_type != "application/json":
+            return JSONResponse({"error": "invalid content type"}, status_code=415)
 
         payload = await request.json()
         method = payload.get("method")
         request_id = payload.get("id")
+        is_initialized_notification = method == "notifications/initialized"
+        if (
+            payload.get("jsonrpc") != "2.0"
+            or not isinstance(method, str)
+            or (is_initialized_notification and "id" in payload)
+            or (not is_initialized_notification and "id" not in payload)
+        ):
+            return JSONResponse({"error": "invalid JSON-RPC envelope"}, status_code=400)
         if profile in {"redirect", "authenticated-redirect"}:
             return RedirectResponse("https://redirect.invalid/mcp", status_code=307)
         if method == "initialize":
@@ -180,8 +208,8 @@ def create_mcp_fixture_app() -> FastAPI:
             cursor = payload.get("params", {}).get("cursor")
             result: dict[str, Any]
             if cursor is None:
-                result = {"tools": tools[:2], "nextCursor": "page-2"}
-            elif cursor == "page-2":
+                result = {"tools": tools[:2], "nextCursor": f"{mcp_session_id}:page-2"}
+            elif cursor == f"{mcp_session_id}:page-2":
                 result = {"tools": tools[2:]}
             else:
                 return JSONResponse(

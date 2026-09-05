@@ -268,6 +268,23 @@ def test_reference_server_rejects_missing_transport_and_lifecycle_headers() -> N
         async with httpx.AsyncClient(transport=transport, base_url="http://fixture") as client:
             initialize = _request(1, "initialize", {"protocolVersion": PROTOCOL_REVISION})
             assert (await client.post("/mcp/headers", json=initialize)).status_code == 406
+            assert (
+                await client.post(
+                    "/mcp/headers",
+                    headers={**ACCEPT_HEADERS, "Content-Type": "text/plain"},
+                    content=json.dumps(initialize),
+                )
+            ).status_code == 415
+            assert (
+                await client.post("/mcp/unknown", headers=ACCEPT_HEADERS, json=initialize)
+            ).status_code == 404
+            for invalid_envelope in (
+                {"id": 1, "method": "initialize", "params": initialize["params"]},
+                {**initialize, "jsonrpc": "1.0"},
+            ):
+                assert (
+                    await client.post("/mcp/headers", headers=ACCEPT_HEADERS, json=invalid_envelope)
+                ).status_code == 400
             invalid_initializations: tuple[dict[str, object], ...] = (
                 {},
                 {"protocolVersion": "2025-11-25"},
@@ -298,6 +315,17 @@ def test_reference_server_rejects_missing_transport_and_lifecycle_headers() -> N
                     "/mcp/headers", headers=session_headers, json=_request(3, "tools/list", {})
                 )
             ).status_code == 409
+            assert (
+                await client.post(
+                    "/mcp/headers",
+                    headers=session_headers,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 99,
+                        "method": "notifications/initialized",
+                    },
+                )
+            ).status_code == 400
             assert (
                 await client.post(
                     "/mcp/headers",
@@ -333,6 +361,24 @@ def test_reference_server_rejects_missing_transport_and_lifecycle_headers() -> N
                     "/mcp/headers", headers=second_headers, json=_request(6, "tools/list", {})
                 )
             ).status_code == 409
+            assert (
+                await client.post(
+                    "/mcp/headers",
+                    headers=second_headers,
+                    json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                )
+            ).status_code == 202
+            first_page = (
+                await client.post(
+                    "/mcp/headers", headers=session_headers, json=_request(7, "tools/list", {})
+                )
+            ).json()["result"]
+            cross_session_cursor = await client.post(
+                "/mcp/headers",
+                headers=second_headers,
+                json=_request(8, "tools/list", {"cursor": first_page["nextCursor"]}),
+            )
+            assert cross_session_cursor.json()["error"]["code"] == -32602
 
     asyncio.run(scenario())
 
@@ -340,6 +386,24 @@ def test_reference_server_rejects_missing_transport_and_lifecycle_headers() -> N
 def test_pinned_sdk_negotiates_and_parses_reference_server() -> None:
     async def scenario() -> None:
         app = create_mcp_fixture_app()
+
+        async def first_tool(profile: str) -> types.Tool:
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://fixture",
+            )
+            async with (
+                client,
+                streamable_http_client(f"http://fixture/mcp/{profile}", http_client=client) as (
+                    read_stream,
+                    write_stream,
+                    _,
+                ),
+                ClientSession(read_stream, write_stream) as sdk_session,
+            ):
+                await _sdk_initialize(sdk_session)
+                return (await sdk_session.list_tools()).tools[0]
+
         http_client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://fixture",
@@ -403,6 +467,27 @@ def test_pinned_sdk_negotiates_and_parses_reference_server() -> None:
             authenticated_tools = await authenticated_session.list_tools()
             assert authenticated_tools.tools[0].name == "echo"
 
+        leaked_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://fixture",
+            headers={"Authorization": f"Bearer {FIXTURE_TOKEN}"},
+        )
+        with pytest.raises(ExceptionGroup) as leaked_credential:
+            async with (
+                leaked_client,
+                streamable_http_client("http://fixture/mcp/sdk", http_client=leaked_client) as (
+                    read_stream,
+                    write_stream,
+                    _,
+                ),
+                ClientSession(read_stream, write_stream) as leaked_session,
+            ):
+                await _sdk_initialize(leaked_session)
+        assert any(
+            isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 400
+            for error in _leaf_exceptions(leaked_credential.value)
+        )
+
         mismatch_client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://fixture",
@@ -418,6 +503,15 @@ def test_pinned_sdk_negotiates_and_parses_reference_server() -> None:
             assert mismatch.protocolVersion == "2025-11-25"
             mismatch_tools = await mismatch_session.list_tools()
             assert mismatch_tools.tools[0].name == "echo"
+
+        schema_v1 = await first_tool("schema-drift")
+        schema_v2 = await first_tool("schema-drift")
+        assert schema_v1.inputSchema != schema_v2.inputSchema
+        assert schema_v1.description == schema_v2.description
+        metadata_v1 = await first_tool("metadata-drift")
+        metadata_v2 = await first_tool("metadata-drift")
+        assert metadata_v1.inputSchema == metadata_v2.inputSchema
+        assert metadata_v1.description != metadata_v2.description
 
     asyncio.run(scenario())
 
@@ -570,16 +664,26 @@ def test_recorded_registry_pages_are_offline_and_cursor_exact() -> None:
     first = json.loads((FIXTURES / "search_page_1.json").read_text())
     second = json.loads((FIXTURES / "search_page_2.json").read_text())
     recorded = json.loads((FIXTURES / "official_search_sample.json").read_text())
+    recorded_remote = json.loads((FIXTURES / "official_remote_sample.json").read_text())
     assert manifest["apiRevision"] == "v0.1"
     assert "not captured upstream responses" in manifest["generated"]["purpose"]
-    for fixture_kind in ("generated", "recorded"):
-        for filename, digest in manifest[fixture_kind]["files"].items():
-            assert hashlib.sha256((FIXTURES / filename).read_bytes()).hexdigest() == digest
+    for filename, digest in manifest["generated"]["files"].items():
+        assert hashlib.sha256((FIXTURES / filename).read_bytes()).hexdigest() == digest
+    for filename, provenance in manifest["recorded"]["files"].items():
+        assert (
+            hashlib.sha256((FIXTURES / filename).read_bytes()).hexdigest() == provenance["sha256"]
+        )
+        assert provenance["sourceUrl"].startswith(
+            "https://registry.modelcontextprotocol.io/v0.1/servers?"
+        )
     assert first["metadata"]["nextCursor"] == "opaque-page-2"
     assert "nextCursor" not in second["metadata"]
     assert all(item["server"]["remotes"] for item in first["servers"] + second["servers"])
     assert recorded["servers"][0]["server"]["name"] == ("io.github.domdomegg/airtable-mcp-server")
     assert "io.modelcontextprotocol.registry/official" in recorded["servers"][0]["_meta"]
+    remote = recorded_remote["servers"][0]["server"]["remotes"][0]
+    assert remote["type"] == "streamable-http"
+    assert remote["url"].startswith("https://")
 
 
 def test_selected_sdk_supports_qualified_protocol_revision() -> None:
