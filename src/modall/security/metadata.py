@@ -43,7 +43,7 @@ _SENSITIVE_MARKER_PREFIX = re.compile(
 )
 _SENSITIVE_PATH_MARKER = re.compile(
     r"(?:^|/)(?:api[-_]?key|(?:access[-_]?)?token|credential|private[-_]?key|secret|password)"
-    r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,})\Z",
+    r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,})(?=$|[!$&'()*,;:@])",
     re.IGNORECASE,
 )
 _AUTH_MODE_WORDS = {
@@ -88,23 +88,36 @@ def contains_obvious_secret(value: str) -> bool:
     if _OBVIOUS_SECRET.search(value) is not None:
         return True
     if any(
-        _looks_like_opaque_value(match.group("value"))
+        _looks_like_secret_candidate(match.group("value"))
         for match in _GENERIC_SECRET_VALUE.finditer(value)
     ):
         return True
-    return any(
-        _looks_like_opaque_value(match.group("assigned") or match.group("bearer"))
-        for match in _AUTHORIZATION_VALUE.finditer(value)
-    )
+    for match in _AUTHORIZATION_VALUE.finditer(value):
+        candidate = match.group("assigned") or match.group("bearer")
+        if match.group("assigned") is not None and _is_auth_mode(candidate):
+            continue
+        if _looks_like_secret_candidate(candidate):
+            return True
+    return False
+
+
+def _entropy_bits(value: str) -> float:
+    counts = Counter(value)
+    length = len(value)
+    return sum(count * math.log2(length / count) for count in counts.values())
 
 
 def _looks_like_opaque_value(value: str) -> bool:
     if len(value) < 12 or _OPAQUE_ANNOTATION_VALUE.fullmatch(value) is None:
         return False
-    counts = Counter(value)
     length = len(value)
-    entropy_bits = sum(count * math.log2(length / count) for count in counts.values())
-    return entropy_bits >= length * 3.5
+    return _entropy_bits(value) >= length * 3.5
+
+
+def _looks_like_secret_candidate(value: str) -> bool:
+    return _looks_like_opaque_value(value) or (
+        len(value) >= 16 and value.isdecimal() and _entropy_bits(value) >= 64
+    )
 
 
 def _is_auth_mode(value: str) -> bool:

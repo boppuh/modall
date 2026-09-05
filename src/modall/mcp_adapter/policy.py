@@ -376,10 +376,14 @@ def _contains_sensitive_sse_event(event: bytes) -> bool:
         text = event.decode("utf-8")
     except UnicodeDecodeError:
         return False
-    data_lines = [
-        line.partition(":")[2].lstrip() for line in text.splitlines() if line.startswith("data:")
-    ]
-    return bool(data_lines) and _contains_sensitive_json_text("\n".join(data_lines))
+    lines = text.splitlines()
+    field_values = [line.partition(":")[2].lstrip() for line in lines if ":" in line]
+    data_lines = [line.partition(":")[2].lstrip() for line in lines if line.startswith("data:")]
+    return (
+        contains_obvious_secret(text)
+        or any(_contains_sensitive_json_text(value) for value in field_values)
+        or (bool(data_lines) and _contains_sensitive_json_text("\n".join(data_lines)))
+    )
 
 
 class RawByteBudget:

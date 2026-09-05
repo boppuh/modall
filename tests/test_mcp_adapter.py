@@ -125,6 +125,7 @@ def test_structured_secret_screen_allows_authentication_status_metadata(
         "token:\0abcdefgh12345678",
         "token AbCdEfGhIjKlMnOpQrStUvWx",
         'Use token: "AbCdEfGhIjKlMnOpQrStUvWx"',
+        "token: 12345678901234567890",
     ),
 )
 def test_unstructured_secret_screen_recognizes_generic_markers(value: str) -> None:
@@ -138,6 +139,8 @@ def test_unstructured_secret_screen_recognizes_generic_markers(value: str) -> No
         "api-key-compatible endpoint",
         "secret-management helper",
         "Uses Bearer authentication for requests",
+        "Authentication: authorization_code",
+        "Authentication: oauth2_required",
     ),
 )
 def test_unstructured_secret_screen_allows_hyphenated_prose(value: str) -> None:
@@ -374,6 +377,10 @@ def test_raw_structured_screen_handles_sse_and_invalid_utf8() -> None:
     sensitive_event = b'data: {"extension":{"token":"AbCdEfGhIjKlMnOpQrStUvWx"}}\n\n'
     assert _contains_sensitive_structured_response(sensitive_event)
     assert _contains_sensitive_structured_response(sensitive_event.replace(b"\n\n", b"\r\r"))
+    assert _contains_sensitive_structured_response(
+        b': {"token":"AbCdEfGhIjKlMnOpQrStUvWx"}\n'
+        b'data: {"jsonrpc":"2.0","result":{"status":"safe"}}\n\n'
+    )
     assert not _contains_sensitive_structured_response(b'data: {"status":"ready"}\n\n')
     assert not _contains_sensitive_structured_response(b"\xff")
     assert _contains_sensitive_structured_response(
