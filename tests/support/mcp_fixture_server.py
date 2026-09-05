@@ -57,7 +57,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
 def create_mcp_fixture_app() -> FastAPI:
     app = FastAPI()
     next_session = count(1)
-    sessions: dict[str, tuple[str, str, bool]] = {}
+    drift_generations: dict[str, int] = {}
+    sessions: dict[str, tuple[str, str, bool, str]] = {}
 
     @app.post("/mcp/{profile}")
     async def mcp(
@@ -83,7 +84,12 @@ def create_mcp_fixture_app() -> FastAPI:
                 return JSONResponse({"error": "unsupported requested protocol"}, status_code=400)
             revision = "2025-11-25" if profile == "protocol-mismatch" else PROTOCOL_REVISION
             session_id = f"{profile}-session-{next(next_session)}"
-            sessions[session_id] = (profile, revision, False)
+            tool_profile = profile
+            if profile in {"schema-drift", "metadata-drift"}:
+                generation = drift_generations.get(profile, 0) + 1
+                drift_generations[profile] = generation
+                tool_profile = f"{profile}-v{min(generation, 2)}"
+            sessions[session_id] = (profile, revision, False, tool_profile)
             return JSONResponse(
                 {
                     "jsonrpc": "2.0",
@@ -100,7 +106,7 @@ def create_mcp_fixture_app() -> FastAPI:
         if session is None or session[:2] != (profile, mcp_protocol_version):
             return JSONResponse({"error": "invalid session or protocol header"}, status_code=400)
         if method == "notifications/initialized":
-            sessions[mcp_session_id or ""] = (profile, session[1], True)
+            sessions[mcp_session_id or ""] = (profile, session[1], True, session[3])
             return Response(status_code=202)
         if not session[2]:
             return JSONResponse({"error": "session is not initialized"}, status_code=409)
@@ -124,7 +130,7 @@ def create_mcp_fixture_app() -> FastAPI:
 
             return StreamingResponse(abort_body(), media_type="application/json")
         if method == "tools/list":
-            tools = _tools(profile)
+            tools = _tools(session[3])
             cursor = payload.get("params", {}).get("cursor")
             result: dict[str, Any]
             if cursor is None:

@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+from datetime import timedelta
 from importlib.metadata import version
 from pathlib import Path
 
@@ -63,22 +64,45 @@ async def _handshake(
     return headers
 
 
+async def _sdk_initialize(session: ClientSession) -> types.InitializeResult:
+    initialized = await session.send_request(
+        types.ClientRequest(
+            types.InitializeRequest(
+                params=types.InitializeRequestParams(
+                    protocolVersion=PROTOCOL_REVISION,
+                    capabilities=types.ClientCapabilities(),
+                    clientInfo=types.Implementation(name="modall-tests", version="1"),
+                )
+            )
+        ),
+        types.InitializeResult,
+    )
+    await session.send_notification(types.ClientNotification(types.InitializedNotification()))
+    return initialized
+
+
+def _leaf_exceptions(error: BaseException) -> list[BaseException]:
+    if isinstance(error, BaseExceptionGroup):
+        return [leaf for child in error.exceptions for leaf in _leaf_exceptions(child)]
+    return [error]
+
+
 def test_reference_server_initialization_pagination_drift_and_results() -> None:
     async def scenario() -> None:
         transport = httpx.ASGITransport(app=create_mcp_fixture_app())
         async with httpx.AsyncClient(transport=transport, base_url="http://fixture") as client:
             default_headers = await _handshake(client, "default")
-            schema_v1_headers = await _handshake(client, "schema-drift-v1")
+            schema_v1_headers = await _handshake(client, "schema-drift")
             page_1 = (
                 await client.post(
-                    "/mcp/schema-drift-v1",
+                    "/mcp/schema-drift",
                     headers=schema_v1_headers,
                     json=_request(2, "tools/list", {}),
                 )
             ).json()["result"]
             page_2 = (
                 await client.post(
-                    "/mcp/schema-drift-v1",
+                    "/mcp/schema-drift",
                     headers=schema_v1_headers,
                     json=_request(3, "tools/list", {"cursor": page_1["nextCursor"]}),
                 )
@@ -89,25 +113,33 @@ def test_reference_server_initialization_pagination_drift_and_results() -> None:
                 "unsupported-content",
                 "fail",
             ]
-            schema_v2_headers = await _handshake(client, "schema-drift-v2")
+            schema_v2_headers = await _handshake(client, "schema-drift")
             schema_drift = (
                 await client.post(
-                    "/mcp/schema-drift-v2",
+                    "/mcp/schema-drift",
                     headers=schema_v2_headers,
                     json=_request(4, "tools/list", {}),
                 )
             ).json()["result"]["tools"][0]
             assert schema_drift["inputSchema"] != page_1["tools"][0]["inputSchema"]
-            metadata_headers = await _handshake(client, "metadata-drift-v2")
-            metadata_drift = (
+            metadata_v1_headers = await _handshake(client, "metadata-drift")
+            metadata_v1 = (
                 await client.post(
-                    "/mcp/metadata-drift-v2",
-                    headers=metadata_headers,
+                    "/mcp/metadata-drift",
+                    headers=metadata_v1_headers,
                     json=_request(5, "tools/list", {}),
                 )
             ).json()["result"]["tools"][0]
-            assert metadata_drift["inputSchema"] == page_1["tools"][0]["inputSchema"]
-            assert metadata_drift["description"] != page_1["tools"][0]["description"]
+            metadata_headers = await _handshake(client, "metadata-drift")
+            metadata_drift = (
+                await client.post(
+                    "/mcp/metadata-drift",
+                    headers=metadata_headers,
+                    json=_request(6, "tools/list", {}),
+                )
+            ).json()["result"]["tools"][0]
+            assert metadata_drift["inputSchema"] == metadata_v1["inputSchema"]
+            assert metadata_drift["description"] != metadata_v1["description"]
             called = await client.post(
                 "/mcp/default",
                 headers=default_headers,
@@ -282,8 +314,9 @@ def test_reference_server_rejects_missing_transport_and_lifecycle_headers() -> N
 
 def test_pinned_sdk_negotiates_and_parses_reference_server() -> None:
     async def scenario() -> None:
+        app = create_mcp_fixture_app()
         http_client = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=create_mcp_fixture_app()),
+            transport=httpx.ASGITransport(app=app),
             base_url="http://fixture",
         )
         async with (
@@ -295,24 +328,12 @@ def test_pinned_sdk_negotiates_and_parses_reference_server() -> None:
             ),
             ClientSession(read_stream, write_stream) as session,
         ):
-            initialized = await session.send_request(
-                types.ClientRequest(
-                    types.InitializeRequest(
-                        params=types.InitializeRequestParams(
-                            protocolVersion=PROTOCOL_REVISION,
-                            capabilities=types.ClientCapabilities(),
-                            clientInfo=types.Implementation(name="modall-tests", version="1"),
-                        )
-                    )
-                ),
-                types.InitializeResult,
-            )
+            initialized = await _sdk_initialize(session)
             assert initialized.protocolVersion == PROTOCOL_REVISION
-            await session.send_notification(
-                types.ClientNotification(types.InitializedNotification())
-            )
             tools = await session.list_tools()
             assert [tool.name for tool in tools.tools] == ["echo", "status"]
+            remaining = await session.list_tools(cursor=tools.nextCursor)
+            assert [tool.name for tool in remaining.tools] == ["unsupported-content", "fail"]
             echo = await session.call_tool("echo", {"message": "hello"})
             assert echo.structuredContent == {"message": "hello"}
             assert isinstance(echo.content[0], types.TextContent)
@@ -328,6 +349,62 @@ def test_pinned_sdk_negotiates_and_parses_reference_server() -> None:
             with pytest.raises(McpError) as unknown:
                 await session.call_tool("missing", {})
             assert unknown.value.error.code == -32602
+
+        authenticated_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://fixture",
+            headers={"Authorization": f"Bearer {FIXTURE_TOKEN}"},
+        )
+        async with (
+            authenticated_client,
+            streamable_http_client(
+                "http://fixture/mcp/authenticated", http_client=authenticated_client
+            ) as (read_stream, write_stream, _),
+            ClientSession(read_stream, write_stream) as authenticated_session,
+        ):
+            await _sdk_initialize(authenticated_session)
+            authenticated_tools = await authenticated_session.list_tools()
+            assert authenticated_tools.tools[0].name == "echo"
+
+    asyncio.run(scenario())
+
+
+def test_pinned_sdk_surfaces_timeout_and_disconnect_faults() -> None:
+    async def exercise(profile: str) -> None:
+        http_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_mcp_fixture_app()),
+            base_url="http://fixture",
+        )
+        async with (
+            asyncio.timeout(1),
+            http_client,
+            streamable_http_client(f"http://fixture/mcp/{profile}", http_client=http_client) as (
+                read_stream,
+                write_stream,
+                _,
+            ),
+            ClientSession(
+                read_stream,
+                write_stream,
+                read_timeout_seconds=timedelta(milliseconds=10),
+            ) as session,
+        ):
+            await _sdk_initialize(session)
+            await session.list_tools()
+
+    async def scenario() -> None:
+        with pytest.raises(ExceptionGroup) as timeout_error:
+            await exercise("timeout")
+        timeout_leaves = _leaf_exceptions(timeout_error.value)
+        assert any(
+            isinstance(error, McpError) and "Timed out" in str(error) for error in timeout_leaves
+        )
+
+        with pytest.raises(ExceptionGroup) as disconnect_error:
+            await exercise("disconnect")
+        assert any(
+            isinstance(error, ConnectionError) for error in _leaf_exceptions(disconnect_error.value)
+        )
 
     asyncio.run(scenario())
 
