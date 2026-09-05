@@ -629,7 +629,8 @@ class CapabilityService:
         )
         self._session.add_all((version, binding))
         capability.pending_version_id = version_id
-        capability.status = CapabilityStatus.PENDING_REVIEW.value
+        if capability.typed_status != CapabilityStatus.DISABLED:
+            capability.status = CapabilityStatus.PENDING_REVIEW.value
         capability.status_epoch += 1
         await self._session.flush()
         self._append_status_event(context, capability, version_id)

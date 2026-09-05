@@ -163,10 +163,15 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
             "composite-structured-secret",
             "numeric-sensitive-metadata",
             "credential-metadata",
+            "generic-token-metadata",
         ):
             structured, endpoint = adapter_for(profile)
             with pytest.raises(DiscoveryError, match="secret screening"):
                 await structured.discover(endpoint)
+
+        schema_annotation, endpoint = adapter_for("schema-annotation-secret")
+        with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
+            await schema_annotation.discover(endpoint)
 
         oversized_scalar, endpoint = adapter_for("oversized-scalar")
         with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
@@ -412,7 +417,13 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
 
     asyncio.run(scenario())
 
-    with pytest.raises(ValueError):
-        TransportLimits(response_bytes=0)
+    for invalid_limits in (
+        {"response_bytes": 0},
+        {"connect_seconds": float("inf")},
+        {"read_seconds": float("-inf")},
+        {"total_seconds": float("nan")},
+    ):
+        with pytest.raises(ValueError):
+            TransportLimits(**invalid_limits)
     with pytest.raises(ValueError):
         McpClientAdapter(endpoint_policy=EndpointPolicy(environment="test"), max_pages=0)

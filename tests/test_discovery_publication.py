@@ -306,6 +306,75 @@ def test_manual_disable_survives_drift_disappearance_and_reversion() -> None:
     asyncio.run(scenario())
 
 
+def test_manual_disable_survives_fresh_drift_and_reversion() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="disabled-drift-admin")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Disabled drift",
+                    endpoint_url="https://mcp.example/disabled-drift",
+                    secret_binding_id=None,
+                    policy_version="policy-v1",
+                )
+                connection_id = connection.id
+                first_lease = await lease_for(session, context, connection_id, "worker-1")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context, lease=first_lease, result=result_for()
+                )
+                capability = await session.scalar(
+                    select(Capability).where(Capability.connection_id == connection_id)
+                )
+                assert capability is not None and capability.pending_version_id is not None
+                approved_version_id = capability.pending_version_id
+                await CapabilityService(session).enable(
+                    context=context,
+                    capability_id=capability.id,
+                    expected_version_id=approved_version_id,
+                )
+                await CapabilityService(session).disable(
+                    context=context,
+                    capability_id=capability.id,
+                    expected_version_id=approved_version_id,
+                )
+
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                drift_lease = await lease_for(session, context, connection_id, "worker-2")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context,
+                    lease=drift_lease,
+                    result=result_for(description="fresh drift"),
+                )
+                capability = await session.scalar(
+                    select(Capability).where(Capability.connection_id == connection_id)
+                )
+                assert capability is not None
+                assert capability.typed_status == CapabilityStatus.DISABLED
+                assert capability.pending_version_id is not None
+
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                return_lease = await lease_for(session, context, connection_id, "worker-3")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context, lease=return_lease, result=result_for()
+                )
+                capability = await session.scalar(
+                    select(Capability).where(Capability.connection_id == connection_id)
+                )
+                assert capability is not None
+                assert capability.typed_status == CapabilityStatus.DISABLED
+                assert capability.pending_version_id is None
+                assert capability.enabled_version_id == approved_version_id
+                assert (
+                    await session.scalar(select(func.count()).select_from(CapabilityVersion)) == 2
+                )
+
+    asyncio.run(scenario())
+
+
 def test_enabled_capability_reappears_without_reapproval() -> None:
     async def scenario() -> None:
         async with database() as factory:

@@ -16,7 +16,9 @@ _OBVIOUS_SECRET = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_JSON_FIELD = re.compile(
-    r"(?:api[_-]?key|access[_-]?token|credential|secret|password)", re.IGNORECASE
+    r"(?:^|[_-])(?:api[_-]?key|(?:access|refresh|session|auth|bearer)?[_-]?token|"
+    r"credentials?|secret|password)(?:$|[_-])",
+    re.IGNORECASE,
 )
 
 
@@ -33,10 +35,25 @@ def contains_sensitive_json(value: object) -> bool:
 def contains_sensitive_schema(value: object) -> bool:
     """Screen schema metadata without treating property names as stored values."""
 
-    stack = [(value, False, False)]
+    stack = [(value, False)]
     literal_keys = {"const", "default", "enum", "example", "examples"}
+    schema_map_keys = {"$defs", "definitions", "dependentSchemas", "patternProperties"}
+    schema_keys = {
+        "additionalProperties",
+        "contains",
+        "contentSchema",
+        "else",
+        "if",
+        "items",
+        "not",
+        "propertyNames",
+        "then",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    }
+    schema_array_keys = {"allOf", "anyOf", "oneOf", "prefixItems"}
     while stack:
-        current, sensitive_property, sensitive_metadata = stack.pop()
+        current, sensitive_property = stack.pop()
         if isinstance(current, dict):
             for key, child in current.items():
                 if key == "properties" and isinstance(child, dict):
@@ -46,20 +63,17 @@ def contains_sensitive_schema(value: object) -> bool:
                                 property_schema,
                                 sensitive_property
                                 or _SENSITIVE_JSON_FIELD.search(property_name) is not None,
-                                sensitive_metadata,
                             )
                         )
                     continue
-                if key in {
-                    "$defs",
-                    "definitions",
-                    "dependentSchemas",
-                    "patternProperties",
-                } and isinstance(child, dict):
-                    stack.extend(
-                        (schema, sensitive_property, sensitive_metadata)
-                        for schema in child.values()
-                    )
+                if key in schema_map_keys and isinstance(child, dict):
+                    stack.extend((schema, sensitive_property) for schema in child.values())
+                    continue
+                if key in schema_keys and isinstance(child, (dict, bool)):
+                    stack.append((child, sensitive_property))
+                    continue
+                if key in schema_array_keys and isinstance(child, list):
+                    stack.extend((schema, sensitive_property) for schema in child)
                     continue
                 if (
                     sensitive_property
@@ -67,24 +81,11 @@ def contains_sensitive_schema(value: object) -> bool:
                     and _contains_obvious_secret_in_json(child, initially_sensitive=True)
                 ):
                     return True
-                stack.append(
-                    (
-                        child,
-                        sensitive_property,
-                        sensitive_metadata or _SENSITIVE_JSON_FIELD.search(key) is not None,
-                    )
-                )
-        elif isinstance(current, list):
-            stack.extend((child, sensitive_property, sensitive_metadata) for child in current)
-        elif isinstance(current, str):
-            if (sensitive_metadata and len(current) >= 8) or contains_obvious_secret(current):
-                return True
-        elif (
-            sensitive_metadata
-            and isinstance(current, (int, float))
-            and not isinstance(current, bool)
-            and len(str(current)) >= 8
-        ):
+                if key not in literal_keys and contains_sensitive_json({key: child}):
+                    return True
+                if key in literal_keys and contains_sensitive_json(child):
+                    return True
+        elif isinstance(current, str) and contains_obvious_secret(current):
             return True
     return False
 

@@ -1,6 +1,7 @@
 """Fail-closed endpoint validation and bounded HTTP response streaming."""
 
 import asyncio
+import math
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -46,6 +47,10 @@ class TransportLimits:
         if (
             self.response_bytes < 1
             or min(self.connect_seconds, self.read_seconds, self.total_seconds) <= 0
+            or not all(
+                math.isfinite(value)
+                for value in (self.connect_seconds, self.read_seconds, self.total_seconds)
+            )
         ):
             raise ValueError("transport limits must be positive")
 
