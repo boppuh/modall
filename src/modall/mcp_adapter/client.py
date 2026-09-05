@@ -3,11 +3,15 @@
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import time
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from threading import Lock
 from typing import Any
 
 import httpx
@@ -39,6 +43,36 @@ from modall.security.metadata import (
 QUALIFIED_PROTOCOL_REVISION = "2025-06-18"
 _RE2_OPTIONS = re2.Options()
 _RE2_OPTIONS.log_errors = False
+
+
+class _SuppressUntrustedSdkLogs(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        del record
+        return False
+
+
+_SDK_LOG_FILTER = _SuppressUntrustedSdkLogs()
+_SDK_LOGGER_NAMES = ("mcp.client.session", "mcp.client.streamable_http")
+_SDK_LOG_LOCK = Lock()
+_SDK_LOG_USERS = 0
+
+
+@contextmanager
+def _suppress_untrusted_sdk_logs() -> Iterator[None]:
+    global _SDK_LOG_USERS
+    with _SDK_LOG_LOCK:
+        if _SDK_LOG_USERS == 0:
+            for logger_name in _SDK_LOGGER_NAMES:
+                logging.getLogger(logger_name).addFilter(_SDK_LOG_FILTER)
+        _SDK_LOG_USERS += 1
+    try:
+        yield
+    finally:
+        with _SDK_LOG_LOCK:
+            _SDK_LOG_USERS -= 1
+            if _SDK_LOG_USERS == 0:
+                for logger_name in _SDK_LOGGER_NAMES:
+                    logging.getLogger(logger_name).removeFilter(_SDK_LOG_FILTER)
 
 
 class DiscoveryError(Exception):
@@ -140,7 +174,8 @@ class McpClientAdapter:
                     timeout=timeout,
                     follow_redirects=False,
                 )
-                return await self._discover(client, endpoint, credential_text)
+                with _suppress_untrusted_sdk_logs():
+                    return await self._discover(client, endpoint, credential_text)
         except (ProtocolMismatch, DiscoveryError):
             raise
         except Exception as exc:

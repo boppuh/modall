@@ -32,6 +32,7 @@ SUPPORTED_PROFILES = {
     "metadata-drift",
     "protocol-mismatch",
     "malformed",
+    "malformed-secret",
     "oversized",
     "timeout",
     "disconnect",
@@ -299,8 +300,13 @@ def create_mcp_fixture_app() -> FastAPI:
             return RedirectResponse("https://redirect.invalid/mcp", status_code=307)
         if profile == "timeout":
             await asyncio.sleep(0.05)
-        if profile == "malformed":
-            return Response(b'{"jsonrpc":', media_type="application/json")
+        if profile in {"malformed", "malformed-secret"}:
+            body = (
+                b'{"jsonrpc":"2.0","secret":"sk_live_abcdefghijkl"'
+                if profile == "malformed-secret"
+                else b'{"jsonrpc":'
+            )
+            return Response(body, media_type="application/json")
         if profile == "oversized":
             body = json.dumps(
                 {

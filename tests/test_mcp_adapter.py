@@ -169,6 +169,10 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
             with pytest.raises(DiscoveryError):
                 await client.discover(endpoint)
 
+        malformed_secret, endpoint = adapter_for("malformed-secret")
+        with pytest.raises(DiscoveryError):
+            await malformed_secret.discover(endpoint)
+
         repeated, endpoint = adapter_for("repeated-cursor")
         with pytest.raises(DiscoveryError, match="repeated a cursor"):
             await repeated.discover(endpoint)
@@ -252,6 +256,7 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
 
     asyncio.run(scenario())
     assert FIXTURE_TOKEN not in caplog.text
+    assert "sk_live_abcdefghijkl" not in caplog.text
 
 
 def test_endpoint_policy_rejects_unsafe_resolution_and_scheme_combinations() -> None:
