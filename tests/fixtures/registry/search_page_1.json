@@ -1,0 +1,36 @@
+{
+  "servers": [
+    {
+      "server": {
+        "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+        "name": "io.modall.fixture/weather",
+        "description": "Read public weather observations",
+        "title": "Fixture Weather",
+        "repository": {
+          "url": "https://github.com/example/weather-mcp",
+          "source": "github",
+          "id": "10001"
+        },
+        "version": "1.2.0",
+        "remotes": [
+          {
+            "type": "streamable-http",
+            "url": "https://weather.example/mcp"
+          }
+        ]
+      },
+      "_meta": {
+        "io.modelcontextprotocol.registry/official": {
+          "status": "active",
+          "publishedAt": "2026-08-01T12:00:00Z",
+          "updatedAt": "2026-08-20T12:00:00Z",
+          "isLatest": true
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "nextCursor": "opaque-page-2",
+    "count": 1
+  }
+}
