@@ -162,6 +162,8 @@ class ConnectionService:
         connection.verified_version_id = expected_version_id
         connection.pending_version_id = None
         connection.lifecycle = ConnectionLifecycle.ACTIVE.value
+        connection.allocated_control_epoch = None
+        connection.allocated_target_version_id = None
         self._audit(context, AuditAction.CONNECTION_VERIFIED, connection.id, correlation_id)
         await self._session.flush()
         return connection
@@ -324,6 +326,10 @@ class ConnectionService:
         except UnicodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
         canonical_endpoint = f"https://{hostname}{':443' if port == 443 else ''}{decoded_path}"
+        try:
+            canonical_endpoint.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("invalid endpoint URL") from exc
         if _contains_obvious_secret(canonical_endpoint):
             raise ValueError("endpoint URL contains credential-shaped content")
         if cls._POLICY_VERSION.fullmatch(policy_version) is None:
@@ -698,6 +704,12 @@ class CapabilityService:
             raise ValueError("invalid metadata digest")
         if cls._PROTOCOL_REVISION.fullmatch(protocol_revision) is None:
             raise ValueError("invalid protocol revision")
+        try:
+            for value in (tool_identity, tool_name, display_name, description, protocol_revision):
+                if value is not None:
+                    value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("capability metadata is not valid UTF-8") from exc
         scalar_metadata = "\n".join(
             value
             for value in (tool_identity, tool_name, display_name, description, protocol_revision)
@@ -776,20 +788,25 @@ _SENSITIVE_JSON_FIELD = re.compile(
 
 
 def _contains_obvious_secret_in_json(value: object) -> bool:
-    stack = [value]
+    stack = [(value, False)]
     while stack:
-        current = stack.pop()
+        current, sensitive_context = stack.pop()
         if isinstance(current, dict):
             for key, child in current.items():
-                if (
-                    _SENSITIVE_JSON_FIELD.fullmatch(key)
-                    and isinstance(child, str)
-                    and len(child) >= 8
-                ):
+                key_is_sensitive = _SENSITIVE_JSON_FIELD.fullmatch(key) is not None
+                if key_is_sensitive and isinstance(child, str) and len(child) >= 8:
                     return True
-                stack.append(child)
+                if sensitive_context and key in {"const", "default", "enum", "example", "examples"}:
+                    literals = [child]
+                    while literals:
+                        literal = literals.pop()
+                        if isinstance(literal, str) and len(literal) >= 8:
+                            return True
+                        if isinstance(literal, list):
+                            literals.extend(literal)
+                stack.append((child, sensitive_context or key_is_sensitive))
         elif isinstance(current, list):
-            stack.extend(current)
+            stack.extend((child, sensitive_context) for child in current)
         elif isinstance(current, str) and _contains_obvious_secret(current):
             return True
     return False

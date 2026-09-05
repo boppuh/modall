@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import event, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from modall.audit.types import AuditAction
@@ -139,7 +140,25 @@ def test_connection_versions_and_lifecycle_are_truthful() -> None:
                 assert promoted.typed_lifecycle == ConnectionLifecycle.ACTIVE
                 assert promoted.pending_version_id is None
                 assert promoted.verified_version_id == first_version_id
+                assert promoted.allocated_control_epoch is None
+                assert promoted.allocated_target_version_id is None
                 assert ConnectionService.is_executable(promoted, first_version_id) is True
+                with pytest.raises(InvalidConnectionTransition):
+                    await CapabilityService(session).record_version(
+                        context=context,
+                        connection_id=connection_id,
+                        connection_version_id=first_version_id,
+                        expected_control_epoch=current_epoch,
+                        expected_refresh_generation=current_generation,
+                        tool_identity="tools/late",
+                        tool_name="late",
+                        display_name="Late",
+                        description=None,
+                        input_schema={},
+                        output_schema=None,
+                        metadata_digest="a" * 64,
+                        protocol_revision="2025-06-18",
+                    )
 
             async with transaction(factory) as session:
                 context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
@@ -339,6 +358,7 @@ def test_connection_versions_are_immutable() -> None:
         "https://mcp.example/sk_live_abcdefghijkl",
         "https://mcp.example/%73%6b_live_abcdefghijkl",
         "https://sk-abcdefghijklmnop.example.com/mcp",
+        "https://mcp.example/\ud800",
     ],
 )
 def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> None:
@@ -558,6 +578,7 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
         {"description": "x" * 8193},
         {"default": "sk_live_abcdefghijkl"},
         {"api_key": "abcdefghijkl"},
+        {"properties": {"api_key": {"type": "string", "default": "abcdefghijkl"}}},
         {"description": "\ud800"},
         {"properties": {str(index): {} for index in range(1025)}},
     ],
@@ -720,6 +741,39 @@ def test_registry_entry_identity_is_immutable() -> None:
                     await session.flush()
 
     asyncio.run(scenario())
+
+
+def test_official_registry_entry_requires_external_identity() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            _, workspace_id = await bootstrap(factory, subject=str(uuid4()))
+            with pytest.raises(IntegrityError, match="official_external_id"):
+                async with transaction(factory) as session:
+                    session.add(
+                        RegistryEntry(
+                            workspace_id=workspace_id,
+                            source="official",
+                            external_id=None,
+                            current_version_id=None,
+                        )
+                    )
+                    await session.flush()
+
+    asyncio.run(scenario())
+
+
+def test_capability_metadata_rejects_non_utf8_scalar() -> None:
+    with pytest.raises(ValueError, match="UTF-8"):
+        CapabilityService._validate_metadata(
+            tool_identity="tools/review",
+            tool_name="review",
+            display_name="\ud800",
+            description=None,
+            input_schema={},
+            output_schema=None,
+            metadata_digest="a" * 64,
+            protocol_revision="2025-06-18",
+        )
 
 
 def test_stale_verification_cannot_survive_disable_enable() -> None:

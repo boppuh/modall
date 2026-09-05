@@ -149,6 +149,10 @@ class RegistryEntry(Base):
         UniqueConstraint("workspace_id", "id"),
         UniqueConstraint("workspace_id", "source", "external_id"),
         CheckConstraint("source IN ('manual', 'official')", name="ck_registry_entry_source"),
+        CheckConstraint(
+            "source <> 'official' OR (external_id IS NOT NULL AND length(trim(external_id)) > 0)",
+            name="ck_registry_entry_official_external_id",
+        ),
         ForeignKeyConstraint(
             ["id", "current_version_id"],
             ["registry_entry_versions.registry_entry_id", "registry_entry_versions.id"],
@@ -207,8 +211,10 @@ class ServerConnection(Base):
         CheckConstraint(
             "(refresh_generation = 0 AND allocated_control_epoch IS NULL AND "
             "allocated_target_version_id IS NULL) OR "
-            "(refresh_generation > 0 AND allocated_control_epoch IS NOT NULL AND "
-            "allocated_target_version_id IS NOT NULL)",
+            "(refresh_generation > 0 AND ((allocated_control_epoch IS NULL AND "
+            "allocated_target_version_id IS NULL) OR "
+            "(allocated_control_epoch IS NOT NULL AND "
+            "allocated_target_version_id IS NOT NULL)))",
             name="ck_connection_refresh_allocation",
         ),
         CheckConstraint(

@@ -40,6 +40,10 @@ def upgrade() -> None:
         sa.Column("external_id", sa.String(256), nullable=True),
         sa.Column("current_version_id", sa.Uuid(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "source <> 'official' OR (external_id IS NOT NULL AND length(trim(external_id)) > 0)",
+            name="ck_registry_entry_official_external_id",
+        ),
         sa.CheckConstraint("source IN ('manual', 'official')", name="ck_registry_entry_source"),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
@@ -96,8 +100,10 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "(refresh_generation = 0 AND allocated_control_epoch IS NULL AND "
             "allocated_target_version_id IS NULL) OR "
-            "(refresh_generation > 0 AND allocated_control_epoch IS NOT NULL AND "
-            "allocated_target_version_id IS NOT NULL)",
+            "(refresh_generation > 0 AND ((allocated_control_epoch IS NULL AND "
+            "allocated_target_version_id IS NULL) OR "
+            "(allocated_control_epoch IS NOT NULL AND "
+            "allocated_target_version_id IS NOT NULL)))",
             name="ck_connection_refresh_allocation",
         ),
         sa.CheckConstraint(
