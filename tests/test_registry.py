@@ -330,6 +330,12 @@ def test_connection_versions_are_immutable() -> None:
         "https://localhost\u3002",
         "https://%31%32%37.0.0.1",
         "https://%6cocalhost",
+        "https://mcp example/path",
+        "https://-mcp.example/path",
+        "https://mcp-.example/path",
+        "https://mcp.example/%ZZ",
+        "https://mcp.example/sk_live_abcdefghijkl",
+        "https://mcp.example/%73%6b_live_abcdefghijkl",
     ],
 )
 def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> None:
@@ -514,6 +520,96 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
                     assert event_row is not None
                     event_row.status = CapabilityStatus.DISABLED.value
                     await session.flush()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"description": "x" * 8193},
+        {"default": "sk_live_abcdefghijkl"},
+        {"properties": {str(index): {} for index in range(1025)}},
+    ],
+)
+def test_capability_metadata_rejects_unbounded_or_secret_schemas(
+    schema: dict[str, object],
+) -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject=str(uuid4()))
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Bounded discovery",
+                    endpoint_url="https://mcp.example/tools",
+                    secret_binding_id=None,
+                    policy_version="v1",
+                )
+                connection_version_id = connection.pending_version_id
+                assert connection_version_id is not None
+                generation, control_epoch, _ = await ConnectionService(
+                    session
+                ).allocate_refresh_generation(context=context, connection_id=connection.id)
+                with pytest.raises(ValueError, match="schema"):
+                    await CapabilityService(session).record_version(
+                        context=context,
+                        connection_id=connection.id,
+                        connection_version_id=connection_version_id,
+                        expected_control_epoch=control_epoch,
+                        expected_refresh_generation=generation,
+                        tool_identity="tools/unbounded",
+                        tool_name="unbounded",
+                        display_name="Unbounded",
+                        description=None,
+                        input_schema=schema,
+                        output_schema=None,
+                        metadata_digest="f" * 64,
+                        protocol_revision="2025-06-18",
+                    )
+
+    asyncio.run(scenario())
+
+
+def test_capability_metadata_rejects_excessive_schema_depth() -> None:
+    schema: dict[str, object] = {}
+    for _ in range(33):
+        schema = {"nested": schema}
+
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject=str(uuid4()))
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Deep discovery",
+                    endpoint_url="https://mcp.example/tools",
+                    secret_binding_id=None,
+                    policy_version="v1",
+                )
+                connection_version_id = connection.pending_version_id
+                assert connection_version_id is not None
+                generation, control_epoch, _ = await ConnectionService(
+                    session
+                ).allocate_refresh_generation(context=context, connection_id=connection.id)
+                with pytest.raises(ValueError, match="structural limits"):
+                    await CapabilityService(session).record_version(
+                        context=context,
+                        connection_id=connection.id,
+                        connection_version_id=connection_version_id,
+                        expected_control_epoch=control_epoch,
+                        expected_refresh_generation=generation,
+                        tool_identity="tools/deep",
+                        tool_name="deep",
+                        display_name="Deep",
+                        description=None,
+                        input_schema=schema,
+                        output_schema=None,
+                        metadata_digest="e" * 64,
+                        protocol_revision="2025-06-18",
+                    )
 
     asyncio.run(scenario())
 

@@ -1,10 +1,11 @@
 """Workspace-scoped connection versioning and lifecycle operations."""
 
+import json
 import re
 from ipaddress import ip_address
 from socket import inet_aton
 from typing import cast
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -36,6 +37,7 @@ class InvalidCapabilityTransition(Exception):
 
 class ConnectionService:
     _POLICY_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+    _DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -285,6 +287,10 @@ class ConnectionService:
             hostname = unicode_hostname.encode("idna").decode("ascii").rstrip(".")
         except UnicodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
+        if len(hostname) > 253 or any(
+            cls._DNS_LABEL.fullmatch(label) is None for label in hostname.split(".")
+        ):
+            raise ValueError("invalid endpoint URL")
         try:
             ip_address(hostname)
         except ValueError:
@@ -309,6 +315,14 @@ class ConnectionService:
             or port not in {None, 443}
         ):
             raise ValueError("invalid endpoint URL")
+        if re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path):
+            raise ValueError("invalid endpoint URL")
+        try:
+            decoded_path = unquote(parsed.path, errors="strict")
+        except UnicodeError as exc:
+            raise ValueError("invalid endpoint URL") from exc
+        if _contains_obvious_secret(decoded_path):
+            raise ValueError("endpoint URL contains credential-shaped content")
         if cls._POLICY_VERSION.fullmatch(policy_version) is None:
             raise ValueError("invalid policy version")
 
@@ -372,6 +386,8 @@ class CapabilityService:
             description=description,
             metadata_digest=metadata_digest,
             protocol_revision=protocol_revision,
+            input_schema=input_schema,
+            output_schema=output_schema,
         )
         connection = await self._session.scalar(
             select(ServerConnection)
@@ -661,6 +677,8 @@ class CapabilityService:
         tool_name: str,
         display_name: str,
         description: str | None,
+        input_schema: dict[str, object],
+        output_schema: dict[str, object] | None,
         metadata_digest: str,
         protocol_revision: str,
     ) -> None:
@@ -676,3 +694,70 @@ class CapabilityService:
             raise ValueError("invalid metadata digest")
         if cls._PROTOCOL_REVISION.fullmatch(protocol_revision) is None:
             raise ValueError("invalid protocol revision")
+        scalar_metadata = "\n".join(
+            value
+            for value in (tool_identity, tool_name, display_name, description)
+            if value is not None
+        )
+        if _contains_obvious_secret(scalar_metadata):
+            raise ValueError("capability metadata contains credential-shaped content")
+        _validate_schema_payload(input_schema, output_schema)
+
+
+_OBVIOUS_SECRET = re.compile(
+    r"(?:sk_live_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{16,}|"
+    r"gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|"
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
+    r"(?:api[_-]?key|access[_-]?token|secret|password)[=:/_-][A-Za-z0-9._~+/=\-]{8,})",
+    re.IGNORECASE,
+)
+
+
+def _contains_obvious_secret(value: str) -> bool:
+    return _OBVIOUS_SECRET.search(value) is not None
+
+
+def _validate_schema_payload(
+    input_schema: dict[str, object], output_schema: dict[str, object] | None
+) -> None:
+    """Reject discovery schemas outside conservative storage bounds."""
+
+    roots: tuple[object, ...] = (
+        (input_schema,)
+        if output_schema is None
+        else (
+            input_schema,
+            output_schema,
+        )
+    )
+    stack = [(root, 1) for root in roots]
+    node_count = 0
+    while stack:
+        value, depth = stack.pop()
+        node_count += 1
+        if depth > 32 or node_count > 4096:
+            raise ValueError("schema exceeds structural limits")
+        if isinstance(value, dict):
+            if len(value) > 1024:
+                raise ValueError("schema exceeds property limits")
+            for key, child in value.items():
+                if not isinstance(key, str) or len(key) > 8192:
+                    raise ValueError("schema contains an invalid key")
+                stack.append((child, depth + 1))
+        elif isinstance(value, list):
+            if len(value) > 1024:
+                raise ValueError("schema exceeds item limits")
+            stack.extend((child, depth + 1) for child in value)
+        elif isinstance(value, str):
+            if len(value) > 8192:
+                raise ValueError("schema string exceeds limits")
+        elif value is not None and not isinstance(value, (bool, int, float)):
+            raise ValueError("schema contains a non-JSON value")
+    try:
+        encoded = json.dumps(roots, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError, RecursionError, OverflowError) as exc:
+        raise ValueError("schema is not bounded JSON") from exc
+    if len(encoded.encode("utf-8")) > 131_072:
+        raise ValueError("schema exceeds serialized size limit")
+    if _contains_obvious_secret(encoded):
+        raise ValueError("schema contains credential-shaped content")
