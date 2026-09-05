@@ -16,7 +16,8 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, Mapper, mapped_column
+from sqlalchemy.orm.attributes import get_history
 
 from modall.audit.types import AuditAction, AuditOutcome, ResourceType
 from modall.identity.types import Role
@@ -77,7 +78,7 @@ class WorkspaceMembership(Base):
 class SecretBinding(Base):
     __tablename__ = "secret_bindings"
     __table_args__ = (
-        UniqueConstraint("workspace_id", "id"),
+        UniqueConstraint("workspace_id", "id", name="uq_secret_binding_workspace_id"),
         UniqueConstraint("workspace_id", "provider", "external_reference", "version"),
         CheckConstraint("provider IN ('fixture', 'mounted_file')", name="ck_secret_provider"),
     )
@@ -256,7 +257,9 @@ class ServerConnectionVersion(Base):
         ForeignKeyConstraint(
             ["workspace_id", "secret_binding_id"],
             ["secret_bindings.workspace_id", "secret_bindings.id"],
-            ondelete="RESTRICT",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         UniqueConstraint("workspace_id", "id"),
         UniqueConstraint("connection_id", "id"),
@@ -380,7 +383,9 @@ class McpToolBinding(Base):
         ForeignKeyConstraint(
             ["workspace_id", "connection_version_id"],
             ["server_connection_versions.workspace_id", "server_connection_versions.id"],
-            ondelete="RESTRICT",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         ForeignKeyConstraint(
             ["capability_id", "capability_version_id"],
@@ -395,7 +400,9 @@ class McpToolBinding(Base):
         ForeignKeyConstraint(
             ["connection_id", "connection_version_id"],
             ["server_connection_versions.connection_id", "server_connection_versions.id"],
-            ondelete="RESTRICT",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
         ),
     )
 
@@ -419,7 +426,9 @@ class CapabilityStatusEvent(Base):
         ForeignKeyConstraint(
             ["capability_id", "capability_version_id"],
             ["capability_versions.capability_id", "capability_versions.id"],
-            ondelete="RESTRICT",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         UniqueConstraint("capability_id", "status_epoch"),
         CheckConstraint(
@@ -439,9 +448,10 @@ class CapabilityStatusEvent(Base):
     created_at: Mapped[CreatedAt]
 
 
-def _reject_immutable_update(mapper: object, connection: object, target: object) -> None:
-    del mapper, connection, target
-    raise ValueError("immutable version rows cannot be updated")
+def _reject_immutable_update(mapper: Mapper[object], connection: object, target: object) -> None:
+    del connection
+    if any(get_history(target, attribute.key).has_changes() for attribute in mapper.column_attrs):
+        raise ValueError("immutable version rows cannot be updated")
 
 
 for immutable_model in (
@@ -449,5 +459,6 @@ for immutable_model in (
     ServerConnectionVersion,
     CapabilityVersion,
     McpToolBinding,
+    CapabilityStatusEvent,
 ):
     event.listen(immutable_model, "before_update", _reject_immutable_update)

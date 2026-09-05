@@ -143,9 +143,10 @@ class ConnectionService:
             serialize_workspace=True,
         )
         connection = await self._locked_connection(context, connection_id)
+        current_target = connection.pending_version_id or connection.verified_version_id
         if (
-            connection.typed_lifecycle == ConnectionLifecycle.DISABLED
-            or connection.pending_version_id != expected_version_id
+            connection.typed_lifecycle != ConnectionLifecycle.VERIFYING
+            or current_target != expected_version_id
             or connection.control_epoch != expected_control_epoch
             or connection.refresh_generation != expected_refresh_generation
         ):
@@ -271,7 +272,11 @@ class ConnectionService:
             port = parsed.port
         except ValueError as exc:
             raise ValueError("invalid endpoint URL") from exc
-        hostname = parsed.hostname.rstrip(".").lower() if parsed.hostname else ""
+        unicode_hostname = parsed.hostname.rstrip(".").lower() if parsed.hostname else ""
+        try:
+            hostname = unicode_hostname.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError("invalid endpoint URL") from exc
         try:
             ip_address(hostname)
         except ValueError:

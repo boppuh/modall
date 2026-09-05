@@ -131,7 +131,9 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["workspace_id", "secret_binding_id"],
             ["secret_bindings.workspace_id", "secret_bindings.id"],
-            ondelete="RESTRICT",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
@@ -257,7 +259,9 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["workspace_id", "connection_version_id"],
             ["server_connection_versions.workspace_id", "server_connection_versions.id"],
-            ondelete="RESTRICT",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         sa.ForeignKeyConstraint(
             ["capability_id", "capability_version_id"],
@@ -272,7 +276,9 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["connection_id", "connection_version_id"],
             ["server_connection_versions.connection_id", "server_connection_versions.id"],
-            ondelete="RESTRICT",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("capability_version_id"),
@@ -301,7 +307,9 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["capability_id", "capability_version_id"],
             ["capability_versions.capability_id", "capability_versions.id"],
-            ondelete="RESTRICT",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
@@ -317,6 +325,7 @@ def upgrade() -> None:
         "server_connection_versions",
         "capability_versions",
         "mcp_tool_bindings",
+        "capability_status_events",
     ):
         op.execute(
             f"CREATE TRIGGER {table}_immutable BEFORE UPDATE ON {table} "
@@ -330,6 +339,7 @@ def downgrade() -> None:
         "server_connection_versions",
         "capability_versions",
         "mcp_tool_bindings",
+        "capability_status_events",
     ):
         op.execute(f"DROP TRIGGER IF EXISTS {table}_immutable ON {table}")
     op.execute("DROP FUNCTION IF EXISTS modall_reject_immutable_update()")

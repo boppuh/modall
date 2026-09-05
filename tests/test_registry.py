@@ -236,6 +236,20 @@ def test_disable_enable_and_role_boundaries() -> None:
                     await ConnectionService(session).enable(
                         context=context, connection_id=connection_id
                     )
+                generation, epoch, target = await ConnectionService(
+                    session
+                ).allocate_refresh_generation(context=context, connection_id=connection_id)
+                assert target == version_id
+                reverified = await ConnectionService(session).promote_pending(
+                    context=context,
+                    connection_id=connection_id,
+                    expected_version_id=version_id,
+                    expected_control_epoch=epoch,
+                    expected_refresh_generation=generation,
+                )
+                assert reverified.typed_lifecycle == ConnectionLifecycle.ACTIVE
+                assert reverified.pending_version_id is None
+                assert reverified.verified_version_id == version_id
 
     asyncio.run(scenario())
 
@@ -255,6 +269,12 @@ def test_connection_versions_are_immutable() -> None:
                 )
                 version_id = connection.pending_version_id
                 assert version_id is not None
+
+            async with transaction(factory) as session:
+                unchanged = await session.get(ServerConnectionVersion, version_id)
+                assert unchanged is not None
+                unchanged.endpoint_url = unchanged.endpoint_url
+                await session.flush()
 
             with pytest.raises(ValueError, match="immutable"):
                 async with transaction(factory) as session:
@@ -277,6 +297,9 @@ def test_connection_versions_are_immutable() -> None:
         "https://2130706433",
         "https://127.1",
         "https://0x7f000001",
+        "https://①②⑦.⓪.⓪.①",
+        "https://\uff11\uff12\uff17.\uff10.\uff10.\uff11",
+        "https://\u2113ocalhost",
     ],
 )
 def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> None:
@@ -436,6 +459,17 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
                     binding = await session.get(McpToolBinding, first.id)
                     assert binding is not None
                     binding.tool_name = "retargeted"
+                    await session.flush()
+
+            with pytest.raises(ValueError, match="immutable"):
+                async with transaction(factory) as session:
+                    event_row = await session.scalar(
+                        select(CapabilityStatusEvent).where(
+                            CapabilityStatusEvent.capability_id == first.capability_id
+                        )
+                    )
+                    assert event_row is not None
+                    event_row.status = CapabilityStatus.DISABLED.value
                     await session.flush()
 
     asyncio.run(scenario())
