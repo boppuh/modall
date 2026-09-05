@@ -46,6 +46,7 @@ SUPPORTED_PROFILES = {
     "nested-structured-secret",
     "composite-structured-secret",
     "numeric-sensitive-metadata",
+    "credential-metadata",
     "keyword-property-names",
     "credential-property-schema",
     "unresolved-local-ref",
@@ -127,6 +128,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         first_tool["_meta"] = {"client_secret": "abcdefgh1234"}
     if profile == "numeric-sensitive-metadata":
         first_tool["_meta"] = {"api_key": 12345678}
+    if profile == "credential-metadata":
+        first_tool["_meta"] = {"credential": "abcdefgh1234"}
     if profile == "credential-numeric-leak":
         first_tool["_meta"] = {"value": 12345678}
     if profile == "oversized-metadata":

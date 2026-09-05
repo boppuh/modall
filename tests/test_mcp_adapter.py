@@ -157,6 +157,7 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
             "nested-structured-secret",
             "composite-structured-secret",
             "numeric-sensitive-metadata",
+            "credential-metadata",
         ):
             structured, endpoint = adapter_for(profile)
             with pytest.raises(DiscoveryError, match="secret screening"):

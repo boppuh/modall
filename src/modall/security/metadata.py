@@ -16,7 +16,7 @@ _OBVIOUS_SECRET = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_JSON_FIELD = re.compile(
-    r"(?:api[_-]?key|access[_-]?token|secret|password)", re.IGNORECASE
+    r"(?:api[_-]?key|access[_-]?token|credential|secret|password)", re.IGNORECASE
 )
 
 
