@@ -103,7 +103,7 @@ class McpClientAdapter:
             except UnicodeDecodeError as exc:
                 raise CredentialError("credential encoding rejected") from exc
             if (
-                not credential_text
+                len(credential_text) < 16
                 or len(credential_text) > 4096
                 or any(not 33 <= ord(character) <= 126 for character in credential_text)
             ):
@@ -431,6 +431,8 @@ def _contains_decoded_credential(value: object, credential: str) -> bool:
     while stack:
         current = stack.pop()
         if isinstance(current, dict):
+            if any(credential in key for key in current):
+                return True
             stack.extend(current.values())
         elif isinstance(current, list):
             stack.extend(current)

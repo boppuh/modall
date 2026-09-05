@@ -793,6 +793,26 @@ def test_discovery_runner_publishes_success_and_safe_failure_codes() -> None:
                 assert loaded is not None
                 assert loaded.last_refresh_error_code == "protocol_mismatch"
 
+                unsupported_policy_lease = await lease_for(
+                    session, context, connection_id, "runner-3"
+                )
+
+            runner = DiscoveryRunner(
+                session_factory=factory,
+                secret_provider=FixtureSecretProvider({}),
+                adapter_factory=lambda _policy_version: (_ for _ in ()).throw(
+                    KeyError("unsupported policy")
+                ),
+            )
+            assert await runner.run(context=context, lease=unsupported_policy_lease) is None
+            async with transaction(factory) as session:
+                loaded = await session.get(ServerConnection, connection_id)
+                job = await session.get(DiscoveryRefreshJob, unsupported_policy_lease.job_id)
+                assert loaded is not None
+                assert job is not None
+                assert loaded.last_refresh_error_code == "endpoint_rejected"
+                assert job.status == RefreshJobStatus.FAILED.value
+
     asyncio.run(scenario())
     assert classify_discovery_failure(RuntimeError("safe")) == (
         DiscoveryFailureCode.TRANSPORT_FAILED

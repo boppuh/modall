@@ -28,6 +28,7 @@ from tests.support.mcp_fixture_server import (
     COMMON_KEY_FIXTURE_TOKEN,
     ESCAPED_FIXTURE_TOKEN,
     FIXTURE_TOKEN,
+    KEY_LEAK_FIXTURE_TOKEN,
     NUMERIC_FIXTURE_TOKEN,
     create_mcp_fixture_app,
 )
@@ -149,8 +150,12 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
             await numeric_leaking.discover(endpoint, bearer_token=NUMERIC_FIXTURE_TOKEN.encode())
 
         common_key, endpoint = adapter_for("credential-common-key")
-        result = await common_key.discover(endpoint, bearer_token=COMMON_KEY_FIXTURE_TOKEN.encode())
-        assert result.tools
+        with pytest.raises(CredentialError, match="credential encoding"):
+            await common_key.discover(endpoint, bearer_token=COMMON_KEY_FIXTURE_TOKEN.encode())
+
+        key_leaking, endpoint = adapter_for("credential-key-leak")
+        with pytest.raises(DiscoveryError, match="secret screening"):
+            await key_leaking.discover(endpoint, bearer_token=KEY_LEAK_FIXTURE_TOKEN.encode())
 
         for profile in (
             "structured-secret",
@@ -179,8 +184,9 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
             )
 
         invalid_credential, endpoint = adapter_for("authenticated")
-        with pytest.raises(CredentialError, match="credential encoding"):
-            await invalid_credential.discover(endpoint, bearer_token=b"bad token")
+        for rejected_token in (b"bad token", b"string"):
+            with pytest.raises(CredentialError, match="credential encoding"):
+                await invalid_credential.discover(endpoint, bearer_token=rejected_token)
         with pytest.raises(CredentialError, match="credential encoding"):
             await invalid_credential.discover(endpoint, bearer_token=b"bad\x7ftoken")
 

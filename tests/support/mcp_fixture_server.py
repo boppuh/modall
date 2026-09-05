@@ -13,6 +13,7 @@ FIXTURE_TOKEN = "fixture-token-not-a-real-secret"
 ESCAPED_FIXTURE_TOKEN = 'opaque"slash\\token123'
 NUMERIC_FIXTURE_TOKEN = "12345678"
 COMMON_KEY_FIXTURE_TOKEN = "type"
+KEY_LEAK_FIXTURE_TOKEN = "r4Nd0mBearerValue98765"
 AUTHENTICATED_PROFILES = {
     "authenticated",
     "authenticated-redirect",
@@ -22,6 +23,7 @@ AUTHENTICATED_PROFILES = {
     "credential-escaped-leak",
     "credential-numeric-leak",
     "credential-common-key",
+    "credential-key-leak",
 }
 SUPPORTED_PROFILES = {
     "default",
@@ -132,6 +134,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         first_tool["_meta"] = {"credential": "abcdefgh1234"}
     if profile == "credential-numeric-leak":
         first_tool["_meta"] = {"value": 12345678}
+    if profile == "credential-key-leak":
+        first_tool["_meta"] = {KEY_LEAK_FIXTURE_TOKEN: True}
     if profile == "oversized-metadata":
         first_tool["_meta"] = {"annotation": "x" * 8193}
     return [
@@ -198,6 +202,8 @@ def create_mcp_fixture_app() -> FastAPI:
             expected_token = NUMERIC_FIXTURE_TOKEN
         elif profile == "credential-common-key":
             expected_token = COMMON_KEY_FIXTURE_TOKEN
+        elif profile == "credential-key-leak":
+            expected_token = KEY_LEAK_FIXTURE_TOKEN
         else:
             expected_token = FIXTURE_TOKEN
         if profile in AUTHENTICATED_PROFILES and authorization != f"Bearer {expected_token}":

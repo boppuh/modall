@@ -51,7 +51,10 @@ class DiscoveryRunner:
             endpoint, policy_version, secret_reference = await self._load_target(context, lease)
             async with transaction(self._session_factory) as session:
                 await RefreshJobService(session).validate_for_contact(context=context, lease=lease)
-            adapter = self._adapter_factory(policy_version)
+            try:
+                adapter = self._adapter_factory(policy_version)
+            except (KeyError, ValueError) as exc:
+                raise EndpointPolicyError("pinned policy version is unavailable") from exc
             if secret_reference is None:
                 result = await adapter.discover(endpoint)
             else:
