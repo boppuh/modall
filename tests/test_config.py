@@ -63,3 +63,23 @@ def test_deployed_security_mode_requires_oidc_and_mounted_secrets() -> None:
     assert settings.auth_mode == "oidc"
     assert settings.oidc_issuer == "https://issuer.example"
     assert settings.secret_provider == "mounted_file"
+
+
+@pytest.mark.parametrize(
+    "issuer",
+    [
+        "https://user@issuer.example",
+        "https://issuer.example?tenant=x",
+        "https://issuer.example#fragment",
+    ],
+)
+def test_oidc_issuer_rejects_forbidden_components(issuer: str) -> None:
+    with pytest.raises(ValidationError, match="not conforming"):
+        Settings(
+            _env_file=None,
+            environment="test",
+            auth_mode="oidc",
+            oidc_issuer=issuer,
+            oidc_audience="modall",
+            oidc_jwks_url="https://issuer.example/jwks",
+        )

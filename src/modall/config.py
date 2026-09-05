@@ -52,9 +52,16 @@ class Settings(BaseSettings):
         if self.auth_mode == "oidc" and (
             issuer_url is not None
             and self.oidc_jwks_url is not None
-            and (issuer_url.scheme != "https" or self.oidc_jwks_url.scheme != "https")
+            and (
+                issuer_url.scheme != "https"
+                or issuer_url.username is not None
+                or issuer_url.password is not None
+                or issuer_url.query is not None
+                or issuer_url.fragment is not None
+                or self.oidc_jwks_url.scheme != "https"
+            )
         ):
-            raise ValueError("OIDC issuer and JWKS URL require HTTPS")
+            raise ValueError("OIDC issuer or JWKS URL is not conforming")
         if not self.local_subject.strip() or len(self.local_subject) > 512:
             raise ValueError("local subject must contain between 1 and 512 characters")
         return self
