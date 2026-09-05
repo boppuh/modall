@@ -17,7 +17,9 @@ from modall.persistence.database import (
 )
 from modall.persistence.models import (
     Capability,
+    CapabilityStatusEvent,
     McpToolBinding,
+    RegistryEntry,
     ServerConnectionVersion,
     User,
     WorkspaceMembership,
@@ -243,6 +245,15 @@ def test_database_guards_stable_capability_identity_and_exact_binding() -> None:
                     protocol_revision="2025-06-18",
                 )
                 capability_id, version_id = version.capability_id, version.id
+                entry = RegistryEntry(
+                    workspace_id=workspace.id,
+                    source="official",
+                    external_id=f"io.example/{suffix}",
+                    current_version_id=None,
+                )
+                session.add(entry)
+                await session.flush()
+                entry_id = entry.id
 
             with pytest.raises(DBAPIError):
                 async with transaction(factory) as session:
@@ -258,6 +269,22 @@ def test_database_guards_stable_capability_identity_and_exact_binding() -> None:
                         update(Capability)
                         .where(Capability.id == capability_id)
                         .values(tool_identity="tools/retargeted")
+                    )
+
+            with pytest.raises(DBAPIError):
+                async with transaction(factory) as session:
+                    await session.execute(
+                        delete(CapabilityStatusEvent).where(
+                            CapabilityStatusEvent.capability_id == capability_id
+                        )
+                    )
+
+            with pytest.raises(DBAPIError):
+                async with transaction(factory) as session:
+                    await session.execute(
+                        update(RegistryEntry)
+                        .where(RegistryEntry.id == entry_id)
+                        .values(external_id="io.example/retargeted")
                     )
 
             async with transaction(factory) as session:

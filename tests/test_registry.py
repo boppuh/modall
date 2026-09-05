@@ -19,6 +19,7 @@ from modall.persistence.models import (
     CapabilityStatusEvent,
     CapabilityVersion,
     McpToolBinding,
+    RegistryEntry,
     SecretBinding,
     ServerConnection,
     ServerConnectionVersion,
@@ -530,6 +531,17 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
                     await session.delete(binding)
                     await session.flush()
 
+            with pytest.raises(ValueError, match="deleted independently"):
+                async with transaction(factory) as session:
+                    event_row = await session.scalar(
+                        select(CapabilityStatusEvent).where(
+                            CapabilityStatusEvent.capability_id == first.capability_id
+                        )
+                    )
+                    assert event_row is not None
+                    await session.delete(event_row)
+                    await session.flush()
+
             with pytest.raises(ValueError, match="capability identity"):
                 async with transaction(factory) as session:
                     stored_capability = await session.get(Capability, first.capability_id)
@@ -546,6 +558,7 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
         {"description": "x" * 8193},
         {"default": "sk_live_abcdefghijkl"},
         {"api_key": "abcdefghijkl"},
+        {"description": "\ud800"},
         {"properties": {str(index): {} for index in range(1025)}},
     ],
 )
@@ -643,6 +656,70 @@ def test_capability_metadata_rejects_credential_shaped_protocol_revision() -> No
             metadata_digest="a" * 64,
             protocol_revision="sk-abcdefghijklmnop",
         )
+
+
+def test_capability_with_unqualified_protocol_cannot_be_enabled() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject=str(uuid4()))
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Future protocol",
+                    endpoint_url="https://mcp.example/tools",
+                    secret_binding_id=None,
+                    policy_version="v1",
+                )
+                connection_version_id = connection.pending_version_id
+                assert connection_version_id is not None
+                generation, control_epoch, _ = await ConnectionService(
+                    session
+                ).allocate_refresh_generation(context=context, connection_id=connection.id)
+                service = CapabilityService(session)
+                version = await service.record_version(
+                    context=context,
+                    connection_id=connection.id,
+                    connection_version_id=connection_version_id,
+                    expected_control_epoch=control_epoch,
+                    expected_refresh_generation=generation,
+                    tool_identity="tools/future",
+                    tool_name="future",
+                    display_name="Future",
+                    description=None,
+                    input_schema={},
+                    output_schema=None,
+                    metadata_digest="a" * 64,
+                    protocol_revision="2026-experimental",
+                )
+                with pytest.raises(InvalidCapabilityTransition):
+                    await service.enable(
+                        context=context,
+                        capability_id=version.capability_id,
+                        expected_version_id=version.id,
+                    )
+
+    asyncio.run(scenario())
+
+
+def test_registry_entry_identity_is_immutable() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            _, workspace_id = await bootstrap(factory, subject=str(uuid4()))
+            async with transaction(factory) as session:
+                entry = RegistryEntry(
+                    workspace_id=workspace_id,
+                    source="official",
+                    external_id="io.example/server",
+                    current_version_id=None,
+                )
+                session.add(entry)
+                await session.flush()
+                entry.source = "manual"
+                with pytest.raises(ValueError, match="registry entry identity"):
+                    await session.flush()
+
+    asyncio.run(scenario())
 
 
 def test_stale_verification_cannot_survive_disable_enable() -> None:

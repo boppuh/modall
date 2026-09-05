@@ -379,9 +379,40 @@ def upgrade() -> None:
         "BEFORE UPDATE ON capabilities FOR EACH ROW "
         "EXECUTE FUNCTION modall_reject_capability_identity_update()"
     )
+    op.execute(
+        "CREATE FUNCTION modall_reject_status_event_delete() RETURNS trigger "
+        "LANGUAGE plpgsql AS $$ BEGIN "
+        "IF EXISTS (SELECT 1 FROM capabilities WHERE id = OLD.capability_id) THEN "
+        "RAISE EXCEPTION 'immutable status event row'; END IF; RETURN OLD; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER capability_status_events_immutable_delete "
+        "BEFORE DELETE ON capability_status_events FOR EACH ROW "
+        "EXECUTE FUNCTION modall_reject_status_event_delete()"
+    )
+    op.execute(
+        "CREATE FUNCTION modall_reject_registry_entry_identity_update() RETURNS trigger "
+        "LANGUAGE plpgsql AS $$ BEGIN "
+        "IF NEW.workspace_id IS DISTINCT FROM OLD.workspace_id "
+        "OR NEW.source IS DISTINCT FROM OLD.source "
+        "OR NEW.external_id IS DISTINCT FROM OLD.external_id THEN "
+        "RAISE EXCEPTION 'immutable registry entry identity'; END IF; RETURN NEW; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER registry_entries_immutable_identity "
+        "BEFORE UPDATE ON registry_entries FOR EACH ROW "
+        "EXECUTE FUNCTION modall_reject_registry_entry_identity_update()"
+    )
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER IF EXISTS registry_entries_immutable_identity ON registry_entries")
+    op.execute("DROP FUNCTION IF EXISTS modall_reject_registry_entry_identity_update()")
+    op.execute(
+        "DROP TRIGGER IF EXISTS capability_status_events_immutable_delete "
+        "ON capability_status_events"
+    )
+    op.execute("DROP FUNCTION IF EXISTS modall_reject_status_event_delete()")
     op.execute("DROP TRIGGER IF EXISTS capabilities_immutable_identity ON capabilities")
     op.execute("DROP FUNCTION IF EXISTS modall_reject_capability_identity_update()")
     op.execute("DROP TRIGGER IF EXISTS mcp_tool_bindings_immutable_delete ON mcp_tool_bindings")

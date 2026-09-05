@@ -26,6 +26,8 @@ from modall.persistence.models import (
 )
 from modall.registry.types import CapabilityStatus, ConnectionLifecycle, Transport
 
+QUALIFIED_PROTOCOL_REVISION = "2025-06-18"
+
 
 class InvalidConnectionTransition(Exception):
     """A safe rejection of an invalid or stale lifecycle transition."""
@@ -536,6 +538,7 @@ class CapabilityService:
         if (
             binding is None
             or connection is None
+            or binding.protocol_revision != QUALIFIED_PROTOCOL_REVISION
             or connection.typed_lifecycle == ConnectionLifecycle.DISABLED
             or (connection.pending_version_id or connection.verified_version_id)
             != binding.connection_version_id
@@ -755,12 +758,13 @@ def _validate_schema_payload(
         elif value is not None and not isinstance(value, (bool, int, float)):
             raise ValueError("schema contains a non-JSON value")
     try:
-        encoded = json.dumps(roots, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-    except (TypeError, ValueError, RecursionError, OverflowError) as exc:
+        serialized = json.dumps(roots, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        encoded = serialized.encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError) as exc:
         raise ValueError("schema is not bounded JSON") from exc
-    if len(encoded.encode("utf-8")) > 131_072:
+    if len(encoded) > 131_072:
         raise ValueError("schema exceeds serialized size limit")
-    if _contains_obvious_secret(encoded) or any(
+    if _contains_obvious_secret(serialized) or any(
         _contains_obvious_secret_in_json(root) for root in roots
     ):
         raise ValueError("schema contains credential-shaped content")

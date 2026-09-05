@@ -492,6 +492,18 @@ def _reject_capability_identity_update(
         raise ValueError("capability identity cannot be updated")
 
 
+def _reject_registry_entry_identity_update(
+    mapper: Mapper[object], connection: object, target: object
+) -> None:
+    del mapper, connection
+    entry = cast(RegistryEntry, target)
+    if any(
+        get_history(entry, attribute).has_changes()
+        for attribute in ("workspace_id", "source", "external_id")
+    ):
+        raise ValueError("registry entry identity cannot be updated")
+
+
 for immutable_model in (
     SecretBinding,
     RegistryEntryVersion,
@@ -503,4 +515,6 @@ for immutable_model in (
     event.listen(immutable_model, "before_update", _reject_immutable_update)
 
 event.listen(McpToolBinding, "before_delete", _reject_immutable_delete)
+event.listen(CapabilityStatusEvent, "before_delete", _reject_immutable_delete)
 event.listen(Capability, "before_update", _reject_capability_identity_update)
+event.listen(RegistryEntry, "before_update", _reject_registry_entry_identity_update)
