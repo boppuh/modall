@@ -444,7 +444,9 @@ class DiscoveryPublicationService:
                 CapabilityStatusEvent(
                     workspace_id=context.workspace_id,
                     capability_id=capability.id,
-                    capability_version_id=capability.enabled_version_id,
+                    capability_version_id=(
+                        capability.pending_version_id or capability.enabled_version_id
+                    ),
                     status=capability.status,
                     status_epoch=capability.status_epoch,
                     actor_user_id=context.actor_user_id,

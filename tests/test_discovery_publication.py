@@ -12,16 +12,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from modall.identity.types import WorkspaceContext
 from modall.mcp_adapter.client import (
+    CredentialError,
     DiscoveryError,
     DiscoveryResult,
     McpClientAdapter,
     ProtocolMismatch,
     ToolDefinition,
 )
-from modall.mcp_adapter.policy import EndpointPolicyError, ResponseLimitExceeded
+from modall.mcp_adapter.policy import (
+    EndpointPolicyError,
+    EndpointResolutionError,
+    ResponseLimitExceeded,
+)
 from modall.persistence.database import transaction
 from modall.persistence.models import (
     Capability,
+    CapabilityStatusEvent,
     CapabilityVersion,
     DiscoveryPayload,
     DiscoverySnapshot,
@@ -342,6 +348,14 @@ def test_pending_capability_reappearance_reuses_its_immutable_version() -> None:
                 assert capability is not None
                 assert capability.typed_status == CapabilityStatus.UNAVAILABLE
                 assert capability.pending_version_id == pending_version_id
+                unavailable_event = await session.scalar(
+                    select(CapabilityStatusEvent).where(
+                        CapabilityStatusEvent.capability_id == capability.id,
+                        CapabilityStatusEvent.status == CapabilityStatus.UNAVAILABLE.value,
+                    )
+                )
+                assert unavailable_event is not None
+                assert unavailable_event.capability_version_id == pending_version_id
 
             async with transaction(factory) as session:
                 context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
@@ -463,12 +477,19 @@ def test_discovery_runner_publishes_success_and_safe_failure_codes() -> None:
                 lease = await lease_for(session, context, connection_id, "runner-1")
 
             success_adapter = StubAdapter(result_for())
+            selected_policies: list[str] = []
+
+            def success_factory(policy_version: str) -> McpClientAdapter:
+                selected_policies.append(policy_version)
+                return cast(McpClientAdapter, success_adapter)
+
             runner = DiscoveryRunner(
                 session_factory=factory,
                 secret_provider=FixtureSecretProvider({}),
-                adapter_factory=lambda: cast(McpClientAdapter, success_adapter),
+                adapter_factory=success_factory,
             )
             assert await runner.run(context=context, lease=lease) is not None
+            assert selected_policies == ["policy-v1"]
 
             async with transaction(factory) as session:
                 context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
@@ -478,7 +499,7 @@ def test_discovery_runner_publishes_success_and_safe_failure_codes() -> None:
             runner = DiscoveryRunner(
                 session_factory=factory,
                 secret_provider=FixtureSecretProvider({}),
-                adapter_factory=lambda: cast(McpClientAdapter, failure_adapter),
+                adapter_factory=lambda _policy_version: cast(McpClientAdapter, failure_adapter),
             )
             assert await runner.run(context=context, lease=failure_lease) is None
             async with transaction(factory) as session:
@@ -528,7 +549,7 @@ def test_discovery_runner_does_not_report_publication_errors_as_endpoint_health(
             runner = DiscoveryRunner(
                 session_factory=factory,
                 secret_provider=FixtureSecretProvider({}),
-                adapter_factory=lambda: cast(McpClientAdapter, StubAdapter()),
+                adapter_factory=lambda _policy_version: cast(McpClientAdapter, StubAdapter()),
             )
             with pytest.raises(RuntimeError, match="publication failed"):
                 await runner.run(context=context, lease=lease)
@@ -545,7 +566,9 @@ def test_discovery_runner_does_not_report_publication_errors_as_endpoint_health(
     ("error", "expected"),
     [
         (ProtocolMismatch("safe"), DiscoveryFailureCode.PROTOCOL_MISMATCH),
+        (CredentialError("safe"), DiscoveryFailureCode.AUTHENTICATION_FAILED),
         (EndpointPolicyError("safe"), DiscoveryFailureCode.ENDPOINT_REJECTED),
+        (EndpointResolutionError("safe"), DiscoveryFailureCode.TRANSPORT_FAILED),
         (ResponseLimitExceeded("safe"), DiscoveryFailureCode.RESPONSE_LIMIT),
         (TimeoutError(), DiscoveryFailureCode.TIMEOUT),
         (SecretProviderError("safe"), DiscoveryFailureCode.AUTHENTICATION_FAILED),

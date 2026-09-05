@@ -13,6 +13,9 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
+from referencing import Registry, Resource
+from referencing.exceptions import Unresolvable
+from referencing.jsonschema import DRAFT202012
 
 from modall.mcp_adapter.policy import (
     EndpointPolicy,
@@ -24,6 +27,7 @@ from modall.security.metadata import (
     MetadataValidationError,
     contains_obvious_secret,
     contains_sensitive_json,
+    validate_bounded_json,
     validate_capability_scalars,
     validate_schema_payload,
 )
@@ -37,6 +41,10 @@ class DiscoveryError(Exception):
 
 class ProtocolMismatch(DiscoveryError):
     """The endpoint negotiated a protocol revision not qualified by Modall."""
+
+
+class CredentialError(DiscoveryError):
+    """A bound credential cannot be used safely for discovery."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,13 +94,13 @@ class McpClientAdapter:
         credential_text: str | None = None
         if bearer_token is not None:
             if not endpoint.lower().startswith("https://"):
-                raise DiscoveryError("credentials require HTTPS")
+                raise CredentialError("credentials require HTTPS")
             try:
                 credential_text = bytes(bearer_token).decode("ascii")
             except UnicodeDecodeError as exc:
-                raise DiscoveryError("credential encoding rejected") from exc
+                raise CredentialError("credential encoding rejected") from exc
             if not credential_text or any(ord(character) < 33 for character in credential_text):
-                raise DiscoveryError("credential encoding rejected")
+                raise CredentialError("credential encoding rejected")
             headers["Authorization"] = f"Bearer {credential_text}"
         try:
             async with asyncio.timeout(self._limits.total_seconds):
@@ -216,6 +224,10 @@ class McpClientAdapter:
             "protocolRevision": QUALIFIED_PROTOCOL_REVISION,
             "tools": normalized_tools,
         }
+        try:
+            validate_bounded_json(payload)
+        except MetadataValidationError as exc:
+            raise DiscoveryError("invalid discovery metadata") from exc
         canonical = _canonical_json(payload)
         if len(canonical) > self._limits.response_bytes:
             raise DiscoveryError("normalized discovery exceeded byte limit")
@@ -261,12 +273,13 @@ def _canonical_json(value: object) -> bytes:
 def _schema_is_supported(
     input_schema: dict[str, Any], output_schema: dict[str, Any] | None
 ) -> bool:
-    stack: list[tuple[object, int, bool]] = [(input_schema, 1, True)]
+    stack: list[tuple[object, int, bool, dict[str, Any]]] = [(input_schema, 1, True, input_schema)]
     if output_schema is not None:
-        stack.append((output_schema, 1, True))
+        stack.append((output_schema, 1, True, output_schema))
+    local_references: list[tuple[dict[str, Any], str]] = []
     nodes = 0
     while stack:
-        value, depth, schema_position = stack.pop()
+        value, depth, schema_position, root_schema = stack.pop()
         nodes += 1
         if depth > 32 or nodes > 4096:
             return False
@@ -282,6 +295,8 @@ def _schema_is_supported(
                     and (not isinstance(child, str) or len(child) > 512)
                 ):
                     return False
+                if schema_position and key in {"$ref", "$dynamicRef", "$recursiveRef"}:
+                    local_references.append((root_schema, child))
                 if schema_position and key == "pattern" and isinstance(child, str):
                     try:
                         re2.compile(child)
@@ -321,7 +336,7 @@ def _schema_is_supported(
                     }
                     and isinstance(child, dict)
                 ):
-                    stack.extend((item, depth + 2, True) for item in child.values())
+                    stack.extend((item, depth + 2, True, root_schema) for item in child.values())
                 elif (
                     schema_position
                     and key
@@ -333,7 +348,7 @@ def _schema_is_supported(
                     }
                     and isinstance(child, list)
                 ):
-                    stack.extend((item, depth + 1, True) for item in child)
+                    stack.extend((item, depth + 1, True, root_schema) for item in child)
                 elif schema_position and key in {
                     "additionalProperties",
                     "contains",
@@ -347,13 +362,13 @@ def _schema_is_supported(
                     "unevaluatedItems",
                     "unevaluatedProperties",
                 }:
-                    stack.append((child, depth + 1, True))
+                    stack.append((child, depth + 1, True, root_schema))
                 else:
-                    stack.append((child, depth + 1, False))
+                    stack.append((child, depth + 1, False, root_schema))
         elif isinstance(value, list):
             if len(value) > 1024:
                 return False
-            stack.extend((child, depth + 1, False) for child in value)
+            stack.extend((child, depth + 1, False, root_schema) for child in value)
         elif isinstance(value, str):
             if len(value) > 8192:
                 return False
@@ -365,6 +380,24 @@ def _schema_is_supported(
             Draft202012Validator.check_schema(output_schema)
     except SchemaError:
         return False
+    for index, schema in enumerate((input_schema, output_schema)):
+        if schema is None:
+            continue
+        base_uri = f"urn:modall:schema:{index}"
+        resolver = (
+            Registry()
+            .with_resource(
+                base_uri,
+                Resource.from_contents(schema, default_specification=DRAFT202012),
+            )
+            .resolver(base_uri)
+        )
+        try:
+            for root_schema, reference in local_references:
+                if root_schema is schema:
+                    resolver.lookup(reference)
+        except Unresolvable:
+            return False
     return True
 
 

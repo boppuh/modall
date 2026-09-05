@@ -103,6 +103,34 @@ def validate_schema_payload(
         raise MetadataValidationError("schema contains credential-shaped content")
 
 
+def validate_bounded_json(value: object) -> None:
+    """Apply persistence structural bounds to a complete normalized JSON value."""
+
+    stack = [(value, 1)]
+    node_count = 0
+    while stack:
+        current, depth = stack.pop()
+        node_count += 1
+        if depth > 32 or node_count > 4096:
+            raise MetadataValidationError("metadata exceeds structural limits")
+        if isinstance(current, dict):
+            if len(current) > 1024:
+                raise MetadataValidationError("metadata exceeds property limits")
+            for key, child in current.items():
+                if not isinstance(key, str) or len(key) > 8192:
+                    raise MetadataValidationError("metadata contains an invalid key")
+                stack.append((child, depth + 1))
+        elif isinstance(current, list):
+            if len(current) > 1024:
+                raise MetadataValidationError("metadata exceeds item limits")
+            stack.extend((child, depth + 1) for child in current)
+        elif isinstance(current, str):
+            if len(current) > 8192:
+                raise MetadataValidationError("metadata string exceeds limits")
+        elif current is not None and not isinstance(current, (bool, int, float)):
+            raise MetadataValidationError("metadata contains a non-JSON value")
+
+
 def _contains_obvious_secret_in_json(value: object) -> bool:
     stack = [(value, False)]
     while stack:

@@ -9,8 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from modall.identity.repository import AuthorizationDenied, require_current_role
 from modall.identity.types import Role, WorkspaceContext
-from modall.mcp_adapter.client import DiscoveryError, McpClientAdapter, ProtocolMismatch
-from modall.mcp_adapter.policy import EndpointPolicyError, ResponseLimitExceeded
+from modall.mcp_adapter.client import (
+    CredentialError,
+    DiscoveryError,
+    McpClientAdapter,
+    ProtocolMismatch,
+)
+from modall.mcp_adapter.policy import (
+    EndpointPolicyError,
+    EndpointResolutionError,
+    ResponseLimitExceeded,
+)
 from modall.persistence.database import transaction
 from modall.persistence.models import SecretBinding, ServerConnectionVersion
 from modall.registry.discovery import (
@@ -22,7 +31,7 @@ from modall.registry.service import InvalidConnectionTransition
 from modall.registry.types import DiscoveryFailureCode
 from modall.secrets.provider import SecretProvider, SecretProviderError, SecretReference
 
-AdapterFactory = Callable[[], McpClientAdapter]
+AdapterFactory = Callable[[str], McpClientAdapter]
 
 
 class DiscoveryRunner:
@@ -39,10 +48,10 @@ class DiscoveryRunner:
 
     async def run(self, *, context: WorkspaceContext, lease: RefreshLease) -> UUID | None:
         try:
-            endpoint, secret_reference = await self._load_target(context, lease)
+            endpoint, policy_version, secret_reference = await self._load_target(context, lease)
             async with transaction(self._session_factory) as session:
                 await RefreshJobService(session).validate_for_contact(context=context, lease=lease)
-            adapter = self._adapter_factory()
+            adapter = self._adapter_factory(policy_version)
             if secret_reference is None:
                 result = await adapter.discover(endpoint)
             else:
@@ -53,6 +62,7 @@ class DiscoveryRunner:
         except (
             DiscoveryError,
             EndpointPolicyError,
+            EndpointResolutionError,
             ResponseLimitExceeded,
             SecretProviderError,
             TimeoutError,
@@ -82,7 +92,7 @@ class DiscoveryRunner:
 
     async def _load_target(
         self, context: WorkspaceContext, lease: RefreshLease
-    ) -> tuple[str, SecretReference | None]:
+    ) -> tuple[str, str, SecretReference | None]:
         async with transaction(self._session_factory) as session:
             await require_current_role(session, context, Role.ADMIN, Role.OPERATOR)
             version = await session.scalar(
@@ -95,7 +105,7 @@ class DiscoveryRunner:
             if version is None:
                 raise AuthorizationDenied("workspace access denied")
             if version.secret_binding_id is None:
-                return version.endpoint_url, None
+                return version.endpoint_url, version.policy_version, None
             binding = await session.scalar(
                 select(SecretBinding).where(
                     SecretBinding.id == version.secret_binding_id,
@@ -104,10 +114,14 @@ class DiscoveryRunner:
             )
             if binding is None:
                 raise SecretProviderError("secret binding is unavailable")
-            return version.endpoint_url, SecretReference(
-                provider=binding.provider,
-                external_reference=binding.external_reference,
-                version=binding.version,
+            return (
+                version.endpoint_url,
+                version.policy_version,
+                SecretReference(
+                    provider=binding.provider,
+                    external_reference=binding.external_reference,
+                    version=binding.version,
+                ),
             )
 
 
@@ -115,6 +129,10 @@ def classify_discovery_failure(error: BaseException) -> DiscoveryFailureCode:
     errors = _flatten(error)
     if any(isinstance(item, ProtocolMismatch) for item in errors):
         return DiscoveryFailureCode.PROTOCOL_MISMATCH
+    if any(isinstance(item, CredentialError) for item in errors):
+        return DiscoveryFailureCode.AUTHENTICATION_FAILED
+    if any(isinstance(item, EndpointResolutionError) for item in errors):
+        return DiscoveryFailureCode.TRANSPORT_FAILED
     if any(isinstance(item, EndpointPolicyError) for item in errors):
         return DiscoveryFailureCode.ENDPOINT_REJECTED
     if any(isinstance(item, ResponseLimitExceeded) for item in errors):

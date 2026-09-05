@@ -18,6 +18,10 @@ class EndpointPolicyError(Exception):
     """The endpoint cannot be contacted under the active network policy."""
 
 
+class EndpointResolutionError(Exception):
+    """DNS resolution failed before an endpoint-policy decision was possible."""
+
+
 class ResponseLimitExceeded(Exception):
     """An upstream response exceeded its incremental raw-byte allowance."""
 
@@ -86,7 +90,10 @@ class EndpointPolicy:
             host = normalize_endpoint_host(parsed.hostname).value
         except ValueError as exc:
             raise EndpointPolicyError("endpoint rejected") from exc
-        addresses = await self._resolver(host, port)
+        try:
+            addresses = await self._resolver(host, port)
+        except Exception as exc:
+            raise EndpointResolutionError("endpoint resolution failed") from exc
         if not addresses:
             raise EndpointPolicyError("endpoint resolution failed")
         parsed_addresses = []

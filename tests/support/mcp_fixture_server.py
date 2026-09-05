@@ -41,6 +41,9 @@ SUPPORTED_PROFILES = {
     "structured-secret",
     "nested-structured-secret",
     "keyword-property-names",
+    "unresolved-local-ref",
+    "unresolved-local-anchor",
+    "oversized-metadata",
     "repeated-cursor",
     *AUTHENTICATED_PROFILES,
 }
@@ -81,6 +84,10 @@ def _tools(profile: str) -> list[dict[str, Any]]:
             "$id": {"type": "string"},
             "$ref": {"type": "string"},
         }
+    if profile == "unresolved-local-ref":
+        schema = {"$ref": "#/$defs/missing"}
+    if profile == "unresolved-local-anchor":
+        schema = {"$dynamicRef": "#missing"}
     first_tool: dict[str, Any] = {
         "name": "echo",
         "title": "Echo",
@@ -96,6 +103,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         first_tool["_meta"] = {"api_key": "abcdefgh1234"}
     if profile == "nested-structured-secret":
         first_tool["_meta"] = {"api_key": {"value": "abcdefgh1234"}}
+    if profile == "oversized-metadata":
+        first_tool["_meta"] = {"annotation": "x" * 8193}
     return [
         first_tool,
         {

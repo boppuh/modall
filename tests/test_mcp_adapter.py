@@ -1,6 +1,7 @@
 import asyncio
 import gzip
 from collections.abc import Awaitable, Callable, Iterable
+from socket import gaierror
 
 import httpcore
 import httpx
@@ -11,6 +12,7 @@ from modall.mcp_adapter.policy import (
     EndpointPolicy,
     EndpointPolicyError,
     EndpointResolution,
+    EndpointResolutionError,
     LimitedTransport,
     PinnedHTTPTransport,
     PinnedNetworkBackend,
@@ -78,7 +80,13 @@ def test_adapter_discovers_bounded_domain_types_and_drift() -> None:
         assert metadata_v1.tools[0].input_schema == metadata_v2.tools[0].input_schema
         assert metadata_v1.tools[0].metadata_digest != metadata_v2.tools[0].metadata_digest
 
-        for profile in ("unsafe-schema", "remote-schema-ref", "dynamic-schema-ref"):
+        for profile in (
+            "unsafe-schema",
+            "remote-schema-ref",
+            "dynamic-schema-ref",
+            "unresolved-local-ref",
+            "unresolved-local-anchor",
+        ):
             unsafe_client, unsafe_endpoint = adapter_for(profile)
             unsafe = await unsafe_client.discover(unsafe_endpoint)
             assert unsafe.tools[0].schema_supported is False
@@ -132,6 +140,10 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
         oversized_scalar, endpoint = adapter_for("oversized-scalar")
         with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
             await oversized_scalar.discover(endpoint)
+
+        oversized_metadata, endpoint = adapter_for("oversized-metadata")
+        with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
+            await oversized_metadata.discover(endpoint)
 
         local_http, _ = adapter_for("authenticated")
         with pytest.raises(DiscoveryError, match="credentials require HTTPS"):
@@ -217,6 +229,19 @@ def test_total_timeout_bounds_resolution() -> None:
         )
         with pytest.raises(DiscoveryError):
             await adapter.discover("https://mcp.example")
+
+    asyncio.run(scenario())
+
+
+def test_endpoint_policy_classifies_dns_failure_as_resolution_error() -> None:
+    async def failed_resolver(host: str, port: int) -> set[str]:
+        del host, port
+        raise gaierror("fixture DNS failure")
+
+    async def scenario() -> None:
+        policy = EndpointPolicy(environment="production", resolver=failed_resolver)
+        with pytest.raises(EndpointResolutionError):
+            await policy.validate("https://mcp.example")
 
     asyncio.run(scenario())
 
