@@ -221,6 +221,33 @@ def test_jwks_resolver_returns_signing_key(monkeypatch: pytest.MonkeyPatch) -> N
     assert resolver.resolve(token) is expected
 
 
+@pytest.mark.parametrize("key_count", [1, 2])
+def test_jwks_resolver_accepts_missing_kid_only_for_one_key(
+    monkeypatch: pytest.MonkeyPatch, key_count: int
+) -> None:
+    keys = [object() for _ in range(key_count)]
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def get_signing_keys(self, *, refresh: bool = False) -> list[object]:
+            return keys
+
+        def match_kid(self, signing_keys: list[object], kid: str) -> None:
+            raise AssertionError("missing kid should not use kid matching")
+
+    monkeypatch.setattr("modall.identity.auth.PyJWKClient", FakeClient)
+    resolver = PyJwkSigningKeyResolver("https://issuer.example/jwks")
+    token = jwt.encode({}, "s" * 32, algorithm="HS256")
+
+    if key_count == 1:
+        assert resolver.resolve(token) is keys[0]
+    else:
+        with pytest.raises(AuthenticationError, match="ambiguous"):
+            resolver.resolve(token)
+
+
 def test_jwks_resolver_bounds_unknown_key_refreshes(monkeypatch: pytest.MonkeyPatch) -> None:
     refresh_calls: list[bool] = []
     now = [0.0]

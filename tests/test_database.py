@@ -14,6 +14,7 @@ from modall.persistence.database import (
     async_database_url,
     create_engine,
 )
+from modall.persistence.migration_config import load_migration_database_url
 
 
 def test_async_database_url_selects_asyncpg() -> None:
@@ -62,6 +63,25 @@ def test_alembic_uses_database_only_settings_in_deployed_mode() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_migration_database_url_loads_repository_env_without_runtime_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MODALL_DATABASE_URL", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "MODALL_ENVIRONMENT=production\n"
+        "MODALL_DATABASE_URL=postgresql://env-user:env-pass@db/env-db\n"
+    )
+
+    assert (
+        load_migration_database_url(
+            fallback="postgresql://fallback/db",
+            env_file=env_file,
+        )
+        == "postgresql://env-user:env-pass@db/env-db"
+    )
 
 
 def test_database_probe_reports_ready_and_closes() -> None:

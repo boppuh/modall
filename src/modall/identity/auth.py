@@ -62,7 +62,7 @@ class PyJwkSigningKeyResolver:
     def resolve(self, token: str) -> jwt.PyJWK:
         header = jwt.get_unverified_header(token)
         kid = header.get("kid")
-        if not isinstance(kid, str) or not kid or len(kid) > 256:
+        if kid is not None and (not isinstance(kid, str) or not kid or len(kid) > 256):
             raise AuthenticationError("invalid bearer token")
 
         with self._lock:
@@ -78,6 +78,11 @@ class PyJwkSigningKeyResolver:
                 # the issuer may have revoked.
                 self._signing_keys = None
                 self._signing_keys = self._client.get_signing_keys(refresh=True)
+
+            if kid is None:
+                if len(self._signing_keys) == 1:
+                    return self._signing_keys[0]
+                raise AuthenticationError("ambiguous signing key")
 
             signing_key = self._client.match_kid(self._signing_keys, kid)
             if signing_key is not None:

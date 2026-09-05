@@ -1,23 +1,28 @@
 """Alembic environment backed by the application settings."""
 
 import asyncio
-import os
 from logging.config import fileConfig
+from pathlib import Path
 
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from modall.persistence.database import alembic_database_url
+from modall.persistence.migration_config import load_migration_database_url
 from modall.persistence.models import Base
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-database_url = os.environ.get("MODALL_DATABASE_URL") or config.get_main_option("sqlalchemy.url")
-if not database_url:
+fallback_database_url = config.get_main_option("sqlalchemy.url")
+if not fallback_database_url:
     raise RuntimeError("a database URL is required to run migrations")
+database_url = load_migration_database_url(
+    fallback=fallback_database_url,
+    env_file=Path(__file__).resolve().parents[1] / ".env",
+)
 config.set_main_option("sqlalchemy.url", alembic_database_url(database_url))
 target_metadata = Base.metadata
 
