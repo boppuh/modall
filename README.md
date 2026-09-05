@@ -38,9 +38,10 @@ run `make migrate` with `MODALL_DATABASE_URL` configured.
 Local/test processes use the explicit `local` authentication mode and fixture secret provider.
 Staging and production settings fail validation unless OIDC (`MODALL_OIDC_ISSUER`,
 `MODALL_OIDC_AUDIENCE`, and `MODALL_OIDC_JWKS_URL`) and the `mounted_file` secret provider are
-configured. Mounted secrets are read only from `MODALL_SECRET_MOUNT_ROOT` using the immutable
-filename `<external-reference>.<version>`; the database stores only that opaque reference and
-version.
+configured. Mounted secrets are read only from `MODALL_SECRET_MOUNT_ROOT`. The immutable filename
+is the unpadded base64url encoding of the external reference, a `.`, and the unpadded base64url
+encoding of the version (for example, `api-token`/`v2` maps to `YXBpLXRva2Vu.djI`). The database
+stores only the opaque reference and version.
 
 The API and worker are intentionally thin in this foundation PR. Persistence, identity,
 registry, discovery, execution, and operator workflows land in the independently reviewed

@@ -3,7 +3,12 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from modall.persistence.database import DatabaseProbe, async_database_url, create_engine
+from modall.persistence.database import (
+    DatabaseProbe,
+    alembic_database_url,
+    async_database_url,
+    create_engine,
+)
 
 
 def test_async_database_url_selects_asyncpg() -> None:
@@ -11,7 +16,22 @@ def test_async_database_url_selects_asyncpg() -> None:
         async_database_url("postgresql://user:pass@db/database")
         == "postgresql+asyncpg://user:pass@db/database"
     )
+    assert (
+        async_database_url("postgresql+psycopg://user:pass@db/database")
+        == "postgresql+asyncpg://user:pass@db/database"
+    )
+    assert (
+        async_database_url("postgresql+asyncpg://user:pass@db/database")
+        == "postgresql+asyncpg://user:pass@db/database"
+    )
     assert async_database_url("sqlite+aiosqlite:///:memory:") == "sqlite+aiosqlite:///:memory:"
+
+
+def test_alembic_database_url_escapes_configparser_interpolation() -> None:
+    assert (
+        alembic_database_url("postgresql://user:p%40ss@db/database")
+        == "postgresql+asyncpg://user:p%%40ss@db/database"
+    )
 
 
 def test_database_probe_reports_ready_and_closes() -> None:

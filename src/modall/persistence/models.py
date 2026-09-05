@@ -8,7 +8,6 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
-    ForeignKeyConstraint,
     Index,
     String,
     UniqueConstraint,
@@ -73,11 +72,6 @@ class WorkspaceMembership(Base):
 class SecretBinding(Base):
     __tablename__ = "secret_bindings"
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["workspace_id", "created_by_user_id"],
-            ["workspace_memberships.workspace_id", "workspace_memberships.user_id"],
-            ondelete="RESTRICT",
-        ),
         UniqueConstraint("workspace_id", "provider", "external_reference", "version"),
         CheckConstraint("provider IN ('fixture', 'mounted_file')", name="ck_secret_provider"),
     )
@@ -87,18 +81,13 @@ class SecretBinding(Base):
     provider: Mapped[str] = mapped_column(String(32))
     external_reference: Mapped[str] = mapped_column(String(256))
     version: Mapped[str] = mapped_column(String(128))
-    created_by_user_id: Mapped[UUID]
+    created_by_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     created_at: Mapped[CreatedAt]
 
 
 class AuditEvent(Base):
     __tablename__ = "audit_events"
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["workspace_id", "actor_user_id"],
-            ["workspace_memberships.workspace_id", "workspace_memberships.user_id"],
-            ondelete="RESTRICT",
-        ),
         CheckConstraint("outcome IN ('succeeded', 'denied', 'failed')", name="ck_audit_outcome"),
         CheckConstraint(
             "action IN ('workspace.created', 'membership.changed', 'secret_binding.created')",
@@ -113,7 +102,7 @@ class AuditEvent(Base):
 
     id: Mapped[UuidPrimaryKey]
     workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
-    actor_user_id: Mapped[UUID]
+    actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     action: Mapped[str] = mapped_column(String(64))
     resource_type: Mapped[str] = mapped_column(String(32))
     resource_id: Mapped[UUID]

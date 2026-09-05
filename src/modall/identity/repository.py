@@ -56,6 +56,8 @@ class WorkspaceRepository:
         return cast(SecretBinding | None, await self._session.scalar(statement))
 
     async def list_audit_events(self) -> list[AuditEvent]:
+        if not self.context.allows(Permission.VIEW_AUDIT):
+            raise AuthorizationDenied("workspace access denied")
         statement = (
             select(AuditEvent)
             .where(AuditEvent.workspace_id == self.context.workspace_id)

@@ -143,6 +143,13 @@ def test_current_membership_role_is_rechecked() -> None:
                         workspace_id=workspace_id,
                         permission=Permission.VIEW_AUDIT,
                     )
+                viewer_context = await AuthorizationService(session).authorize(
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    permission=Permission.VIEW_RESOURCES,
+                )
+                with pytest.raises(AuthorizationDenied):
+                    await WorkspaceRepository(session, viewer_context).list_audit_events()
 
     asyncio.run(scenario())
 
@@ -204,10 +211,9 @@ def test_user_resolution_is_idempotent_and_workspace_name_is_required() -> None:
     asyncio.run(scenario())
 
 
-def test_database_rejects_cross_workspace_actor_reference() -> None:
+def test_database_rejects_missing_actor_reference() -> None:
     async def scenario() -> None:
         async with database() as (_, factory):
-            user_one, _ = await bootstrap_workspace(factory, subject="db-one", name="DB One")
             _, workspace_two = await bootstrap_workspace(factory, subject="db-two", name="DB Two")
 
             with pytest.raises(IntegrityError):
@@ -216,10 +222,55 @@ def test_database_rejects_cross_workspace_actor_reference() -> None:
                         SecretBinding(
                             workspace_id=workspace_two,
                             provider="fixture",
-                            external_reference="cross-tenant",
+                            external_reference="missing-actor",
                             version="v1",
-                            created_by_user_id=user_one,
+                            created_by_user_id=uuid4(),
                         )
+                    )
+
+    asyncio.run(scenario())
+
+
+def test_membership_mutation_rejects_a_stale_admin_context() -> None:
+    async def scenario() -> None:
+        async with database() as (_, factory):
+            original_admin_id, workspace_id = await bootstrap_workspace(
+                factory, subject="original-admin", name="Stale Context Test"
+            )
+            async with transaction(factory) as session:
+                replacement = await IdentityService(session).resolve_user(
+                    Principal("issuer", "replacement-admin", "Replacement Admin")
+                )
+                replacement_id = replacement.id
+                original_context = await AuthorizationService(session).authorize(
+                    user_id=original_admin_id,
+                    workspace_id=workspace_id,
+                    permission=Permission.MANAGE_CONNECTION_CONFIGURATION,
+                )
+                await IdentityService(session).set_membership_role(
+                    context=original_context,
+                    user_id=replacement_id,
+                    role=Role.ADMIN,
+                )
+
+            async with transaction(factory) as session:
+                replacement_context = await AuthorizationService(session).authorize(
+                    user_id=replacement_id,
+                    workspace_id=workspace_id,
+                    permission=Permission.MANAGE_CONNECTION_CONFIGURATION,
+                )
+                await IdentityService(session).set_membership_role(
+                    context=replacement_context,
+                    user_id=original_admin_id,
+                    role=Role.VIEWER,
+                )
+
+            async with transaction(factory) as session:
+                with pytest.raises(AuthorizationDenied):
+                    await IdentityService(session).set_membership_role(
+                        context=original_context,
+                        user_id=original_admin_id,
+                        role=Role.ADMIN,
                     )
 
     asyncio.run(scenario())

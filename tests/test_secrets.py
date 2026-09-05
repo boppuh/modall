@@ -41,7 +41,8 @@ def test_fixture_provider_fails_without_reference_disclosure() -> None:
 
 
 def test_mounted_file_provider_reads_exact_version_and_zeroes(tmp_path: Path) -> None:
-    (tmp_path / "api-token.v2").write_bytes(b"mounted-secret\n")
+    filename = MountedFileSecretProvider.filename_for("api-token", "v2")
+    (tmp_path / filename).write_bytes(b"mounted-secret\n")
     provider = MountedFileSecretProvider(tmp_path)
 
     with provider.retrieve(reference("mounted_file", "api-token", "v2")) as value:
@@ -62,15 +63,45 @@ def test_mounted_file_provider_rejects_traversal(tmp_path: Path, name: str, vers
 def test_mounted_file_provider_rejects_symlink_and_oversize(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.write_bytes(b"value")
-    os.symlink(target, tmp_path / "link.v1")
+    os.symlink(target, tmp_path / MountedFileSecretProvider.filename_for("link", "v1"))
     provider = MountedFileSecretProvider(tmp_path, max_bytes=4)
 
     with pytest.raises(SecretProviderError, match="failed"):
         provider.retrieve(reference("mounted_file", "link", "v1"))
 
-    (tmp_path / "large.v1").write_bytes(b"12345")
+    (tmp_path / MountedFileSecretProvider.filename_for("large", "v1")).write_bytes(b"12345")
     with pytest.raises(SecretProviderError, match="bound"):
         provider.retrieve(reference("mounted_file", "large", "v1"))
+
+
+def test_mounted_file_mapping_is_injective(tmp_path: Path) -> None:
+    first = MountedFileSecretProvider.filename_for("api", "token.v1")
+    second = MountedFileSecretProvider.filename_for("api.token", "v1")
+    assert first != second
+
+    (tmp_path / first).write_bytes(b"first")
+    (tmp_path / second).write_bytes(b"second")
+    provider = MountedFileSecretProvider(tmp_path)
+    with provider.retrieve(reference("mounted_file", "api", "token.v1")) as value:
+        assert bytes(value) == b"first"
+    with provider.retrieve(reference("mounted_file", "api.token", "v1")) as value:
+        assert bytes(value) == b"second"
+
+
+def test_mounted_file_provider_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    filename = MountedFileSecretProvider.filename_for("pipe", "v1")
+    os.mkfifo(tmp_path / filename)
+
+    with pytest.raises(SecretProviderError, match="regular file"):
+        MountedFileSecretProvider(tmp_path).retrieve(reference("mounted_file", "pipe", "v1"))
+
+
+def test_provider_errors_suppress_reference_bearing_causes(tmp_path: Path) -> None:
+    with pytest.raises(SecretProviderError) as caught:
+        MountedFileSecretProvider(tmp_path).retrieve(
+            reference("mounted_file", "private-name", "v1")
+        )
+    assert caught.value.__cause__ is None
 
 
 def test_mounted_file_provider_validates_configuration(tmp_path: Path) -> None:

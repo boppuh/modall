@@ -50,11 +50,7 @@ def upgrade() -> None:
         sa.Column("created_by_user_id", sa.Uuid(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("provider IN ('fixture', 'mounted_file')", name="ck_secret_provider"),
-        sa.ForeignKeyConstraint(
-            ["workspace_id", "created_by_user_id"],
-            ["workspace_memberships.workspace_id", "workspace_memberships.user_id"],
-            ondelete="RESTRICT",
-        ),
+        sa.ForeignKeyConstraint(["created_by_user_id"], ["users.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("workspace_id", "provider", "external_reference", "version"),
@@ -79,11 +75,7 @@ def upgrade() -> None:
             "resource_type IN ('workspace', 'membership', 'secret_binding')",
             name="ck_audit_resource_type",
         ),
-        sa.ForeignKeyConstraint(
-            ["workspace_id", "actor_user_id"],
-            ["workspace_memberships.workspace_id", "workspace_memberships.user_id"],
-            ondelete="RESTRICT",
-        ),
+        sa.ForeignKeyConstraint(["actor_user_id"], ["users.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )

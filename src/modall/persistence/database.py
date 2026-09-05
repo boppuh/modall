@@ -17,9 +17,16 @@ def create_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
 
 
 def async_database_url(database_url: str) -> str:
-    if database_url.startswith("postgresql://"):
-        return database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    scheme, separator, remainder = database_url.partition("://")
+    if separator and (scheme == "postgresql" or scheme.startswith("postgresql+")):
+        return f"postgresql+asyncpg://{remainder}"
     return database_url
+
+
+def alembic_database_url(database_url: str) -> str:
+    """Return an async URL escaped for Alembic's ConfigParser-backed config."""
+
+    return async_database_url(database_url).replace("%", "%%")
 
 
 class DatabaseProbe:

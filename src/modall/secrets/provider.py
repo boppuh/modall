@@ -1,5 +1,6 @@
 """Secret-provider contracts and alpha implementations."""
 
+import base64
 import os
 import re
 import stat
@@ -59,8 +60,8 @@ class FixtureSecretProvider:
             raise SecretProviderError("secret provider mismatch")
         try:
             value = self._values[(reference.external_reference, reference.version)]
-        except KeyError as exc:
-            raise SecretProviderError("secret reference not found") from exc
+        except KeyError:
+            raise SecretProviderError("secret reference not found") from None
         return SecretLease(value)
 
 
@@ -77,21 +78,32 @@ class MountedFileSecretProvider:
             raise ValueError("secret mount root must be a directory")
         self._max_bytes = max_bytes
 
+    @classmethod
+    def filename_for(cls, external_reference: str, version: str) -> str:
+        """Map a reference/version pair to an injective, path-safe filename."""
+
+        if (
+            cls._REFERENCE.fullmatch(external_reference) is None
+            or cls._REFERENCE.fullmatch(version) is None
+        ):
+            raise SecretProviderError("invalid secret reference")
+
+        def encode(component: str) -> str:
+            return base64.urlsafe_b64encode(component.encode()).rstrip(b"=").decode("ascii")
+
+        return f"{encode(external_reference)}.{encode(version)}"
+
     def retrieve(self, reference: SecretReference) -> SecretLease:
         if reference.provider != "mounted_file":
             raise SecretProviderError("secret provider mismatch")
-        if (
-            self._REFERENCE.fullmatch(reference.external_reference) is None
-            or self._REFERENCE.fullmatch(reference.version) is None
-        ):
-            raise SecretProviderError("invalid secret reference")
-        filename = f"{reference.external_reference}.{reference.version}"
+        filename = self.filename_for(reference.external_reference, reference.version)
 
-        directory_fd = os.open(self._root, os.O_RDONLY | os.O_DIRECTORY)
+        directory_fd: int | None = None
         try:
+            directory_fd = os.open(self._root, os.O_RDONLY | os.O_DIRECTORY)
             descriptor = os.open(
                 filename,
-                os.O_RDONLY | os.O_NOFOLLOW,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                 dir_fd=directory_fd,
             )
             try:
@@ -111,10 +123,11 @@ class MountedFileSecretProvider:
                 value = b"".join(chunks)
             finally:
                 os.close(descriptor)
-        except OSError as exc:
-            raise SecretProviderError("secret retrieval failed") from exc
+        except OSError:
+            raise SecretProviderError("secret retrieval failed") from None
         finally:
-            os.close(directory_fd)
+            if directory_fd is not None:
+                os.close(directory_fd)
 
         if len(value) > self._max_bytes:
             raise SecretProviderError("secret value exceeds configured bound")

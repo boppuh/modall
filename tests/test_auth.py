@@ -25,13 +25,18 @@ class StaticResolver:
         return self.key
 
 
-def oidc_token(*, audience: str = "modall", expired: bool = False) -> tuple[str, bytes]:
+def oidc_token(
+    *,
+    audience: str = "modall",
+    issuer: str = "https://issuer.example",
+    expired: bool = False,
+) -> tuple[str, bytes]:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     now = datetime.now(UTC)
     expiry = now - timedelta(minutes=1) if expired else now + timedelta(minutes=5)
     token = jwt.encode(
         {
-            "iss": "https://issuer.example",
+            "iss": issuer,
             "aud": audience,
             "sub": "user-123",
             "name": "Ada",
@@ -72,7 +77,7 @@ def test_local_authenticator_rejects_deployed_mode() -> None:
 
 
 def test_oidc_authenticator_validates_and_maps_principal() -> None:
-    token, public_key = oidc_token()
+    token, public_key = oidc_token(issuer="https://issuer.example/")
     authenticator = OidcAuthenticator(
         issuer="https://issuer.example/",
         audience="modall",
@@ -80,7 +85,7 @@ def test_oidc_authenticator_validates_and_maps_principal() -> None:
     )
 
     assert authenticator.authenticate(token) == Principal(
-        issuer="https://issuer.example", subject="user-123", display_name="Ada"
+        issuer="https://issuer.example/", subject="user-123", display_name="Ada"
     )
 
 

@@ -60,7 +60,8 @@ class OidcAuthenticator:
         audience: str,
         resolver: SigningKeyResolver,
     ) -> None:
-        self._issuer = issuer.rstrip("/")
+        # OIDC issuer identifiers are security identifiers, not URLs to normalize.
+        self._issuer = issuer
         self._audience = audience
         self._resolver = resolver
 

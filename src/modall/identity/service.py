@@ -1,8 +1,10 @@
 """Identity bootstrap operations with atomic audit evidence."""
 
+from typing import cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modall.audit.types import AuditAction, ResourceType
@@ -23,14 +25,24 @@ class IdentityService:
         user = await self._session.scalar(statement)
         if user is not None:
             return user
-        user = User(
-            oidc_issuer=principal.issuer,
-            oidc_subject=principal.subject,
-            display_name=principal.display_name,
-        )
-        self._session.add(user)
-        await self._session.flush()
-        return user
+        try:
+            async with self._session.begin_nested():
+                user = User(
+                    oidc_issuer=principal.issuer,
+                    oidc_subject=principal.subject,
+                    display_name=principal.display_name,
+                )
+                self._session.add(user)
+                await self._session.flush()
+            return user
+        except IntegrityError:
+            # A concurrent first login may have inserted the same principal while
+            # this transaction waited on the unique constraint. The savepoint keeps
+            # the caller's transaction usable so the winning row can be reloaded.
+            winner = cast(User | None, await self._session.scalar(statement))
+            if winner is None:
+                raise
+            return winner
 
     async def create_workspace(
         self,
@@ -76,9 +88,30 @@ class IdentityService:
         """Add or change a member while preserving at least one workspace Admin."""
 
         require_role(context, Role.ADMIN)
-        membership = await self._session.get(
-            WorkspaceMembership,
-            {"workspace_id": context.workspace_id, "user_id": user_id},
+        locked_workspace = await self._session.scalar(
+            select(Workspace.id).where(Workspace.id == context.workspace_id).with_for_update()
+        )
+        if locked_workspace is None:
+            raise AuthorizationDenied("workspace access denied")
+
+        actor_membership = await self._session.scalar(
+            select(WorkspaceMembership)
+            .where(
+                WorkspaceMembership.workspace_id == context.workspace_id,
+                WorkspaceMembership.user_id == context.actor_user_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        if actor_membership is None or actor_membership.typed_role != Role.ADMIN:
+            raise AuthorizationDenied("workspace access denied")
+
+        membership = await self._session.scalar(
+            select(WorkspaceMembership)
+            .where(
+                WorkspaceMembership.workspace_id == context.workspace_id,
+                WorkspaceMembership.user_id == user_id,
+            )
+            .execution_options(populate_existing=True)
         )
         if membership is None:
             membership = WorkspaceMembership(
