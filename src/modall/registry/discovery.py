@@ -438,7 +438,6 @@ class DiscoveryPublicationService:
             ):
                 continue
             capability.status = CapabilityStatus.UNAVAILABLE.value
-            capability.pending_version_id = None
             capability.status_epoch += 1
             self._session.add(
                 CapabilityStatusEvent(

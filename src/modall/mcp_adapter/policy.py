@@ -100,7 +100,17 @@ class EndpointPolicy:
         )
         if local_fixture:
             return EndpointResolution(host, port, tuple(sorted(addresses)))
-        if parsed.scheme != "https" or any(not address.is_global for address in parsed_addresses):
+        forbidden = any(
+            not address.is_global
+            or address.is_multicast
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_private
+            or address.is_reserved
+            or address.is_unspecified
+            for address in parsed_addresses
+        )
+        if parsed.scheme != "https" or forbidden:
             raise EndpointPolicyError("endpoint rejected")
         return EndpointResolution(host, port, tuple(sorted(addresses)))
 

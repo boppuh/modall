@@ -37,6 +37,8 @@ SUPPORTED_PROFILES = {
     "remote-schema-ref",
     "dynamic-schema-ref",
     "storage-oversized-schema",
+    "oversized-scalar",
+    "structured-secret",
     "repeated-cursor",
     *AUTHENTICATED_PROFILES,
 }
@@ -50,6 +52,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         description = f"Leaked credential {token}"
     else:
         description = "Echo bounded text"
+    if profile == "oversized-scalar":
+        description = "x" * 2049
     schema: dict[str, Any] = {
         "type": "object",
         "properties": {"message": {"type": "string", "maxLength": 256}},
@@ -69,18 +73,21 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         schema["properties"] = {
             f"field{index}": {"type": "string", "description": "x" * 160} for index in range(900)
         }
-    return [
-        {
-            "name": "echo",
-            "title": "Echo",
-            "description": description,
-            "inputSchema": schema,
-            "outputSchema": {
-                "type": "object",
-                "properties": {"message": {"type": "string"}},
-                "required": ["message"],
-            },
+    first_tool: dict[str, Any] = {
+        "name": "echo",
+        "title": "Echo",
+        "description": description,
+        "inputSchema": schema,
+        "outputSchema": {
+            "type": "object",
+            "properties": {"message": {"type": "string"}},
+            "required": ["message"],
         },
+    }
+    if profile == "structured-secret":
+        first_tool["_meta"] = {"api_key": "abcdefgh1234"}
+    return [
+        first_tool,
         {
             "name": "status",
             "title": "Status",

@@ -304,6 +304,64 @@ def test_failed_pending_verification_can_be_retried_and_promoted() -> None:
     asyncio.run(scenario())
 
 
+def test_pending_capability_reappearance_reuses_its_immutable_version() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="reappearance-admin")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Reappearance",
+                    endpoint_url="https://mcp.example/reappearance",
+                    secret_binding_id=None,
+                    policy_version="policy-v1",
+                )
+                connection_id = connection.id
+                lease = await lease_for(session, context, connection_id, "worker-1")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context, lease=lease, result=result_for()
+                )
+                capability = await session.scalar(
+                    select(Capability).where(Capability.connection_id == connection_id)
+                )
+                assert capability is not None and capability.pending_version_id is not None
+                pending_version_id = capability.pending_version_id
+
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                missing_lease = await lease_for(session, context, connection_id, "worker-2")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context,
+                    lease=missing_lease,
+                    result=result_for(include_tool=False),
+                )
+                capability = await session.scalar(
+                    select(Capability).where(Capability.connection_id == connection_id)
+                )
+                assert capability is not None
+                assert capability.typed_status == CapabilityStatus.UNAVAILABLE
+                assert capability.pending_version_id == pending_version_id
+
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                return_lease = await lease_for(session, context, connection_id, "worker-3")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context, lease=return_lease, result=result_for()
+                )
+                capability = await session.scalar(
+                    select(Capability).where(Capability.connection_id == connection_id)
+                )
+                assert capability is not None
+                assert capability.typed_status == CapabilityStatus.PENDING_REVIEW
+                assert capability.pending_version_id == pending_version_id
+                assert (
+                    await session.scalar(select(func.count()).select_from(CapabilityVersion)) == 1
+                )
+
+    asyncio.run(scenario())
+
+
 def test_refresh_lease_reclaim_invalidates_the_previous_worker() -> None:
     async def scenario() -> None:
         async with database() as factory:
@@ -492,6 +550,10 @@ def test_discovery_runner_does_not_report_publication_errors_as_endpoint_health(
         (TimeoutError(), DiscoveryFailureCode.TIMEOUT),
         (SecretProviderError("safe"), DiscoveryFailureCode.AUTHENTICATION_FAILED),
         (DiscoveryError("safe"), DiscoveryFailureCode.INVALID_METADATA),
+        (
+            httpx.ConnectError("safe", request=httpx.Request("GET", "https://mcp.example")),
+            DiscoveryFailureCode.TRANSPORT_FAILED,
+        ),
         (RuntimeError("safe"), DiscoveryFailureCode.TRANSPORT_FAILED),
     ],
 )

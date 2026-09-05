@@ -25,7 +25,11 @@ from modall.persistence.models import (
     ServerConnectionVersion,
 )
 from modall.registry.types import CapabilityStatus, ConnectionLifecycle, Transport
-from modall.security.metadata import contains_obvious_secret, validate_schema_payload
+from modall.security.metadata import (
+    contains_obvious_secret,
+    validate_capability_scalars,
+    validate_schema_payload,
+)
 
 QUALIFIED_PROTOCOL_REVISION = "2025-06-18"
 
@@ -530,6 +534,13 @@ class CapabilityService:
                 schema_supported=schema_supported,
             )
             if existing is not None:
+                if (
+                    capability.typed_status == CapabilityStatus.UNAVAILABLE
+                    and capability.pending_version_id == existing.id
+                ):
+                    capability.status = CapabilityStatus.PENDING_REVIEW.value
+                    capability.status_epoch += 1
+                    self._append_status_event(context, capability, existing.id)
                 return existing
             sequence = (
                 await self._session.scalar(
@@ -808,29 +819,15 @@ class CapabilityService:
         metadata_digest: str,
         protocol_revision: str,
     ) -> None:
-        if not tool_identity or len(tool_identity) > 256 or "\x00" in tool_identity:
-            raise ValueError("invalid tool identity")
-        if not tool_name or len(tool_name) > 256 or "\x00" in tool_name:
-            raise ValueError("invalid tool name")
-        if not display_name or len(display_name) > 256 or "\x00" in display_name:
-            raise ValueError("invalid display name")
-        if description is not None and (len(description) > 2048 or "\x00" in description):
-            raise ValueError("invalid description")
         if cls._DIGEST.fullmatch(metadata_digest) is None:
             raise ValueError("invalid metadata digest")
         if cls._PROTOCOL_REVISION.fullmatch(protocol_revision) is None:
             raise ValueError("invalid protocol revision")
-        try:
-            for value in (tool_identity, tool_name, display_name, description, protocol_revision):
-                if value is not None:
-                    value.encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise ValueError("capability metadata is not valid UTF-8") from exc
-        scalar_metadata = "\n".join(
-            value
-            for value in (tool_identity, tool_name, display_name, description, protocol_revision)
-            if value is not None
+        validate_capability_scalars(
+            tool_identity=tool_identity,
+            tool_name=tool_name,
+            display_name=display_name,
+            description=description,
+            protocol_revision=protocol_revision,
         )
-        if contains_obvious_secret(scalar_metadata):
-            raise ValueError("capability metadata contains credential-shaped content")
         validate_schema_payload(input_schema, output_schema)

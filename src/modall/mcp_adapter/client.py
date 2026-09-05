@@ -23,6 +23,8 @@ from modall.mcp_adapter.policy import (
 from modall.security.metadata import (
     MetadataValidationError,
     contains_obvious_secret,
+    contains_sensitive_json,
+    validate_capability_scalars,
     validate_schema_payload,
 )
 
@@ -83,6 +85,8 @@ class McpClientAdapter:
         headers: dict[str, str] = {"Accept-Encoding": "identity"}
         credential_text: str | None = None
         if bearer_token is not None:
+            if not endpoint.lower().startswith("https://"):
+                raise DiscoveryError("credentials require HTTPS")
             try:
                 credential_text = bytes(bearer_token).decode("ascii")
             except UnicodeDecodeError as exc:
@@ -179,6 +183,13 @@ class McpClientAdapter:
             encoded = _canonical_json(normalized)
             metadata_digest = hashlib.sha256(encoded).hexdigest()
             try:
+                validate_capability_scalars(
+                    tool_identity=identity,
+                    tool_name=tool.name,
+                    display_name=tool.title or tool.name,
+                    description=tool.description,
+                    protocol_revision=QUALIFIED_PROTOCOL_REVISION,
+                )
                 validate_schema_payload(tool.inputSchema, tool.outputSchema)
             except MetadataValidationError as exc:
                 raise DiscoveryError("invalid discovery metadata") from exc
@@ -209,8 +220,13 @@ class McpClientAdapter:
         if len(canonical) > self._limits.response_bytes:
             raise DiscoveryError("normalized discovery exceeded byte limit")
         text = canonical.decode("utf-8")
-        if contains_obvious_secret(text) or (
-            credential_text is not None and _contains_decoded_credential(payload, credential_text)
+        if (
+            contains_obvious_secret(text)
+            or contains_sensitive_json(payload)
+            or (
+                credential_text is not None
+                and _contains_decoded_credential(payload, credential_text)
+            )
         ):
             raise DiscoveryError("discovery metadata failed secret screening")
         return DiscoveryResult(

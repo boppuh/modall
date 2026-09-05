@@ -26,7 +26,7 @@ from tests.support.mcp_fixture_server import (
 
 async def loopback_resolver(host: str, port: int) -> set[str]:
     del host, port
-    return {"127.0.0.1"}
+    return {"8.8.8.8"}
 
 
 def adapter_for(
@@ -42,7 +42,6 @@ def adapter_for(
         McpClientAdapter(
             endpoint_policy=EndpointPolicy(
                 environment="test",
-                allow_loopback_http=True,
                 resolver=loopback_resolver,
             ),
             limits=limits,
@@ -50,7 +49,7 @@ def adapter_for(
             max_tools=max_tools,
             transport=httpx.ASGITransport(app=fixture_app),  # type: ignore[arg-type]
         ),
-        f"http://fixture/mcp/{profile}",
+        f"https://fixture/mcp/{profile}",
     )
 
 
@@ -121,6 +120,21 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
         with pytest.raises(DiscoveryError, match="secret screening"):
             await escaped_leaking.discover(endpoint, bearer_token=ESCAPED_FIXTURE_TOKEN.encode())
 
+        structured, endpoint = adapter_for("structured-secret")
+        with pytest.raises(DiscoveryError, match="secret screening"):
+            await structured.discover(endpoint)
+
+        oversized_scalar, endpoint = adapter_for("oversized-scalar")
+        with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
+            await oversized_scalar.discover(endpoint)
+
+        local_http, _ = adapter_for("authenticated")
+        with pytest.raises(DiscoveryError, match="credentials require HTTPS"):
+            await local_http.discover(
+                "http://127.0.0.1/mcp/authenticated",
+                bearer_token=FIXTURE_TOKEN.encode(),
+            )
+
         invalid_credential, endpoint = adapter_for("authenticated")
         with pytest.raises(DiscoveryError, match="credential encoding"):
             await invalid_credential.discover(endpoint, bearer_token=b"bad token")
@@ -151,6 +165,10 @@ def test_endpoint_policy_rejects_unsafe_resolution_and_scheme_combinations() -> 
                 EndpointPolicy(
                     environment="production", resolver=resolver({"8.8.8.8", "127.0.0.1"})
                 ),
+                "https://mcp.example/tools",
+            ),
+            (
+                EndpointPolicy(environment="production", resolver=resolver({"224.0.0.1"})),
                 "https://mcp.example/tools",
             ),
             (

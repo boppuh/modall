@@ -128,6 +128,8 @@ def classify_discovery_failure(error: BaseException) -> DiscoveryFailureCode:
         return DiscoveryFailureCode.AUTHENTICATION_FAILED
     if any(isinstance(item, SecretProviderError) for item in errors):
         return DiscoveryFailureCode.AUTHENTICATION_FAILED
+    if any(isinstance(item, httpx.HTTPError) for item in errors):
+        return DiscoveryFailureCode.TRANSPORT_FAILED
     if any(isinstance(item, DiscoveryError) for item in errors):
         return DiscoveryFailureCode.INVALID_METADATA
     return DiscoveryFailureCode.TRANSPORT_FAILED

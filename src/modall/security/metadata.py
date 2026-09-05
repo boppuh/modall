@@ -24,6 +24,43 @@ def contains_obvious_secret(value: str) -> bool:
     return _OBVIOUS_SECRET.search(value) is not None
 
 
+def contains_sensitive_json(value: object) -> bool:
+    """Detect credential-shaped strings and values beneath sensitive field names."""
+
+    return _contains_obvious_secret_in_json(value)
+
+
+def validate_capability_scalars(
+    *,
+    tool_identity: str,
+    tool_name: str,
+    display_name: str,
+    description: str | None,
+    protocol_revision: str,
+) -> None:
+    if not tool_identity or len(tool_identity) > 256 or "\x00" in tool_identity:
+        raise MetadataValidationError("invalid tool identity")
+    if not tool_name or len(tool_name) > 256 or "\x00" in tool_name:
+        raise MetadataValidationError("invalid tool name")
+    if not display_name or len(display_name) > 256 or "\x00" in display_name:
+        raise MetadataValidationError("invalid display name")
+    if description is not None and (len(description) > 2048 or "\x00" in description):
+        raise MetadataValidationError("invalid description")
+    try:
+        for value in (tool_identity, tool_name, display_name, description, protocol_revision):
+            if value is not None:
+                value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise MetadataValidationError("capability metadata is not valid UTF-8") from exc
+    scalar_metadata = "\n".join(
+        value
+        for value in (tool_identity, tool_name, display_name, description, protocol_revision)
+        if value is not None
+    )
+    if contains_obvious_secret(scalar_metadata):
+        raise MetadataValidationError("capability metadata contains credential-shaped content")
+
+
 def validate_schema_payload(
     input_schema: dict[str, object], output_schema: dict[str, object] | None
 ) -> None:
@@ -62,9 +99,7 @@ def validate_schema_payload(
         raise MetadataValidationError("schema is not bounded JSON") from exc
     if len(encoded) > 131_072:
         raise MetadataValidationError("schema exceeds serialized size limit")
-    if contains_obvious_secret(serialized) or any(
-        _contains_obvious_secret_in_json(root) for root in roots
-    ):
+    if contains_obvious_secret(serialized) or any(contains_sensitive_json(root) for root in roots):
         raise MetadataValidationError("schema contains credential-shaped content")
 
 
