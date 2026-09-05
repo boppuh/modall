@@ -782,7 +782,7 @@ def test_refresh_lease_reclaim_invalidates_the_previous_worker() -> None:
                     )
                     == new_lease
                 )
-                assert job.lease_expires_at == original_expiry + timedelta(minutes=1)
+                assert job.lease_expires_at == original_expiry
                 assert (
                     await RefreshJobService(session).renew(
                         context=context,

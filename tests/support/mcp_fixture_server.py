@@ -51,10 +51,12 @@ SUPPORTED_PROFILES = {
     "credential-metadata",
     "generic-token-metadata",
     "camel-secret-metadata",
+    "private-key-metadata",
     "keyword-property-names",
     "credential-property-schema",
     "schema-annotation-secret",
     "malformed-sensitive-property",
+    "sensitive-property-ref",
     "unresolved-local-ref",
     "unresolved-local-anchor",
     "non-schema-local-ref",
@@ -113,6 +115,12 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         schema["_meta"] = {"properties": {"api_key": "abcdefgh12345678"}}
     if profile == "malformed-sensitive-property":
         schema = {"properties": {"api_key": "abcdefgh12345678"}}
+    if profile == "sensitive-property-ref":
+        schema = {
+            "type": "object",
+            "properties": {"password": {"$ref": "#/$defs/pass"}},
+            "$defs": {"pass": {"type": "string", "default": "abcdefgh12345678"}},
+        }
     if profile == "unresolved-local-ref":
         schema = {"$ref": "#/$defs/missing"}
     if profile == "unresolved-local-anchor":
@@ -144,6 +152,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         first_tool["_meta"] = {"token": "abcdefgh12345678"}
     if profile == "camel-secret-metadata":
         first_tool["_meta"] = {"clientSecret": "abcdefgh12345678"}
+    if profile == "private-key-metadata":
+        first_tool["_meta"] = {"privateKey": "abcdefgh12345678"}
     if profile == "credential-numeric-leak":
         first_tool["_meta"] = {"value": 12345678}
     if profile == "credential-key-leak":

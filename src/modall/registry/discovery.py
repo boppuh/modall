@@ -185,7 +185,7 @@ class RefreshJobService:
             control_epoch=lease.control_epoch,
             generation=lease.generation,
         )
-        job.lease_expires_at = max(expires_at, renewed_at) + lease_duration
+        job.lease_expires_at = max(expires_at, renewed_at + lease_duration)
         await self._session.flush()
         return lease
 

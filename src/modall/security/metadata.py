@@ -2,6 +2,7 @@
 
 import json
 import re
+from urllib.parse import unquote
 
 
 class MetadataValidationError(ValueError):
@@ -12,12 +13,14 @@ _OBVIOUS_SECRET = re.compile(
     r"(?:sk_live_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{16,}|"
     r"gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|"
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
-    r"(?:api[_-]?key|access[_-]?token|secret|password)[=:/_-][A-Za-z0-9._~+/=\-]{8,})",
+    r"(?:api[_-]?key|(?:access[_-]?)?token|credential|private[_-]?key|secret|password)"
+    r"[=:/_-]\s*[A-Za-z0-9._~+/=\-]{8,})",
     re.IGNORECASE,
 )
 _SENSITIVE_JSON_FIELD = re.compile(
     r"(?:^|[_-])(?:api[_-]?key|(?:access|refresh|session|auth|bearer)?[_-]?token|"
-    r"authorization|authentication|credentials?|secret|password)(?:$|[_-])",
+    r"authorization|authentication|credentials?|private[_-]?key|secret|password)"
+    r"(?:$|[_-])",
     re.IGNORECASE,
 )
 
@@ -41,6 +44,7 @@ def contains_sensitive_schema(value: object) -> bool:
     """Screen schema metadata without treating property names as stored values."""
 
     stack = [(value, False)]
+    visited: set[tuple[int, bool]] = set()
     literal_keys = {"const", "default", "enum", "example", "examples"}
     schema_map_keys = {"$defs", "definitions", "dependentSchemas", "patternProperties"}
     schema_keys = {
@@ -59,8 +63,22 @@ def contains_sensitive_schema(value: object) -> bool:
     schema_array_keys = {"allOf", "anyOf", "oneOf", "prefixItems"}
     while stack:
         current, sensitive_property = stack.pop()
+        visit = (id(current), sensitive_property)
+        if visit in visited:
+            continue
+        visited.add(visit)
         if isinstance(current, dict):
             for key, child in current.items():
+                if (
+                    sensitive_property
+                    and key in {"$ref", "$dynamicRef"}
+                    and isinstance(child, str)
+                    and child.startswith("#")
+                ):
+                    target = _resolve_local_schema_reference(value, child)
+                    if target is not None:
+                        stack.append((target, True))
+                    continue
                 if key == "properties" and isinstance(child, dict):
                     for property_name, property_schema in child.items():
                         stack.append(
@@ -100,6 +118,33 @@ def contains_sensitive_schema(value: object) -> bool:
         ):
             return True
     return False
+
+
+def _resolve_local_schema_reference(root: object, reference: str) -> object | None:
+    fragment = unquote(reference[1:])
+    if not fragment:
+        return root
+    if fragment.startswith("/"):
+        current = root
+        for encoded_part in fragment[1:].split("/"):
+            part = encoded_part.replace("~1", "/").replace("~0", "~")
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
+                current = current[int(part)]
+            else:
+                return None
+        return current
+    candidates = [root]
+    while candidates:
+        current = candidates.pop()
+        if isinstance(current, dict):
+            if current.get("$anchor") == fragment or current.get("$dynamicAnchor") == fragment:
+                return current
+            candidates.extend(current.values())
+        elif isinstance(current, list):
+            candidates.extend(current)
+    return None
 
 
 def validate_capability_scalars(

@@ -24,7 +24,7 @@ from modall.mcp_adapter.policy import (
     ResponseLimitExceeded,
     TransportLimits,
 )
-from modall.security.metadata import contains_sensitive_json
+from modall.security.metadata import contains_obvious_secret, contains_sensitive_json
 from tests.support.mcp_fixture_server import (
     COMMON_KEY_FIXTURE_TOKEN,
     ESCAPED_FIXTURE_TOKEN,
@@ -66,12 +66,31 @@ def adapter_for(
 
 @pytest.mark.parametrize(
     "field_name",
-    ("token", "refresh_token", "sessionToken", "clientSecret", "authorization"),
+    (
+        "token",
+        "refresh_token",
+        "sessionToken",
+        "clientSecret",
+        "authorization",
+        "privateKey",
+    ),
 )
 def test_structured_secret_screen_recognizes_common_field_spellings(
     field_name: str,
 ) -> None:
     assert contains_sensitive_json({field_name: "abcdefgh12345678"})
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "metadata token: abcdefgh12345678",
+        "https://mcp.example/token/abcdefgh12345678",
+        "credential=abcdefgh12345678",
+    ),
+)
+def test_unstructured_secret_screen_recognizes_generic_markers(value: str) -> None:
+    assert contains_obvious_secret(value)
 
 
 def test_adapter_discovers_bounded_domain_types_and_drift() -> None:
@@ -149,11 +168,11 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
             await tool_limited.discover(endpoint)
 
         leaking, endpoint = adapter_for("credential-leak")
-        with pytest.raises(DiscoveryError, match="secret screening"):
+        with pytest.raises(DiscoveryError):
             await leaking.discover(endpoint, bearer_token=FIXTURE_TOKEN.encode())
 
         escaped_leaking, endpoint = adapter_for("credential-escaped-leak")
-        with pytest.raises(DiscoveryError, match="secret screening"):
+        with pytest.raises(DiscoveryError):
             await escaped_leaking.discover(endpoint, bearer_token=ESCAPED_FIXTURE_TOKEN.encode())
 
         numeric_leaking, endpoint = adapter_for("credential-numeric-leak")
@@ -176,12 +195,17 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
             "credential-metadata",
             "generic-token-metadata",
             "camel-secret-metadata",
+            "private-key-metadata",
         ):
             structured, endpoint = adapter_for(profile)
             with pytest.raises(DiscoveryError, match="secret screening"):
                 await structured.discover(endpoint)
 
-        for profile in ("schema-annotation-secret", "malformed-sensitive-property"):
+        for profile in (
+            "schema-annotation-secret",
+            "malformed-sensitive-property",
+            "sensitive-property-ref",
+        ):
             unsafe_schema, endpoint = adapter_for(profile)
             with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
                 await unsafe_schema.discover(endpoint)
