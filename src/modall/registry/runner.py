@@ -14,6 +14,7 @@ from modall.mcp_adapter.client import (
     DiscoveryError,
     McpClientAdapter,
     ProtocolMismatch,
+    SensitiveResponseError,
 )
 from modall.mcp_adapter.policy import (
     EndpointPolicyError,
@@ -140,6 +141,8 @@ def classify_discovery_failure(error: BaseException) -> DiscoveryFailureCode:
         return DiscoveryFailureCode.PROTOCOL_MISMATCH
     if any(isinstance(item, CredentialError) for item in errors):
         return DiscoveryFailureCode.AUTHENTICATION_FAILED
+    if any(isinstance(item, SensitiveResponseError) for item in errors):
+        return DiscoveryFailureCode.INVALID_METADATA
     if any(isinstance(item, EndpointResolutionError) for item in errors):
         return DiscoveryFailureCode.TRANSPORT_FAILED
     if any(isinstance(item, EndpointPolicyError) for item in errors):

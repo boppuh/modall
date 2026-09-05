@@ -223,7 +223,9 @@ class LimitedByteStream(httpx.AsyncByteStream):
             self._budget.consume(len(chunk))
             window = self._tail + chunk
             decoded_window = _decode_visible_json_escapes(window)
-            if any(value in decoded_window for value in self._forbidden_values):
+            if any(
+                value in decoded_window for value in self._forbidden_values
+            ) or contains_obvious_secret(decoded_window.decode("utf-8", errors="ignore")):
                 self._mark_sensitive_response()
                 raise EndpointPolicyError("sensitive upstream response body")
             self._tail = window[-self._tail_limit :]
@@ -311,12 +313,14 @@ class LimitedTransport(httpx.AsyncBaseTransport):
             for header_name, header_value in response.headers.multi_items()
             for forbidden in self._forbidden_response_values
         ):
+            self._mark_sensitive_response()
             await response.aclose()
             raise EndpointPolicyError("sensitive upstream response header")
         reason_phrase = response.reason_phrase
         if contains_obvious_secret(reason_phrase) or any(
             forbidden in reason_phrase for forbidden in self._forbidden_response_values
         ):
+            self._mark_sensitive_response()
             await response.aclose()
             raise EndpointPolicyError("sensitive upstream response status")
         declared = response.headers.get("content-length")

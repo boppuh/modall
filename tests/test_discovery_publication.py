@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID
 
@@ -17,6 +17,7 @@ from modall.mcp_adapter.client import (
     DiscoveryResult,
     McpClientAdapter,
     ProtocolMismatch,
+    SensitiveResponseError,
     ToolDefinition,
 )
 from modall.mcp_adapter.policy import (
@@ -34,7 +35,6 @@ from modall.persistence.models import (
     DiscoverySnapshot,
     SecretBinding,
     ServerConnection,
-    utc_now,
 )
 from modall.registry.discovery import (
     DiscoveryPublicationService,
@@ -748,13 +748,11 @@ def test_refresh_lease_reclaim_invalidates_the_previous_worker() -> None:
                 job = await RefreshJobService(session).enqueue(
                     context=context, connection_id=connection.id
                 )
-                claimed_at = utc_now()
                 old_lease = await RefreshJobService(session).claim(
                     context=context,
                     job_id=job.id,
                     worker_id="old-worker",
                     lease_duration=timedelta(seconds=1),
-                    now=claimed_at,
                 )
                 with pytest.raises(InvalidConnectionTransition):
                     await RefreshJobService(session).claim(
@@ -762,14 +760,14 @@ def test_refresh_lease_reclaim_invalidates_the_previous_worker() -> None:
                         job_id=job.id,
                         worker_id="too-early",
                         lease_duration=timedelta(seconds=1),
-                        now=claimed_at,
                     )
+                job.lease_expires_at = datetime(2000, 1, 1, tzinfo=UTC)
+                await session.flush()
                 new_lease = await RefreshJobService(session).claim(
                     context=context,
                     job_id=job.id,
                     worker_id="new-worker",
                     lease_duration=timedelta(minutes=5),
-                    now=claimed_at + timedelta(seconds=2),
                 )
                 assert new_lease.lease_epoch == old_lease.lease_epoch + 1
                 original_expiry = job.lease_expires_at
@@ -779,7 +777,6 @@ def test_refresh_lease_reclaim_invalidates_the_previous_worker() -> None:
                         context=context,
                         lease=new_lease,
                         lease_duration=timedelta(minutes=1),
-                        now=claimed_at + timedelta(seconds=3),
                     )
                     == new_lease
                 )
@@ -789,7 +786,6 @@ def test_refresh_lease_reclaim_invalidates_the_previous_worker() -> None:
                         context=context,
                         lease=new_lease,
                         lease_duration=timedelta(minutes=10),
-                        now=claimed_at + timedelta(seconds=4),
                     )
                     == new_lease
                 )
@@ -798,7 +794,6 @@ def test_refresh_lease_reclaim_invalidates_the_previous_worker() -> None:
                         context=context,
                         lease=old_lease,
                         lease_duration=timedelta(minutes=1),
-                        now=claimed_at + timedelta(seconds=4),
                     )
                 with pytest.raises(InvalidConnectionTransition):
                     await DiscoveryPublicationService(session).publish_success(
@@ -1033,6 +1028,7 @@ def test_discovery_runner_revalidates_after_secret_retrieval_before_contact(
         (TimeoutError(), DiscoveryFailureCode.TIMEOUT),
         (SecretProviderError("safe"), DiscoveryFailureCode.AUTHENTICATION_FAILED),
         (DiscoveryError("safe"), DiscoveryFailureCode.INVALID_METADATA),
+        (SensitiveResponseError("safe"), DiscoveryFailureCode.INVALID_METADATA),
         (
             httpx.ConnectError("safe", request=httpx.Request("GET", "https://mcp.example")),
             DiscoveryFailureCode.TRANSPORT_FAILED,

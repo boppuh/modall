@@ -40,13 +40,13 @@ def contains_obvious_secret(value: str) -> bool:
     return _OBVIOUS_SECRET.search(value) is not None
 
 
-def _looks_like_opaque_annotation(value: str) -> bool:
-    if len(value) < 16 or _OPAQUE_ANNOTATION_VALUE.fullmatch(value) is None:
+def _looks_like_opaque_value(value: str) -> bool:
+    if len(value) < 12 or _OPAQUE_ANNOTATION_VALUE.fullmatch(value) is None:
         return False
     counts = Counter(value)
     length = len(value)
     entropy_bits = sum(count * math.log2(length / count) for count in counts.values())
-    return entropy_bits >= 64
+    return entropy_bits >= length * 3.5
 
 
 def contains_sensitive_json(value: object) -> bool:
@@ -129,7 +129,7 @@ def contains_sensitive_schema(value: object) -> bool:
                     sensitive_property
                     and key in annotation_keys
                     and isinstance(child, str)
-                    and (_looks_like_opaque_annotation(child) or contains_obvious_secret(child))
+                    and (_looks_like_opaque_value(child) or contains_obvious_secret(child))
                 ):
                     return True
                 if key not in literal_keys and contains_sensitive_json({key: child}):
@@ -137,7 +137,9 @@ def contains_sensitive_schema(value: object) -> bool:
                 if key in literal_keys and contains_sensitive_json(child):
                     return True
         elif isinstance(current, str):
-            if (sensitive_property and len(current) >= 8) or contains_obvious_secret(current):
+            if (
+                sensitive_property and _looks_like_opaque_value(current)
+            ) or contains_obvious_secret(current):
                 return True
         elif (
             sensitive_property
@@ -299,16 +301,16 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
         current, sensitive_context = stack.pop()
         if isinstance(current, dict):
             for key, child in current.items():
-                if sensitive_context and len(key) >= 8:
+                if sensitive_context and _looks_like_opaque_value(key):
                     return True
                 key_is_sensitive = _is_sensitive_field(key)
-                if key_is_sensitive and isinstance(child, str) and len(child) >= 8:
+                if key_is_sensitive and isinstance(child, str) and _looks_like_opaque_value(child):
                     return True
                 if sensitive_context and key in {"const", "default", "enum", "example", "examples"}:
                     literals = [child]
                     while literals:
                         literal = literals.pop()
-                        if isinstance(literal, str) and len(literal) >= 8:
+                        if isinstance(literal, str) and _looks_like_opaque_value(literal):
                             return True
                         if isinstance(literal, list):
                             literals.extend(literal)
@@ -322,7 +324,10 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
             and len(str(current)) >= 8
         ) or (
             isinstance(current, str)
-            and ((sensitive_context and len(current) >= 8) or contains_obvious_secret(current))
+            and (
+                (sensitive_context and _looks_like_opaque_value(current))
+                or contains_obvious_secret(current)
+            )
         ):
             return True
     return False

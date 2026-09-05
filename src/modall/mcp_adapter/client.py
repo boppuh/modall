@@ -87,6 +87,10 @@ class CredentialError(DiscoveryError):
     """A bound credential cannot be used safely for discovery."""
 
 
+class SensitiveResponseError(DiscoveryError):
+    """An upstream response contained credential-shaped material."""
+
+
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
     identity: str
@@ -186,7 +190,7 @@ class McpClientAdapter:
             raise
         except Exception as exc:
             if transport is not None and transport.sensitive_response_detected:
-                raise DiscoveryError("secret screening rejected metadata") from exc
+                raise SensitiveResponseError("secret screening rejected metadata") from exc
             mismatch = _find_exception(exc, ProtocolMismatch)
             if mismatch is not None:
                 raise mismatch from exc

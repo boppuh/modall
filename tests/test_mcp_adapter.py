@@ -92,6 +92,19 @@ def test_structured_secret_screen_inspects_keys_beneath_sensitive_fields() -> No
 @pytest.mark.parametrize(
     "value",
     (
+        {"authentication": "optional"},
+        {"authentication": {"required": False}},
+    ),
+)
+def test_structured_secret_screen_allows_authentication_status_metadata(
+    value: dict[str, object],
+) -> None:
+    assert contains_sensitive_json(value) is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
         "metadata token: abcdefgh12345678",
         "https://mcp.example/token/abcdefgh12345678",
         "credential=abcdefgh12345678",
@@ -228,7 +241,7 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
         session_leaking, endpoint = adapter_for(
             "credential-session-id-leak", limits=fast_failure_limits
         )
-        with pytest.raises(DiscoveryError, match="MCP discovery failed"):
+        with pytest.raises(DiscoveryError, match="secret screening rejected metadata"):
             await session_leaking.discover(endpoint, bearer_token=FIXTURE_TOKEN.encode())
 
         raw_leaking, endpoint = adapter_for("credential-raw-extension", limits=fast_failure_limits)
@@ -240,6 +253,10 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
         )
         with pytest.raises(DiscoveryError, match="secret screening rejected metadata"):
             await unicode_leaking.discover(endpoint, bearer_token=FIXTURE_TOKEN.encode())
+
+        raw_obvious, endpoint = adapter_for("raw-obvious-extension", limits=fast_failure_limits)
+        with pytest.raises(DiscoveryError, match="secret screening rejected metadata"):
+            await raw_obvious.discover(endpoint)
 
         for profile in (
             "structured-secret",
