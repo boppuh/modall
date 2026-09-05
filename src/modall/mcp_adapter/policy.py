@@ -265,6 +265,10 @@ class LimitedByteStream(httpx.AsyncByteStream):
                 self._reject_sensitive_body()
             if body:
                 yield body
+        elif self._structured_buffer and _contains_sensitive_sse_event(
+            bytes(self._structured_buffer)
+        ):
+            self._reject_sensitive_body()
 
     def _screen_completed_sse_events(self) -> None:
         while match := _SSE_EVENT_BOUNDARY_BYTES.search(

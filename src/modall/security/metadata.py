@@ -4,7 +4,9 @@ import json
 import math
 import re
 from collections import Counter
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
+
+from modall.security.endpoints import normalize_endpoint_host
 
 
 class MetadataValidationError(ValueError):
@@ -50,6 +52,7 @@ _SENSITIVE_PATH_MARKER = re.compile(
     r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,})(?=$|[!$&'()*,;:@])",
     re.IGNORECASE,
 )
+_URL_CANDIDATE = re.compile(r"https?://[^\s<>\[\]{}\"']+", re.IGNORECASE)
 _AUTH_MODE_WORDS = {
     "anonymous",
     "api",
@@ -130,7 +133,9 @@ def _is_auth_mode(value: str) -> bool:
 
 
 def _looks_like_marker_suffix(value: str) -> bool:
-    return _looks_like_opaque_value(value)
+    return _looks_like_secret_candidate(value) or _looks_like_secret_candidate(
+        value.replace(".", "").replace("/", "")
+    )
 
 
 def contains_sensitive_hostname(hostname: str) -> bool:
@@ -138,13 +143,13 @@ def contains_sensitive_hostname(hostname: str) -> bool:
 
     labels = hostname.rstrip(".").split(".")
     adjacent_value = any(
-        _is_sensitive_field(label) and _looks_like_opaque_value(labels[index + 1])
+        _is_sensitive_field(label) and _looks_like_marker_suffix(labels[index + 1])
         for index, label in enumerate(labels[:-1])
     )
     cross_label_value = any(
         _is_sensitive_field(label)
         and any(
-            _looks_like_opaque_value(".".join(labels[index + 1 : end]))
+            _looks_like_marker_suffix(".".join(labels[index + 1 : end]))
             for end in range(index + 2, len(labels) + 1)
         )
         for index, label in enumerate(labels[:-1])
@@ -165,11 +170,26 @@ def contains_sensitive_url_path(path: str) -> bool:
         and _looks_like_marker_suffix(match.group("value"))
         for segment in path.split("/")
     )
-    cross_segment_match = _SENSITIVE_PATH_MARKER.search(path)
-    return segment_match or (
-        cross_segment_match is not None
-        and _looks_like_marker_suffix(cross_segment_match.group("value"))
+    return segment_match or any(
+        _looks_like_marker_suffix(match.group("value"))
+        for match in _SENSITIVE_PATH_MARKER.finditer(path)
     )
+
+
+def contains_sensitive_url(value: str) -> bool:
+    """Detect credential-shaped host or path content in embedded HTTP URLs."""
+
+    for match in _URL_CANDIDATE.finditer(value):
+        candidate = match.group().rstrip(".,;:!?)]")
+        try:
+            parsed = urlsplit(candidate)
+            host = normalize_endpoint_host(parsed.hostname).value
+            decoded_path = decode_safe_url_path(parsed.path)
+        except ValueError:
+            continue
+        if contains_sensitive_hostname(host) or contains_sensitive_url_path(decoded_path):
+            return True
+    return False
 
 
 def decode_safe_url_path(path: str) -> str:

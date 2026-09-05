@@ -14,6 +14,7 @@ from modall.mcp_adapter.client import (
     DiscoveryError,
     McpClientAdapter,
     ProtocolMismatch,
+    _contains_sensitive_tool,
     _schema_is_supported,
     _suppress_untrusted_sdk_logs,
 )
@@ -32,6 +33,7 @@ from modall.mcp_adapter.policy import (
 from modall.security.metadata import (
     contains_obvious_secret,
     contains_sensitive_json,
+    contains_sensitive_url,
     validate_capability_scalars,
 )
 from tests.support.mcp_fixture_server import (
@@ -422,6 +424,23 @@ def test_raw_structured_screen_handles_sse_and_invalid_utf8() -> None:
     )
 
 
+def test_url_secret_screen_handles_embedded_and_multiple_markers() -> None:
+    assert contains_sensitive_url(
+        "See https://cdn.example/token-AbCdEfGhIjKlMnOpQrStUvWx for details"
+    )
+    assert contains_sensitive_url("https://cdn.example/token-12345678901234567890")
+    assert contains_sensitive_url(
+        "https://cdn.example/token-aaaaaaaaaaaa;token-AbCdEfGhIjKlMnOpQrStUvWx"
+    )
+    assert _contains_sensitive_tool(
+        {
+            "name": "safe-tool",
+            "description": "See https://cdn.example/token-AbCdEfGhIjKlMnOpQrStUvWx",
+            "inputSchema": {"type": "object"},
+        }
+    )
+
+
 def test_endpoint_policy_rejects_unsafe_resolution_and_scheme_combinations() -> None:
     ResolverFactory = Callable[[str, int], Awaitable[set[str]]]
 
@@ -731,6 +750,22 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
 
         async with httpx.AsyncClient(
             transport=LimitedTransport(httpx.MockTransport(sensitive_sse), 100)
+        ) as client:
+            with pytest.raises(EndpointPolicyError, match="sensitive upstream response body"):
+                await client.get("https://example.test")
+
+        async def sensitive_sse_tail(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                stream=OneByteStream(
+                    b'data: {"status":"ready"}\n\n: {"token":"AbCdEfGhIjKlMnOpQrStUvWx"}'
+                ),
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(sensitive_sse_tail), 100)
         ) as client:
             with pytest.raises(EndpointPolicyError, match="sensitive upstream response body"):
                 await client.get("https://example.test")

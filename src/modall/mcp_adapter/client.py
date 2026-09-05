@@ -35,6 +35,7 @@ from modall.security.metadata import (
     contains_obvious_secret,
     contains_sensitive_json,
     contains_sensitive_schema,
+    contains_sensitive_url,
     validate_bounded_json,
     validate_capability_scalars,
     validate_schema_payload,
@@ -536,11 +537,27 @@ def _contains_sensitive_tool(tool: dict[str, object]) -> bool:
     }
     if contains_sensitive_json(ordinary_metadata):
         return True
+    if _contains_sensitive_embedded_url(tool):
+        return True
     return any(
         contains_sensitive_schema(tool[key])
         for key in ("inputSchema", "outputSchema")
         if key in tool
     )
+
+
+def _contains_sensitive_embedded_url(value: object) -> bool:
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            stack.extend(current.keys())
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+        elif isinstance(current, str) and contains_sensitive_url(current):
+            return True
+    return False
 
 
 def _find_exception[T: BaseException](error: BaseException, kind: type[T]) -> T | None:
