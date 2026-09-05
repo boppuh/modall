@@ -1,12 +1,15 @@
 import asyncio
 import hashlib
 import json
+import logging
+import socket
 from datetime import timedelta
 from importlib.metadata import version
 from pathlib import Path
 
 import httpx
 import pytest
+import uvicorn
 from mcp import ClientSession, McpError, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
@@ -111,6 +114,9 @@ def test_reference_server_initialization_pagination_drift_and_results() -> None:
                 "echo",
                 "status",
                 "unsupported-content",
+                "unsupported-audio",
+                "unsupported-resource",
+                "invalid-output",
                 "fail",
             ]
             schema_v2_headers = await _handshake(client, "schema-drift")
@@ -159,16 +165,34 @@ def test_reference_server_initialization_pagination_drift_and_results() -> None:
                 json=_request(8, "tools/call", {"name": "unsupported-content", "arguments": {}}),
             )
             assert unsupported.json()["result"]["content"][0]["type"] == "image"
+            audio = await client.post(
+                "/mcp/default",
+                headers=default_headers,
+                json=_request(9, "tools/call", {"name": "unsupported-audio", "arguments": {}}),
+            )
+            assert audio.json()["result"]["content"][0]["type"] == "audio"
+            resource = await client.post(
+                "/mcp/default",
+                headers=default_headers,
+                json=_request(10, "tools/call", {"name": "unsupported-resource", "arguments": {}}),
+            )
+            assert resource.json()["result"]["content"][0]["type"] == "resource"
+            invalid_output = await client.post(
+                "/mcp/default",
+                headers=default_headers,
+                json=_request(11, "tools/call", {"name": "invalid-output", "arguments": {}}),
+            )
+            assert invalid_output.json()["result"]["structuredContent"] == {"message": 42}
             failed = await client.post(
                 "/mcp/default",
                 headers=default_headers,
-                json=_request(9, "tools/call", {"name": "fail", "arguments": {}}),
+                json=_request(12, "tools/call", {"name": "fail", "arguments": {}}),
             )
             assert failed.json()["result"]["isError"] is True
             missing = await client.post(
                 "/mcp/default",
                 headers=default_headers,
-                json=_request(10, "tools/call", {"name": "missing", "arguments": {}}),
+                json=_request(13, "tools/call", {"name": "missing", "arguments": {}}),
             )
             assert missing.json()["error"]["code"] == -32602
 
@@ -228,6 +252,7 @@ def test_reference_server_auth_protocol_and_transport_fault_profiles() -> None:
             assert malformed.content == b'{"jsonrpc":'
             oversized = await client.post("/mcp/oversized", headers=oversized_headers, json=request)
             assert len(oversized.content) > 262_144
+            assert "content-length" not in oversized.headers
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(0.01):
                     await client.post("/mcp/timeout", headers=timeout_headers, json=request)
@@ -333,7 +358,13 @@ def test_pinned_sdk_negotiates_and_parses_reference_server() -> None:
             tools = await session.list_tools()
             assert [tool.name for tool in tools.tools] == ["echo", "status"]
             remaining = await session.list_tools(cursor=tools.nextCursor)
-            assert [tool.name for tool in remaining.tools] == ["unsupported-content", "fail"]
+            assert [tool.name for tool in remaining.tools] == [
+                "unsupported-content",
+                "unsupported-audio",
+                "unsupported-resource",
+                "invalid-output",
+                "fail",
+            ]
             echo = await session.call_tool("echo", {"message": "hello"})
             assert echo.structuredContent == {"message": "hello"}
             assert isinstance(echo.content[0], types.TextContent)
@@ -344,6 +375,12 @@ def test_pinned_sdk_negotiates_and_parses_reference_server() -> None:
             assert status.isError is False
             unsupported = await session.call_tool("unsupported-content", {})
             assert isinstance(unsupported.content[0], types.ImageContent)
+            audio = await session.call_tool("unsupported-audio", {})
+            assert isinstance(audio.content[0], types.AudioContent)
+            resource = await session.call_tool("unsupported-resource", {})
+            assert isinstance(resource.content[0], types.EmbeddedResource)
+            with pytest.raises(RuntimeError, match="Invalid structured content"):
+                await session.call_tool("invalid-output", {})
             failed = await session.call_tool("fail", {})
             assert failed.isError is True
             with pytest.raises(McpError) as unknown:
@@ -416,12 +453,6 @@ def test_pinned_sdk_surfaces_response_and_transport_faults() -> None:
             isinstance(error, McpError) and "Timed out" in str(error) for error in timeout_leaves
         )
 
-        with pytest.raises(ExceptionGroup) as disconnect_error:
-            await exercise("disconnect")
-        assert any(
-            isinstance(error, ConnectionError) for error in _leaf_exceptions(disconnect_error.value)
-        )
-
         with pytest.raises(ExceptionGroup) as malformed_error:
             await exercise("malformed")
         assert any(
@@ -433,6 +464,60 @@ def test_pinned_sdk_surfaces_response_and_transport_faults() -> None:
         padding = (oversized.model_extra or {}).get("padding")
         assert isinstance(padding, str)
         assert len(padding) > 262_144
+
+    asyncio.run(scenario())
+
+
+def test_pinned_sdk_surfaces_loopback_disconnect_as_client_transport_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger="mcp.client.streamable_http")
+
+    async def exercise() -> None:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        server = uvicorn.Server(
+            uvicorn.Config(create_mcp_fixture_app(), lifespan="off", log_level="critical")
+        )
+        server_task = asyncio.create_task(server.serve(sockets=[listener]))
+        try:
+            async with asyncio.timeout(1):
+                while not server.started:
+                    await asyncio.sleep(0.001)
+                http_client = httpx.AsyncClient()
+                async with (
+                    http_client,
+                    streamable_http_client(
+                        f"http://127.0.0.1:{port}/mcp/disconnect", http_client=http_client
+                    ) as (read_stream, write_stream, _),
+                    ClientSession(
+                        read_stream,
+                        write_stream,
+                        read_timeout_seconds=timedelta(milliseconds=100),
+                    ) as session,
+                ):
+                    await _sdk_initialize(session)
+                    await session.list_tools()
+        finally:
+            server.should_exit = True
+            await server_task
+            listener.close()
+
+    async def scenario() -> None:
+        with pytest.raises(ExceptionGroup) as disconnect_error:
+            await exercise()
+        assert any(
+            isinstance(error, McpError) and "Timed out" in str(error)
+            for error in _leaf_exceptions(disconnect_error.value)
+        )
+        assert any(
+            record.exc_info is not None
+            and isinstance(record.exc_info[1], httpx.RemoteProtocolError)
+            for record in caplog.records
+        )
 
     asyncio.run(scenario())
 
@@ -456,11 +541,19 @@ def test_pinned_sdk_does_not_follow_redirects_with_or_without_credentials() -> N
             ClientSession(read_stream, write_stream) as session,
         ):
             await _sdk_initialize(session)
+            if "on-call" in profile:
+                await session.call_tool("echo", {"message": "redirect probe"})
+            else:
+                await session.list_tools()
 
     async def scenario() -> None:
         for profile, authenticated in (
             ("redirect", False),
             ("authenticated-redirect", True),
+            ("redirect-after-init", False),
+            ("authenticated-redirect-after-init", True),
+            ("redirect-on-call", False),
+            ("authenticated-redirect-on-call", True),
         ):
             with pytest.raises(ExceptionGroup) as redirect_error:
                 await exercise(profile, authenticated=authenticated)

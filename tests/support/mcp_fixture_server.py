@@ -1,6 +1,7 @@
 """Deterministic legacy MCP Streamable HTTP fixture server."""
 
 import asyncio
+import json
 from itertools import count
 from typing import Any
 
@@ -47,6 +48,26 @@ def _tools(profile: str) -> list[dict[str, Any]]:
             "inputSchema": {"type": "object"},
         },
         {
+            "name": "unsupported-audio",
+            "description": "Return an unsupported audio block",
+            "inputSchema": {"type": "object"},
+        },
+        {
+            "name": "unsupported-resource",
+            "description": "Return an unsupported embedded resource",
+            "inputSchema": {"type": "object"},
+        },
+        {
+            "name": "invalid-output",
+            "description": "Return structured content that violates its output schema",
+            "inputSchema": {"type": "object"},
+            "outputSchema": {
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            },
+        },
+        {
             "name": "fail",
             "description": "Return a declared tool execution error",
             "inputSchema": {"type": "object"},
@@ -69,8 +90,15 @@ def create_mcp_fixture_app() -> FastAPI:
         mcp_protocol_version: str | None = Header(default=None),
         mcp_session_id: str | None = Header(default=None),
     ) -> Response:
-        if profile in {"authenticated", "authenticated-redirect"} and authorization != (
-            f"Bearer {FIXTURE_TOKEN}"
+        if (
+            profile
+            in {
+                "authenticated",
+                "authenticated-redirect",
+                "authenticated-redirect-after-init",
+                "authenticated-redirect-on-call",
+            }
+            and authorization != f"Bearer {FIXTURE_TOKEN}"
         ):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         accepted_types = {item.strip() for item in (accept or "").split(",")}
@@ -114,18 +142,32 @@ def create_mcp_fixture_app() -> FastAPI:
             return Response(status_code=202)
         if not session[2]:
             return JSONResponse({"error": "session is not initialized"}, status_code=409)
+        if profile in {"redirect-after-init", "authenticated-redirect-after-init"} and (
+            method == "tools/list"
+        ):
+            return RedirectResponse("https://redirect.invalid/mcp", status_code=307)
+        if profile in {"redirect-on-call", "authenticated-redirect-on-call"} and (
+            method == "tools/call"
+        ):
+            return RedirectResponse("https://redirect.invalid/mcp", status_code=307)
         if profile == "timeout":
             await asyncio.sleep(0.05)
         if profile == "malformed":
             return Response(b'{"jsonrpc":', media_type="application/json")
         if profile == "oversized":
-            return JSONResponse(
+            body = json.dumps(
                 {
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "result": {"tools": [], "padding": "x" * 262_145},
                 }
-            )
+            ).encode()
+
+            async def oversized_body() -> Any:
+                for offset in range(0, len(body), 16_384):
+                    yield body[offset : offset + 16_384]
+
+            return StreamingResponse(oversized_body(), media_type="application/json")
         if profile == "disconnect":
 
             async def abort_body() -> Any:
@@ -175,6 +217,31 @@ def create_mcp_fixture_app() -> FastAPI:
             elif name == "unsupported-content":
                 result = {
                     "content": [{"type": "image", "data": "AA==", "mimeType": "image/png"}],
+                    "isError": False,
+                }
+            elif name == "unsupported-audio":
+                result = {
+                    "content": [{"type": "audio", "data": "AA==", "mimeType": "audio/wav"}],
+                    "isError": False,
+                }
+            elif name == "unsupported-resource":
+                result = {
+                    "content": [
+                        {
+                            "type": "resource",
+                            "resource": {
+                                "uri": "fixture://embedded/status.txt",
+                                "mimeType": "text/plain",
+                                "text": "fixture resource",
+                            },
+                        }
+                    ],
+                    "isError": False,
+                }
+            elif name == "invalid-output":
+                result = {
+                    "content": [{"type": "text", "text": "invalid structured output"}],
+                    "structuredContent": {"message": 42},
                     "isError": False,
                 }
             elif name == "fail":
