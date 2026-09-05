@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: modall
       POSTGRES_PASSWORD: modall
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -26,8 +26,9 @@ services:
     environment:
       MODALL_DATABASE_URL: postgresql://modall:modall@postgres:5432/modall
       MODALL_ENVIRONMENT: local
+      MODALL_LOG_LEVEL: ${MODALL_LOG_LEVEL:-INFO}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,6 +53,8 @@ services:
     environment:
       MODALL_DATABASE_URL: postgresql://modall:modall@postgres:5432/modall
       MODALL_ENVIRONMENT: local
+      MODALL_LOG_LEVEL: ${MODALL_LOG_LEVEL:-INFO}
+      MODALL_WORKER_POLL_INTERVAL_SECONDS: ${MODALL_WORKER_POLL_INTERVAL_SECONDS:-1}
     depends_on:
       postgres:
         condition: service_healthy
@@ -64,7 +67,7 @@ services:
     environment:
       VITE_API_BASE_URL: http://localhost:8000
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     depends_on:
       api:
         condition: service_healthy

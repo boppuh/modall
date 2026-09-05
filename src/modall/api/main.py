@@ -43,7 +43,14 @@ app = create_app()
 def run() -> None:
     """Run the local API server."""
 
-    uvicorn.run("modall.api.main:app", host="0.0.0.0", port=8000, reload=False)
+    settings = get_settings()
+    uvicorn.run(
+        "modall.api.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+        log_level=settings.log_level.lower(),
+    )
 
 
 if __name__ == "__main__":

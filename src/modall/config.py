@@ -1,9 +1,9 @@
 """Process configuration shared by the API and worker."""
 
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import PostgresDsn
+from pydantic import Field, PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     environment: Literal["local", "test", "staging", "production"] = "local"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     database_url: PostgresDsn = PostgresDsn("postgresql://modall:modall@localhost:5432/modall")
-    worker_poll_interval_seconds: float = 1.0
+    worker_poll_interval_seconds: Annotated[float, Field(gt=0, le=60, allow_inf_nan=False)] = 1.0
 
 
 @lru_cache

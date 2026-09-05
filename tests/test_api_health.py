@@ -36,13 +36,14 @@ def test_production_disables_interactive_docs() -> None:
 
 
 def test_run_starts_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, str, int, bool]] = []
+    calls: list[tuple[str, str, int, bool, str]] = []
 
-    def fake_run(app: str, *, host: str, port: int, reload: bool) -> None:
-        calls.append((app, host, port, reload))
+    def fake_run(app: str, *, host: str, port: int, reload: bool, log_level: str) -> None:
+        calls.append((app, host, port, reload, log_level))
 
+    monkeypatch.setattr(main, "get_settings", lambda: Settings(log_level="DEBUG"))
     monkeypatch.setattr("modall.api.main.uvicorn.run", fake_run)
 
     main.run()
 
-    assert calls == [("modall.api.main:app", "0.0.0.0", 8000, False)]
+    assert calls == [("modall.api.main:app", "0.0.0.0", 8000, False, "debug")]
