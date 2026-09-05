@@ -264,7 +264,7 @@ An ADR may change a choice before implementation. Public and domain contracts mu
 
 ### 6.3 Retention
 
-- Successful and failed run arguments/results: 14 days by default.
+- Retained arguments and any retained result/error content for every terminal run state—including succeeded, failed, timed out, cancelled, and indeterminate—expire after 14 days by default.
 - Run status, timing, exact version lineage, and safe error code: 90 days.
 - Discovery snapshots and capability versions: retained while referenced by an enabled capability or retained run, then eligible for deletion.
 - Audit events: 180 days for the alpha.
@@ -296,7 +296,7 @@ Deletion is ordinary database/object deletion under managed encryption-at-rest g
 - Arguments must validate against the pinned input schema and configured byte/depth limits.
 - Confirmation repeats schema identity and the non-confidential-data restriction.
 - Obvious-secret screening runs before durable argument storage and enqueue.
-- Text and structured JSON results have fixed byte/depth limits and obvious-secret screening before publication.
+- Text and structured JSON results have fixed byte/depth limits and obvious-secret screening before publication. When the pinned capability version declares an output schema, structured JSON must also validate against that exact schema; mismatch fails with `invalid_upstream_output` and publishes no result payload.
 - Scanner failure or a detected secret produces a safe quarantined failure with no result payload in APIs.
 - Unsupported content blocks, embedded resources, and binary bytes are discarded and reported with `unsupported_result_content`.
 
@@ -325,7 +325,7 @@ Fixture coverage includes:
 4. Initialize a short-lived MCP session through the constrained worker network.
 5. Read all tool pages within the configured bounds.
 6. Normalize and validate the complete snapshot.
-7. In one transaction, require the connection version is still current, append the snapshot and changed capability versions, and update connection health.
+7. In one transaction, lock the connection and require both that its version is still current and that its lifecycle remains valid for this operation (`verifying` for initial verification or `active|degraded` for refresh), explicitly rejecting `disabled`. Then append the snapshot and changed capability versions and update connection health.
 
 An obsolete or incomplete refresh does not publish. Discovery may retry because it sends no tool invocation.
 
@@ -360,6 +360,7 @@ All responses use stable IDs, ISO-8601 timestamps, correlation IDs, and machine-
 - `POST /v1/server-connections`
 - `GET /v1/server-connections`
 - `GET /v1/server-connections/{id}`
+- `POST /v1/server-connections/{id}/versions` — Admin-only append of a new immutable endpoint or secret-binding configuration; moves the stable connection back to `verifying` and blocks invocation until that exact version verifies.
 - `POST /v1/server-connections/{id}/verify`
 - `POST /v1/server-connections/{id}/refresh`
 - `POST /v1/server-connections/{id}/disable`
@@ -408,7 +409,7 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 
 | ID | Task | Acceptance |
 |---|---|---|
-| E0-T1 | Approve scope/threat model and ADRs 001–006 | Owners sign assumptions, non-goals, protocol, dispatch, and retention decisions |
+| E0-T1 | Approve scope/threat model and ADRs 001–007 | Owners sign assumptions, non-goals, protocol, dispatch, retention, immutable identity, and drift decisions |
 | E0-T2 | Scaffold API, worker, web, shared schemas, lint, typecheck, and CI | Clean checkout runs all quality gates |
 | E0-T3 | Add PostgreSQL migrations, local Compose, fixture secret provider, and test harness | One command starts a healthy local stack |
 | E0-T4 | Build reference MCP fixture server and recorded Registry fixtures | Deterministic discovery/invocation contracts run offline |
@@ -432,7 +433,7 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 | E2-T3 | Wrap the pinned SDK and qualify initialization plus paginated discovery | Recorded protocol suite passes without SDK leakage into domain types |
 | E2-T4 | Implement bounded normalized snapshots and canonical identity | Equivalent snapshots deduplicate; changed snapshots append |
 | E2-T5 | Implement capabilities, immutable versions, bindings, and status events | Drift creates pending versions and preserves enabled history |
-| E2-T6 | Implement explicit/scheduled refresh, health, and overlapping-job protection | Obsolete/incomplete refresh cannot publish |
+| E2-T6 | Implement explicit/scheduled refresh, health, and overlapping-job protection | Obsolete/incomplete refresh or a refresh racing with disable cannot publish |
 
 ### E3 — Durable invocation — 4–5 person-weeks
 
@@ -443,14 +444,14 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 | E3-T3 | Implement schema validation, limits, secret guardrail, and confirmation token | Invalid/sensitive/stale requests cannot enqueue |
 | E3-T4 | Implement scoped-HMAC idempotency and concurrent creation handling | Same key creates one run; raw key never persists |
 | E3-T5 | Implement fresh-session dispatch fence, send-once policy, deadline, and cancellation | Crash/control/cancel races never duplicate a call |
-| E3-T6 | Implement bounded result/error normalization and retention cleanup | Only clean text/JSON publishes; unsupported/sensitive payload is absent |
+| E3-T6 | Implement bounded result/error normalization and retention cleanup | Only clean, output-schema-valid text/JSON publishes; unsupported/sensitive/invalid payload is absent, and every terminal state's retained content expires |
 
 ### E4 — Control-plane API — 2–3 person-weeks
 
 | ID | Task | Acceptance |
 |---|---|---|
 | E4-T1 | Establish errors, pagination, optimistic concurrency, and OpenAPI conventions | Contract tests cover stable codes and unknown future events |
-| E4-T2 | Implement Registry search/import and connection endpoints | Role, outage, unsafe endpoint, and idempotency paths pass |
+| E4-T2 | Implement Registry search/import and connection endpoints, including append-only configuration versions | Role, outage, unsafe endpoint, version-history, reverification, and idempotency paths pass |
 | E4-T3 | Implement capability/version/status endpoints | Immutable/history/authorization paths pass |
 | E4-T4 | Implement preflight/run/event/cancel endpoints and generated client | API E2E and generated-client CI pass |
 
@@ -506,9 +507,14 @@ Parallel lanes after PR-02:
 Critical path:
 
 ```text
-01 -> 02 -> 03 -> 04 -> 06 -> 09 -> 10 -> 11 -> 12
-                   \-> 07 -/
-          05 ------/
+01 -> 02 -> 03 -> 04
+02 -> 05
+04 + 05 -> 06
+04 + 05 -> 07
+03 + 04 -> 08
+06 + 08 -> 09
+07 + 08 + 09 -> 10
+10 -> 11 -> 12
 ```
 
 ## 13. Test plan
@@ -535,9 +541,10 @@ Critical path:
 - migration from empty and previous PR schema;
 - job leasing, worker death, and dispatch-fence recovery;
 - disable/refresh/invocation races;
+- configuration-version append/reverification and disable-during-discovery races;
 - secret retrieval and telemetry redaction;
 - concurrent idempotency and refresh;
-- retention cleanup and backup restoration.
+- output-schema mismatch suppression, all-terminal-state retention cleanup, and backup restoration.
 
 ### End to end
 
@@ -678,4 +685,3 @@ Before PR-02 begins, confirm:
 - run/audit retention defaults;
 - whether eight to ten elapsed weeks with three focused engineers is acceptable; and
 - that private repositories and promotion-triggered enterprise controls remain outside `v0.1.0`.
-
