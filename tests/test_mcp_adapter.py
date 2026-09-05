@@ -191,6 +191,11 @@ def test_endpoint_policy_rejects_unsafe_resolution_and_scheme_combinations() -> 
             environment="test", allow_loopback_http=True, resolver=resolver({"127.0.0.1"})
         )
         await local.validate("http://fixture/mcp")
+        ipv6_local = EndpointPolicy(
+            environment="test", allow_loopback_http=True, resolver=resolver({"::1"})
+        )
+        ipv6_resolution = await ipv6_local.validate("http://[::1]:8000/mcp")
+        assert ipv6_resolution.host == "::1"
         with pytest.raises(EndpointPolicyError):
             await EndpointPolicy(environment="test", resolver=resolver({"127.0.0.1"})).validate(
                 "http://fixture/mcp"

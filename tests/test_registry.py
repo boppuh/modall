@@ -455,6 +455,8 @@ def test_connection_versions_are_immutable() -> None:
         "https://sk-abcdefghijklmnop.example.com/mcp",
         "https://mcp.example/\ud800",
         "https://mcp.example../path",
+        "https://☃.com/path",
+        "https://ab\u200dcd.example/path",
     ],
 )
 def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> None:
@@ -491,6 +493,17 @@ def test_connection_configuration_allows_explicit_local_loopback_fixture() -> No
                     policy_version="v1",
                 )
                 assert connection.pending_version_id is not None
+
+                ipv6_connection = await ConnectionService(
+                    session, environment="test", allow_loopback_http=True
+                ).create(
+                    context=context,
+                    name="IPv6 local fixture",
+                    endpoint_url="http://[::1]:8000/mcp",
+                    secret_binding_id=None,
+                    policy_version="v1",
+                )
+                assert ipv6_connection.pending_version_id is not None
 
                 binding = SecretBinding(
                     workspace_id=workspace_id,

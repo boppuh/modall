@@ -17,7 +17,9 @@ def upgrade() -> None:
     op.add_column("server_connections", sa.Column("last_refresh_at", sa.DateTime(timezone=True)))
     op.add_column(
         "capability_versions",
-        sa.Column("schema_supported", sa.Boolean(), nullable=False, server_default=sa.true()),
+        # Versions created before this migration never passed the qualified
+        # validator, so they remain fail-closed until refreshed.
+        sa.Column("schema_supported", sa.Boolean(), nullable=False, server_default=sa.false()),
     )
     op.alter_column("capability_versions", "schema_supported", server_default=None)
     op.create_unique_constraint(

@@ -1,8 +1,6 @@
 """Workspace-scoped connection versioning and lifecycle operations."""
 
 import re
-from ipaddress import ip_address
-from socket import inet_aton
 from typing import cast
 from urllib.parse import unquote, urlsplit
 from uuid import UUID, uuid4
@@ -25,6 +23,7 @@ from modall.persistence.models import (
     ServerConnectionVersion,
 )
 from modall.registry.types import CapabilityStatus, ConnectionLifecycle, Transport
+from modall.security.endpoints import normalize_endpoint_host
 from modall.security.metadata import (
     contains_obvious_secret,
     validate_capability_scalars,
@@ -44,7 +43,6 @@ class InvalidCapabilityTransition(Exception):
 
 class ConnectionService:
     _POLICY_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-    _DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
     def __init__(
         self,
@@ -359,35 +357,13 @@ class ConnectionService:
             port = parsed.port
         except ValueError as exc:
             raise ValueError("invalid endpoint URL") from exc
-        unicode_hostname = parsed.hostname.lower() if parsed.hostname else ""
-        if unicode_hostname.endswith(".."):
-            raise ValueError("invalid endpoint URL")
-        unicode_hostname = unicode_hostname.removesuffix(".")
-        if "%" in unicode_hostname:
-            raise ValueError("invalid endpoint URL")
         try:
-            encoded_hostname = unicode_hostname.encode("idna").decode("ascii")
-        except UnicodeError as exc:
+            normalized_host = normalize_endpoint_host(parsed.hostname)
+        except ValueError as exc:
             raise ValueError("invalid endpoint URL") from exc
-        if encoded_hostname.endswith(".."):
-            raise ValueError("invalid endpoint URL")
-        hostname = encoded_hostname.removesuffix(".")
-        if len(hostname) > 253 or any(
-            self._DNS_LABEL.fullmatch(label) is None for label in hostname.split(".")
-        ):
-            raise ValueError("invalid endpoint URL")
-        parsed_ip = None
-        try:
-            parsed_ip = ip_address(hostname)
-        except ValueError:
-            try:
-                inet_aton(hostname)
-            except OSError:
-                is_ip_literal = False
-            else:
-                is_ip_literal = True
-        else:
-            is_ip_literal = True
+        hostname = normalized_host.value
+        parsed_ip = normalized_host.parsed_ip
+        is_ip_literal = normalized_host.is_ip_literal
         local_fixture = (
             self._environment in {"local", "test"}
             and self._allow_loopback_http

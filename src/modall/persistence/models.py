@@ -408,7 +408,7 @@ class CapabilityVersion(Base):
     input_schema: Mapped[dict[str, object]] = mapped_column(JSON)
     output_schema: Mapped[dict[str, object] | None] = mapped_column(JSON)
     metadata_digest: Mapped[str] = mapped_column(String(64))
-    schema_supported: Mapped[bool] = mapped_column(Boolean, default=True)
+    schema_supported: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[CreatedAt]
 
 
