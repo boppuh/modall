@@ -5,7 +5,7 @@
 
 ## Decision
 
-Modall Registry Alpha pins the official Python MCP SDK at `mcp==1.27.2` and qualifies
+Modall Registry Alpha pins the official Python MCP SDK at `mcp==1.29.1` and qualifies
 protocol revision `2025-06-18` over Streamable HTTP.
 
 The local adapter introduced in planned PR06 must expose Modall-owned domain types, request
@@ -15,7 +15,7 @@ elicitation, roots, tasks, SSE, and stdio are out of scope.
 
 ## Rationale
 
-The newest maintained 1.x SDK explicitly supports `2025-06-18`, retains the initialization
+The selected maintained 1.x baseline explicitly supports `2025-06-18`, retains the initialization
 and session behavior required by the alpha's two-stage invocation fence, and continues to
 receive critical security fixes. Pinning the patch version makes qualification reproducible.
 Adopting the newer stateless protocol is a separate architecture and threat-model decision,
