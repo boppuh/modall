@@ -7,7 +7,12 @@ import httpcore
 import httpx
 import pytest
 
-from modall.mcp_adapter.client import DiscoveryError, McpClientAdapter, ProtocolMismatch
+from modall.mcp_adapter.client import (
+    CredentialError,
+    DiscoveryError,
+    McpClientAdapter,
+    ProtocolMismatch,
+)
 from modall.mcp_adapter.policy import (
     EndpointPolicy,
     EndpointPolicyError,
@@ -86,6 +91,7 @@ def test_adapter_discovers_bounded_domain_types_and_drift() -> None:
             "dynamic-schema-ref",
             "unresolved-local-ref",
             "unresolved-local-anchor",
+            "non-schema-local-ref",
         ):
             unsafe_client, unsafe_endpoint = adapter_for(profile)
             unsafe = await unsafe_client.discover(unsafe_endpoint)
@@ -132,7 +138,11 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
         with pytest.raises(DiscoveryError, match="secret screening"):
             await escaped_leaking.discover(endpoint, bearer_token=ESCAPED_FIXTURE_TOKEN.encode())
 
-        for profile in ("structured-secret", "nested-structured-secret"):
+        for profile in (
+            "structured-secret",
+            "nested-structured-secret",
+            "composite-structured-secret",
+        ):
             structured, endpoint = adapter_for(profile)
             with pytest.raises(DiscoveryError, match="secret screening"):
                 await structured.discover(endpoint)
@@ -153,8 +163,10 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
             )
 
         invalid_credential, endpoint = adapter_for("authenticated")
-        with pytest.raises(DiscoveryError, match="credential encoding"):
+        with pytest.raises(CredentialError, match="credential encoding"):
             await invalid_credential.discover(endpoint, bearer_token=b"bad token")
+        with pytest.raises(CredentialError, match="credential encoding"):
+            await invalid_credential.discover(endpoint, bearer_token=b"bad\x7ftoken")
 
     asyncio.run(scenario())
 

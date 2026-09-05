@@ -350,7 +350,11 @@ class ConnectionService:
     def _validate_configuration(
         self, endpoint_url: str, policy_version: str, *, has_secret: bool
     ) -> None:
-        if not endpoint_url or len(endpoint_url) > 2048 or "\x00" in endpoint_url:
+        if (
+            not endpoint_url
+            or len(endpoint_url) > 2048
+            or any(ord(character) <= 32 or ord(character) == 127 for character in endpoint_url)
+        ):
             raise ValueError("invalid endpoint URL")
         try:
             parsed = urlsplit(endpoint_url)
@@ -518,14 +522,12 @@ class CapabilityService:
                 schema_supported=schema_supported,
             )
             if existing is not None:
-                if (
-                    existing.id == capability.enabled_version_id
-                    and capability.pending_version_id is not None
-                    and capability.typed_status
-                    in {CapabilityStatus.PENDING_REVIEW, CapabilityStatus.UNAVAILABLE}
+                if existing.id == capability.enabled_version_id and (
+                    capability.pending_version_id is not None
                 ):
                     capability.pending_version_id = None
-                    capability.status = CapabilityStatus.ENABLED.value
+                    if capability.typed_status != CapabilityStatus.DISABLED:
+                        capability.status = CapabilityStatus.ENABLED.value
                     capability.status_epoch += 1
                     self._append_status_event(context, capability, existing.id)
                 elif (

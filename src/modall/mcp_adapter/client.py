@@ -99,7 +99,9 @@ class McpClientAdapter:
                 credential_text = bytes(bearer_token).decode("ascii")
             except UnicodeDecodeError as exc:
                 raise CredentialError("credential encoding rejected") from exc
-            if not credential_text or any(ord(character) < 33 for character in credential_text):
+            if not credential_text or any(
+                not 33 <= ord(character) <= 126 for character in credential_text
+            ):
                 raise CredentialError("credential encoding rejected")
             headers["Authorization"] = f"Bearer {credential_text}"
         try:
@@ -395,7 +397,9 @@ def _schema_is_supported(
         try:
             for root_schema, reference in local_references:
                 if root_schema is schema:
-                    resolver.lookup(reference)
+                    resolved = resolver.lookup(reference).contents
+                    if not isinstance(resolved, (dict, bool)):
+                        return False
         except Unresolvable:
             return False
     return True

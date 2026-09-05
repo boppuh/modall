@@ -137,7 +137,7 @@ def _contains_obvious_secret_in_json(value: object) -> bool:
         current, sensitive_context = stack.pop()
         if isinstance(current, dict):
             for key, child in current.items():
-                key_is_sensitive = _SENSITIVE_JSON_FIELD.fullmatch(key) is not None
+                key_is_sensitive = _SENSITIVE_JSON_FIELD.search(key) is not None
                 if key_is_sensitive and isinstance(child, str) and len(child) >= 8:
                     return True
                 if sensitive_context and key in {"const", "default", "enum", "example", "examples"}:

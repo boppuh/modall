@@ -433,10 +433,10 @@ class DiscoveryPublicationService:
             )
         ).all()
         for capability in capabilities:
-            if (
-                capability.tool_identity in observed_identities
-                or capability.typed_status == CapabilityStatus.UNAVAILABLE
-            ):
+            if capability.tool_identity in observed_identities or capability.typed_status in {
+                CapabilityStatus.UNAVAILABLE,
+                CapabilityStatus.DISABLED,
+            }:
                 continue
             capability.status = CapabilityStatus.UNAVAILABLE.value
             capability.status_epoch += 1

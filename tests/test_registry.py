@@ -457,6 +457,9 @@ def test_connection_versions_are_immutable() -> None:
         "https://mcp.example../path",
         "https://☃.com/path",
         "https://ab\u200dcd.example/path",
+        " https://mcp.example/path",
+        "https://mcp.example/path ",
+        "\x1fhttps://mcp.example/path",
     ],
 )
 def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> None:
