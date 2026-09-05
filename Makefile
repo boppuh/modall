@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: bootstrap check compose-down compose-up format help python-check test web-check
+.PHONY: bootstrap check compose-down compose-up format help migrate python-check test web-check
 
 help:
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -12,6 +12,9 @@ bootstrap: ## Install locked Python and web dependencies
 format: ## Format Python sources
 	uv run ruff format .
 	uv run ruff check --fix .
+
+migrate: ## Apply database migrations
+	uv run alembic upgrade head
 
 python-check: ## Run Python format, lint, types, and tests
 	uv run ruff format --check .
@@ -37,4 +40,3 @@ compose-up: ## Build and start the local stack
 
 compose-down: ## Stop the local stack
 	docker compose down
-

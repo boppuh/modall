@@ -11,6 +11,8 @@ WORKDIR /app
 
 COPY --from=uv /uv /uvx /bin/
 COPY pyproject.toml uv.lock README.md ./
+COPY alembic.ini ./
+COPY migrations ./migrations
 COPY src ./src
 
 RUN uv sync --frozen --no-dev
@@ -18,4 +20,3 @@ RUN uv sync --frozen --no-dev
 ENV PATH="/app/.venv/bin:$PATH"
 
 USER nobody
-

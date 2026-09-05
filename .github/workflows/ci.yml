@@ -11,6 +11,22 @@ permissions:
 jobs:
   python:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: modall_test
+          POSTGRES_USER: modall
+          POSTGRES_PASSWORD: modall
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U modall -d modall_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      MODALL_DATABASE_URL: postgresql://modall:modall@localhost:5432/modall_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -21,6 +37,10 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --frozen
+      - run: uv run alembic upgrade head
+      - run: uv run alembic check
+      - run: uv run alembic downgrade base
+      - run: uv run alembic upgrade head
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run mypy

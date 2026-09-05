@@ -19,3 +19,44 @@ def test_settings_use_safe_local_defaults() -> None:
 def test_settings_reject_unsafe_poll_intervals(interval: float) -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, worker_poll_interval_seconds=interval)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"environment": "production"},
+        {
+            "environment": "production",
+            "auth_mode": "oidc",
+            "oidc_issuer": "https://issuer.example",
+            "oidc_audience": "modall",
+            "oidc_jwks_url": "https://issuer.example/jwks",
+        },
+        {"auth_mode": "oidc"},
+        {
+            "auth_mode": "oidc",
+            "oidc_issuer": "http://issuer.example",
+            "oidc_audience": "modall",
+            "oidc_jwks_url": "https://issuer.example/jwks",
+        },
+        {"local_subject": "  "},
+    ],
+)
+def test_settings_reject_confused_security_modes(overrides: dict[str, str]) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **overrides)  # type: ignore[arg-type]
+
+
+def test_deployed_security_mode_requires_oidc_and_mounted_secrets() -> None:
+    settings = Settings(
+        _env_file=None,
+        environment="staging",
+        auth_mode="oidc",
+        oidc_issuer="https://issuer.example",
+        oidc_audience="modall",
+        oidc_jwks_url="https://issuer.example/jwks",
+        secret_provider="mounted_file",
+    )
+
+    assert settings.auth_mode == "oidc"
+    assert settings.secret_provider == "mounted_file"
