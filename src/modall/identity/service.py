@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modall.audit.types import AuditAction, ResourceType
-from modall.identity.repository import AuthorizationDenied, require_role
+from modall.identity.repository import AuthorizationDenied, require_current_role
 from modall.identity.types import Principal, Role, WorkspaceContext
 from modall.persistence.models import AuditEvent, User, Workspace, WorkspaceMembership
 
@@ -52,8 +52,8 @@ class IdentityService:
         correlation_id: UUID | None = None,
     ) -> Workspace:
         normalized_name = name.strip()
-        if not normalized_name:
-            raise ValueError("workspace name must not be blank")
+        if not normalized_name or len(normalized_name) > 128:
+            raise ValueError("workspace name must contain between 1 and 128 characters")
         workspace = Workspace(name=normalized_name)
         self._session.add(workspace)
         await self._session.flush()
@@ -87,24 +87,12 @@ class IdentityService:
     ) -> WorkspaceMembership:
         """Add or change a member while preserving at least one workspace Admin."""
 
-        require_role(context, Role.ADMIN)
-        locked_workspace = await self._session.scalar(
-            select(Workspace.id).where(Workspace.id == context.workspace_id).with_for_update()
+        await require_current_role(
+            self._session,
+            context,
+            Role.ADMIN,
+            serialize_workspace=True,
         )
-        if locked_workspace is None:
-            raise AuthorizationDenied("workspace access denied")
-
-        actor_membership = await self._session.scalar(
-            select(WorkspaceMembership)
-            .where(
-                WorkspaceMembership.workspace_id == context.workspace_id,
-                WorkspaceMembership.user_id == context.actor_user_id,
-            )
-            .execution_options(populate_existing=True)
-        )
-        if actor_membership is None or actor_membership.typed_role != Role.ADMIN:
-            raise AuthorizationDenied("workspace access denied")
-
         membership = await self._session.scalar(
             select(WorkspaceMembership)
             .where(

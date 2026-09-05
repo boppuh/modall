@@ -7,7 +7,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modall.identity.types import Permission, Role, WorkspaceContext
-from modall.persistence.models import AuditEvent, SecretBinding, WorkspaceMembership
+from modall.persistence.models import AuditEvent, SecretBinding, Workspace, WorkspaceMembership
 
 
 class AuthorizationDenied(Exception):
@@ -69,3 +69,31 @@ class WorkspaceRepository:
 def require_role(context: WorkspaceContext, *roles: Role) -> None:
     if context.role not in roles:
         raise AuthorizationDenied("workspace access denied")
+
+
+async def require_current_role(
+    session: AsyncSession,
+    context: WorkspaceContext,
+    *roles: Role,
+    serialize_workspace: bool = False,
+) -> WorkspaceMembership:
+    """Revalidate current membership, optionally serialized with workspace mutations."""
+
+    require_role(context, *roles)
+    if serialize_workspace:
+        workspace_id = await session.scalar(
+            select(Workspace.id).where(Workspace.id == context.workspace_id).with_for_update()
+        )
+        if workspace_id is None:
+            raise AuthorizationDenied("workspace access denied")
+    membership = await session.scalar(
+        select(WorkspaceMembership)
+        .where(
+            WorkspaceMembership.workspace_id == context.workspace_id,
+            WorkspaceMembership.user_id == context.actor_user_id,
+        )
+        .execution_options(populate_existing=True)
+    )
+    if membership is None or membership.typed_role not in roles:
+        raise AuthorizationDenied("workspace access denied")
+    return membership

@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     database_url: PostgresDsn = PostgresDsn("postgresql://modall:modall@localhost:5432/modall")
     worker_poll_interval_seconds: Annotated[float, Field(gt=0, le=60, allow_inf_nan=False)] = 1.0
     auth_mode: Literal["local", "oidc"] = "local"
-    oidc_issuer: HttpUrl | None = None
+    # Preserve the issuer byte-for-byte for OIDC's exact identifier comparison.
+    oidc_issuer: str | None = None
     oidc_audience: str | None = None
     oidc_jwks_url: HttpUrl | None = None
     local_subject: str = "local-developer"
@@ -34,6 +35,11 @@ class Settings(BaseSettings):
     def validate_security_modes(self) -> "Settings":
         """Prevent development identity or secret fixtures in deployed modes."""
 
+        issuer_url: HttpUrl | None = None
+        if self.oidc_issuer is not None:
+            if self.oidc_issuer != self.oidc_issuer.strip():
+                raise ValueError("OIDC issuer must not contain surrounding whitespace")
+            issuer_url = HttpUrl(self.oidc_issuer)
         deployed = self.environment in {"staging", "production"}
         if deployed and self.auth_mode != "oidc":
             raise ValueError("deployed environments require OIDC authentication")
@@ -44,9 +50,9 @@ class Settings(BaseSettings):
         ):
             raise ValueError("OIDC mode requires issuer, audience, and JWKS URL")
         if self.auth_mode == "oidc" and (
-            self.oidc_issuer is not None
+            issuer_url is not None
             and self.oidc_jwks_url is not None
-            and (self.oidc_issuer.scheme != "https" or self.oidc_jwks_url.scheme != "https")
+            and (issuer_url.scheme != "https" or self.oidc_jwks_url.scheme != "https")
         ):
             raise ValueError("OIDC issuer and JWKS URL require HTTPS")
         if not self.local_subject.strip():

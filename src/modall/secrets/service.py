@@ -5,10 +5,10 @@ from uuid import UUID, uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modall.audit.types import AuditAction, ResourceType
-from modall.identity.repository import require_role
+from modall.identity.repository import require_current_role
 from modall.identity.types import Role, WorkspaceContext
 from modall.persistence.models import AuditEvent, SecretBinding
-from modall.secrets.provider import SecretReference
+from modall.secrets.provider import SecretReference, validate_secret_reference
 
 
 class SecretBindingService:
@@ -22,7 +22,13 @@ class SecretBindingService:
         reference: SecretReference,
         correlation_id: UUID | None = None,
     ) -> SecretBinding:
-        require_role(context, Role.ADMIN)
+        await require_current_role(
+            self._session,
+            context,
+            Role.ADMIN,
+            serialize_workspace=True,
+        )
+        validate_secret_reference(reference)
         binding = SecretBinding(
             workspace_id=context.workspace_id,
             provider=reference.provider,

@@ -10,6 +10,7 @@ from modall.secrets.provider import (
     SecretProviderError,
     SecretReference,
     build_secret_provider,
+    validate_secret_reference,
 )
 
 
@@ -38,6 +39,24 @@ def test_fixture_provider_fails_without_reference_disclosure() -> None:
 
     with pytest.raises(SecretProviderError, match="mismatch"):
         provider.retrieve(reference(provider="mounted_file"))
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        reference("mounted_file", "", "v1"),
+        reference("mounted_file", "token", "v" * 129),
+        reference("mounted_file", "invalid/ref", "v1"),
+        reference("fixture", "", "v1"),
+        reference("fixture", "token", ""),
+        reference("unknown", "token", "v1"),
+    ],
+)
+def test_secret_reference_validation_rejects_unusable_metadata(
+    invalid: SecretReference,
+) -> None:
+    with pytest.raises(SecretProviderError):
+        validate_secret_reference(invalid)
 
 
 def test_mounted_file_provider_reads_exact_version_and_zeroes(tmp_path: Path) -> None:

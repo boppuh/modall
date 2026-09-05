@@ -60,4 +60,5 @@ def test_deployed_security_mode_requires_oidc_and_mounted_secrets() -> None:
     )
 
     assert settings.auth_mode == "oidc"
+    assert settings.oidc_issuer == "https://issuer.example"
     assert settings.secret_provider == "mounted_file"

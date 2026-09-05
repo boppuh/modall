@@ -18,7 +18,7 @@ from modall.identity.service import IdentityService
 from modall.identity.types import Permission, Principal, Role
 from modall.persistence.database import create_engine, create_session_factory, transaction
 from modall.persistence.models import AuditEvent, Base, SecretBinding, User, WorkspaceMembership
-from modall.secrets.provider import SecretReference
+from modall.secrets.provider import SecretProviderError, SecretReference
 from modall.secrets.service import SecretBindingService
 
 
@@ -202,8 +202,10 @@ def test_user_resolution_is_idempotent_and_workspace_name_is_required() -> None:
                 first = await service.resolve_user(principal)
                 second = await service.resolve_user(principal)
                 assert first.id == second.id
-                with pytest.raises(ValueError, match="must not be blank"):
+                with pytest.raises(ValueError, match="between 1 and 128"):
                     await service.create_workspace(owner=first, name="   ")
+                with pytest.raises(ValueError, match="between 1 and 128"):
+                    await service.create_workspace(owner=first, name="x" * 129)
 
             async with factory() as session:
                 assert await session.scalar(select(func.count()).select_from(User)) == 1
@@ -272,6 +274,40 @@ def test_membership_mutation_rejects_a_stale_admin_context() -> None:
                         user_id=original_admin_id,
                         role=Role.ADMIN,
                     )
+                with pytest.raises(AuthorizationDenied):
+                    await SecretBindingService(session).create_binding(
+                        context=original_context,
+                        reference=SecretReference("fixture", "stale", "v1"),
+                    )
+
+    asyncio.run(scenario())
+
+
+def test_secret_binding_rejects_unusable_metadata_before_persistence() -> None:
+    async def scenario() -> None:
+        async with database() as (_, factory):
+            admin_id, workspace_id = await bootstrap_workspace(
+                factory, subject="binding-validation", name="Binding Validation"
+            )
+            async with transaction(factory) as session:
+                context = await AuthorizationService(session).authorize(
+                    user_id=admin_id,
+                    workspace_id=workspace_id,
+                    permission=Permission.MANAGE_CONNECTION_CONFIGURATION,
+                )
+                with pytest.raises(SecretProviderError, match="invalid"):
+                    await SecretBindingService(session).create_binding(
+                        context=context,
+                        reference=SecretReference("mounted_file", "invalid/ref", "v1"),
+                    )
+
+            async with factory() as session:
+                count = await session.scalar(
+                    select(func.count())
+                    .select_from(SecretBinding)
+                    .where(SecretBinding.workspace_id == workspace_id)
+                )
+                assert count == 0
 
     asyncio.run(scenario())
 
