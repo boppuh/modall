@@ -1,4 +1,7 @@
 import asyncio
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import cast
 
@@ -38,6 +41,27 @@ def test_alembic_database_url_escapes_configparser_interpolation() -> None:
         alembic_database_url("postgresql://user:p%40ss@db/database")
         == "postgresql+asyncpg://user:p%%40ss@db/database"
     )
+
+
+def test_alembic_uses_database_only_settings_in_deployed_mode() -> None:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "MODALL_ENVIRONMENT": "production",
+            "MODALL_DATABASE_URL": "postgresql://user:p%40ss@localhost/database",
+        }
+    )
+    completed = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head", "--sql"],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_database_probe_reports_ready_and_closes() -> None:

@@ -67,28 +67,27 @@ class PyJwkSigningKeyResolver:
 
         with self._lock:
             now = self._clock()
-            negative_expiry = self._negative_kids.get(kid)
-            if negative_expiry is not None:
-                if negative_expiry > now:
-                    raise AuthenticationError("invalid bearer token")
-                del self._negative_kids[kid]
-
             if self._signing_keys is None:
                 if now < self._next_refresh_at:
                     raise AuthenticationError("signing keys temporarily unavailable")
                 self._next_refresh_at = now + self._refresh_interval_seconds
                 self._signing_keys = self._client.get_signing_keys()
+            elif now >= self._next_refresh_at:
+                self._next_refresh_at = now + self._refresh_interval_seconds
+                # Fail closed if refresh fails instead of continuing with a key set
+                # the issuer may have revoked.
+                self._signing_keys = None
+                self._signing_keys = self._client.get_signing_keys(refresh=True)
 
             signing_key = self._client.match_kid(self._signing_keys, kid)
             if signing_key is not None:
+                self._negative_kids.pop(kid, None)
                 return signing_key
 
-            if now >= self._next_refresh_at:
-                self._next_refresh_at = now + self._refresh_interval_seconds
-                self._signing_keys = self._client.get_signing_keys(refresh=True)
-                signing_key = self._client.match_kid(self._signing_keys, kid)
-                if signing_key is not None:
-                    return signing_key
+            negative_expiry = self._negative_kids.get(kid)
+            if negative_expiry is not None and negative_expiry > now:
+                raise AuthenticationError("invalid bearer token")
+            self._negative_kids.pop(kid, None)
 
             self._negative_kids[kid] = now + self._negative_ttl_seconds
             self._negative_kids.move_to_end(kid)

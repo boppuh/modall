@@ -258,3 +258,64 @@ def test_jwks_resolver_bounds_unknown_key_refreshes(monkeypatch: pytest.MonkeyPa
     with pytest.raises(AuthenticationError):
         resolver.resolve(token("unknown-c"))
     assert refresh_calls.count(True) == 1
+
+
+def test_jwks_resolver_periodically_replaces_revoked_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_key = object()
+    now = [0.0]
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def get_signing_keys(self, *, refresh: bool = False) -> list[object]:
+            return [] if refresh else [old_key]
+
+        def match_kid(self, signing_keys: list[object], kid: str) -> object | None:
+            return old_key if old_key in signing_keys and kid == "old" else None
+
+    monkeypatch.setattr("modall.identity.auth.PyJWKClient", FakeClient)
+    resolver = PyJwkSigningKeyResolver(
+        "https://issuer.example/jwks",
+        refresh_interval_seconds=30,
+        clock=lambda: now[0],
+    )
+    token = jwt.encode({}, "s" * 32, algorithm="HS256", headers={"kid": "old"})
+
+    assert resolver.resolve(token) is old_key
+    now[0] = 31
+    with pytest.raises(AuthenticationError):
+        resolver.resolve(token)
+
+
+def test_jwks_scheduled_refresh_overrides_negative_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    new_key = object()
+    now = [0.0]
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def get_signing_keys(self, *, refresh: bool = False) -> list[object]:
+            return [new_key] if refresh else []
+
+        def match_kid(self, signing_keys: list[object], kid: str) -> object | None:
+            return new_key if new_key in signing_keys and kid == "new" else None
+
+    monkeypatch.setattr("modall.identity.auth.PyJWKClient", FakeClient)
+    resolver = PyJwkSigningKeyResolver(
+        "https://issuer.example/jwks",
+        refresh_interval_seconds=30,
+        negative_ttl_seconds=60,
+        clock=lambda: now[0],
+    )
+    token = jwt.encode({}, "s" * 32, algorithm="HS256", headers={"kid": "new"})
+
+    with pytest.raises(AuthenticationError):
+        resolver.resolve(token)
+    now[0] = 31
+    assert resolver.resolve(token) is new_key
