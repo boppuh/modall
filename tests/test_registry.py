@@ -18,6 +18,7 @@ from modall.persistence.models import (
     CapabilityStatusEvent,
     CapabilityVersion,
     McpToolBinding,
+    SecretBinding,
     ServerConnection,
     ServerConnectionVersion,
 )
@@ -269,14 +270,24 @@ def test_connection_versions_are_immutable() -> None:
             admin_id, workspace_id = await bootstrap(factory, subject="immutable-admin")
             async with transaction(factory) as session:
                 context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                binding = SecretBinding(
+                    workspace_id=workspace_id,
+                    provider="fixture",
+                    external_reference="immutable-secret",
+                    version="v1",
+                    created_by_user_id=admin_id,
+                )
+                session.add(binding)
+                await session.flush()
                 connection = await ConnectionService(session).create(
                     context=context,
                     name="Immutable",
                     endpoint_url="https://mcp.example/v1",
-                    secret_binding_id=None,
+                    secret_binding_id=binding.id,
                     policy_version="v1",
                 )
                 version_id = connection.pending_version_id
+                binding_id = binding.id
                 assert version_id is not None
 
             async with transaction(factory) as session:
@@ -290,6 +301,13 @@ def test_connection_versions_are_immutable() -> None:
                     version = await session.get(ServerConnectionVersion, version_id)
                     assert version is not None
                     version.endpoint_url = "https://attacker.example"
+                    await session.flush()
+
+            with pytest.raises(ValueError, match="immutable"):
+                async with transaction(factory) as session:
+                    stored_binding = await session.get(SecretBinding, binding_id)
+                    assert stored_binding is not None
+                    stored_binding.external_reference = "retargeted-secret"
                     await session.flush()
 
     asyncio.run(scenario())
@@ -310,6 +328,8 @@ def test_connection_versions_are_immutable() -> None:
         "https://\uff11\uff12\uff17.\uff10.\uff10.\uff11",
         "https://\u2113ocalhost",
         "https://localhost\u3002",
+        "https://%31%32%37.0.0.1",
+        "https://%6cocalhost",
     ],
 )
 def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> None:

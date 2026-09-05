@@ -279,6 +279,8 @@ class ConnectionService:
         except ValueError as exc:
             raise ValueError("invalid endpoint URL") from exc
         unicode_hostname = parsed.hostname.rstrip(".").lower() if parsed.hostname else ""
+        if "%" in unicode_hostname:
+            raise ValueError("invalid endpoint URL")
         try:
             hostname = unicode_hostname.encode("idna").decode("ascii").rstrip(".")
         except UnicodeError as exc:

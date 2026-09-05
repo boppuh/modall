@@ -343,6 +343,7 @@ def upgrade() -> None:
         "LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'immutable version row'; END; $$"
     )
     for table in (
+        "secret_bindings",
         "registry_entry_versions",
         "server_connection_versions",
         "capability_versions",
@@ -357,6 +358,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     for table in (
+        "secret_bindings",
         "registry_entry_versions",
         "server_connection_versions",
         "capability_versions",

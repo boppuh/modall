@@ -476,6 +476,7 @@ def _reject_immutable_update(mapper: Mapper[object], connection: object, target:
 
 
 for immutable_model in (
+    SecretBinding,
     RegistryEntryVersion,
     ServerConnectionVersion,
     CapabilityVersion,
