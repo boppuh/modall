@@ -17,9 +17,14 @@ _OBVIOUS_SECRET = re.compile(
 )
 _SENSITIVE_JSON_FIELD = re.compile(
     r"(?:^|[_-])(?:api[_-]?key|(?:access|refresh|session|auth|bearer)?[_-]?token|"
-    r"credentials?|secret|password)(?:$|[_-])",
+    r"authorization|authentication|credentials?|secret|password)(?:$|[_-])",
     re.IGNORECASE,
 )
+
+
+def _is_sensitive_field(key: str) -> bool:
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    return _SENSITIVE_JSON_FIELD.search(normalized) is not None
 
 
 def contains_obvious_secret(value: str) -> bool:
@@ -61,8 +66,7 @@ def contains_sensitive_schema(value: object) -> bool:
                         stack.append(
                             (
                                 property_schema,
-                                sensitive_property
-                                or _SENSITIVE_JSON_FIELD.search(property_name) is not None,
+                                sensitive_property or _is_sensitive_field(property_name),
                             )
                         )
                     continue
@@ -85,7 +89,15 @@ def contains_sensitive_schema(value: object) -> bool:
                     return True
                 if key in literal_keys and contains_sensitive_json(child):
                     return True
-        elif isinstance(current, str) and contains_obvious_secret(current):
+        elif isinstance(current, str):
+            if (sensitive_property and len(current) >= 8) or contains_obvious_secret(current):
+                return True
+        elif (
+            sensitive_property
+            and isinstance(current, (int, float))
+            and not isinstance(current, bool)
+            and len(str(current)) >= 8
+        ):
             return True
     return False
 
@@ -199,7 +211,7 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
         current, sensitive_context = stack.pop()
         if isinstance(current, dict):
             for key, child in current.items():
-                key_is_sensitive = _SENSITIVE_JSON_FIELD.search(key) is not None
+                key_is_sensitive = _is_sensitive_field(key)
                 if key_is_sensitive and isinstance(child, str) and len(child) >= 8:
                     return True
                 if sensitive_context and key in {"const", "default", "enum", "example", "examples"}:

@@ -771,12 +771,24 @@ def test_refresh_lease_reclaim_invalidates_the_previous_worker() -> None:
                     now=claimed_at + timedelta(seconds=2),
                 )
                 assert new_lease.lease_epoch == old_lease.lease_epoch + 1
+                original_expiry = job.lease_expires_at
+                assert original_expiry is not None
+                assert (
+                    await RefreshJobService(session).renew(
+                        context=context,
+                        lease=new_lease,
+                        lease_duration=timedelta(minutes=1),
+                        now=claimed_at + timedelta(seconds=3),
+                    )
+                    == new_lease
+                )
+                assert job.lease_expires_at == original_expiry + timedelta(minutes=1)
                 assert (
                     await RefreshJobService(session).renew(
                         context=context,
                         lease=new_lease,
                         lease_duration=timedelta(minutes=10),
-                        now=claimed_at + timedelta(seconds=3),
+                        now=claimed_at + timedelta(seconds=4),
                     )
                     == new_lease
                 )
@@ -785,7 +797,7 @@ def test_refresh_lease_reclaim_invalidates_the_previous_worker() -> None:
                         context=context,
                         lease=old_lease,
                         lease_duration=timedelta(minutes=1),
-                        now=claimed_at + timedelta(seconds=3),
+                        now=claimed_at + timedelta(seconds=4),
                     )
                 with pytest.raises(InvalidConnectionTransition):
                     await DiscoveryPublicationService(session).publish_success(

@@ -3,6 +3,8 @@
 import asyncio
 import hashlib
 import json
+import math
+from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -106,6 +108,7 @@ class McpClientAdapter:
                 len(credential_text) < 16
                 or len(credential_text) > 4096
                 or any(not 33 <= ord(character) <= 126 for character in credential_text)
+                or _credential_entropy_bits(credential_text) < 64
             ):
                 raise CredentialError("credential encoding rejected")
             try:
@@ -439,6 +442,11 @@ def _contains_decoded_credential(value: object, credential: str) -> bool:
         elif isinstance(current, str) and credential in current:
             return True
     return False
+
+
+def _credential_entropy_bits(credential: str) -> float:
+    length = len(credential)
+    return sum(count * math.log2(length / count) for count in Counter(credential).values())
 
 
 def _contains_sensitive_tool(tool: dict[str, object]) -> bool:

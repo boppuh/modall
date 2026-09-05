@@ -783,6 +783,7 @@ class CapabilityService:
             .where(
                 CapabilityVersion.capability_id == capability.id,
                 CapabilityVersion.workspace_id == capability.workspace_id,
+                CapabilityVersion.metadata_digest == metadata_digest,
                 McpToolBinding.connection_version_id == connection_version_id,
                 McpToolBinding.tool_name == tool_name,
                 McpToolBinding.protocol_revision == protocol_revision,

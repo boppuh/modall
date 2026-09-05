@@ -24,6 +24,7 @@ from modall.mcp_adapter.policy import (
     ResponseLimitExceeded,
     TransportLimits,
 )
+from modall.security.metadata import contains_sensitive_json
 from tests.support.mcp_fixture_server import (
     COMMON_KEY_FIXTURE_TOKEN,
     ESCAPED_FIXTURE_TOKEN,
@@ -61,6 +62,16 @@ def adapter_for(
         ),
         f"https://fixture/mcp/{profile}",
     )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("token", "refresh_token", "sessionToken", "clientSecret", "authorization"),
+)
+def test_structured_secret_screen_recognizes_common_field_spellings(
+    field_name: str,
+) -> None:
+    assert contains_sensitive_json({field_name: "abcdefgh12345678"})
 
 
 def test_adapter_discovers_bounded_domain_types_and_drift() -> None:
@@ -164,14 +175,16 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
             "numeric-sensitive-metadata",
             "credential-metadata",
             "generic-token-metadata",
+            "camel-secret-metadata",
         ):
             structured, endpoint = adapter_for(profile)
             with pytest.raises(DiscoveryError, match="secret screening"):
                 await structured.discover(endpoint)
 
-        schema_annotation, endpoint = adapter_for("schema-annotation-secret")
-        with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
-            await schema_annotation.discover(endpoint)
+        for profile in ("schema-annotation-secret", "malformed-sensitive-property"):
+            unsafe_schema, endpoint = adapter_for(profile)
+            with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
+                await unsafe_schema.discover(endpoint)
 
         oversized_scalar, endpoint = adapter_for("oversized-scalar")
         with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
@@ -189,7 +202,7 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
             )
 
         invalid_credential, endpoint = adapter_for("authenticated")
-        for rejected_token in (b"bad token", b"string"):
+        for rejected_token in (b"bad token", b"string", b"application/json"):
             with pytest.raises(CredentialError, match="credential encoding"):
                 await invalid_credential.discover(endpoint, bearer_token=rejected_token)
         with pytest.raises(CredentialError, match="credential encoding"):
