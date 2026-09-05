@@ -415,7 +415,7 @@ class CapabilityVersion(Base):
 class McpToolBinding(Base):
     __tablename__ = "mcp_tool_bindings"
     __table_args__ = (
-        UniqueConstraint("connection_id", "capability_version_id"),
+        UniqueConstraint("connection_id", "connection_version_id", "capability_version_id"),
         ForeignKeyConstraint(
             ["workspace_id", "capability_version_id"],
             ["capability_versions.workspace_id", "capability_versions.id"],
@@ -527,6 +527,7 @@ class DiscoverySnapshot(Base):
         ),
         UniqueConstraint("workspace_id", "id"),
         UniqueConstraint("connection_id", "id"),
+        UniqueConstraint("connection_id", "connection_version_id", "id"),
         UniqueConstraint("connection_id", "generation"),
         CheckConstraint("generation > 0", name="ck_discovery_snapshot_generation"),
         CheckConstraint("control_epoch >= 0", name="ck_discovery_snapshot_control_epoch"),
@@ -552,8 +553,12 @@ class DiscoverySnapshotCapability(Base):
             ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
-            ["connection_id", "snapshot_id"],
-            ["discovery_snapshots.connection_id", "discovery_snapshots.id"],
+            ["connection_id", "connection_version_id", "snapshot_id"],
+            [
+                "discovery_snapshots.connection_id",
+                "discovery_snapshots.connection_version_id",
+                "discovery_snapshots.id",
+            ],
             ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
@@ -562,8 +567,12 @@ class DiscoverySnapshotCapability(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["connection_id", "capability_version_id"],
-            ["mcp_tool_bindings.connection_id", "mcp_tool_bindings.capability_version_id"],
+            ["connection_id", "connection_version_id", "capability_version_id"],
+            [
+                "mcp_tool_bindings.connection_id",
+                "mcp_tool_bindings.connection_version_id",
+                "mcp_tool_bindings.capability_version_id",
+            ],
             ondelete="RESTRICT",
         ),
         UniqueConstraint("snapshot_id", "capability_version_id"),
@@ -572,6 +581,7 @@ class DiscoverySnapshotCapability(Base):
     id: Mapped[UuidPrimaryKey]
     workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
     connection_id: Mapped[UUID]
+    connection_version_id: Mapped[UUID]
     snapshot_id: Mapped[UUID]
     capability_version_id: Mapped[UUID]
     created_at: Mapped[CreatedAt]

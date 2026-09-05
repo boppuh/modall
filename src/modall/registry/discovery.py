@@ -326,6 +326,7 @@ class DiscoveryPublicationService:
                 DiscoverySnapshotCapability(
                     workspace_id=context.workspace_id,
                     connection_id=lease.connection_id,
+                    connection_version_id=lease.connection_version_id,
                     snapshot_id=snapshot.id,
                     capability_version_id=version.id,
                 )

@@ -261,12 +261,12 @@ def _canonical_json(value: object) -> bytes:
 def _schema_is_supported(
     input_schema: dict[str, Any], output_schema: dict[str, Any] | None
 ) -> bool:
-    stack: list[tuple[object, int]] = [(input_schema, 1)]
+    stack: list[tuple[object, int, bool]] = [(input_schema, 1, True)]
     if output_schema is not None:
-        stack.append((output_schema, 1))
+        stack.append((output_schema, 1, True))
     nodes = 0
     while stack:
-        value, depth = stack.pop()
+        value, depth, schema_position = stack.pop()
         nodes += 1
         if depth > 32 or nodes > 4096:
             return False
@@ -276,14 +276,18 @@ def _schema_is_supported(
             for key, child in value.items():
                 if not isinstance(key, str) or len(key) > 8192:
                     return False
-                if key == "pattern" and (not isinstance(child, str) or len(child) > 512):
+                if (
+                    schema_position
+                    and key == "pattern"
+                    and (not isinstance(child, str) or len(child) > 512)
+                ):
                     return False
-                if key == "pattern" and isinstance(child, str):
+                if schema_position and key == "pattern" and isinstance(child, str):
                     try:
                         re2.compile(child)
                     except re2.error:
                         return False
-                if key == "patternProperties" and isinstance(child, dict):
+                if schema_position and key == "patternProperties" and isinstance(child, dict):
                     for pattern in child:
                         if len(pattern) > 512:
                             return False
@@ -291,19 +295,65 @@ def _schema_is_supported(
                             re2.compile(pattern)
                         except re2.error:
                             return False
-                if key == "$id":
+                if schema_position and key == "$id":
                     return False
-                if key == "$schema" and child != "https://json-schema.org/draft/2020-12/schema":
-                    return False
-                if key in {"$ref", "$dynamicRef", "$recursiveRef"} and (
-                    not isinstance(child, str) or not child.startswith("#")
+                if (
+                    schema_position
+                    and key == "$schema"
+                    and child != "https://json-schema.org/draft/2020-12/schema"
                 ):
                     return False
-                stack.append((child, depth + 1))
+                if (
+                    schema_position
+                    and key in {"$ref", "$dynamicRef", "$recursiveRef"}
+                    and (not isinstance(child, str) or not child.startswith("#"))
+                ):
+                    return False
+                if (
+                    schema_position
+                    and key
+                    in {
+                        "$defs",
+                        "definitions",
+                        "properties",
+                        "patternProperties",
+                        "dependentSchemas",
+                    }
+                    and isinstance(child, dict)
+                ):
+                    stack.extend((item, depth + 2, True) for item in child.values())
+                elif (
+                    schema_position
+                    and key
+                    in {
+                        "allOf",
+                        "anyOf",
+                        "oneOf",
+                        "prefixItems",
+                    }
+                    and isinstance(child, list)
+                ):
+                    stack.extend((item, depth + 1, True) for item in child)
+                elif schema_position and key in {
+                    "additionalProperties",
+                    "contains",
+                    "contentSchema",
+                    "else",
+                    "if",
+                    "items",
+                    "not",
+                    "propertyNames",
+                    "then",
+                    "unevaluatedItems",
+                    "unevaluatedProperties",
+                }:
+                    stack.append((child, depth + 1, True))
+                else:
+                    stack.append((child, depth + 1, False))
         elif isinstance(value, list):
             if len(value) > 1024:
                 return False
-            stack.extend((child, depth + 1) for child in value)
+            stack.extend((child, depth + 1, False) for child in value)
         elif isinstance(value, str):
             if len(value) > 8192:
                 return False

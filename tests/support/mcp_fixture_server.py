@@ -39,6 +39,8 @@ SUPPORTED_PROFILES = {
     "storage-oversized-schema",
     "oversized-scalar",
     "structured-secret",
+    "nested-structured-secret",
+    "keyword-property-names",
     "repeated-cursor",
     *AUTHENTICATED_PROFILES,
 }
@@ -73,6 +75,12 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         schema["properties"] = {
             f"field{index}": {"type": "string", "description": "x" * 160} for index in range(900)
         }
+    if profile == "keyword-property-names":
+        schema["properties"] = {
+            "pattern": {"type": "string"},
+            "$id": {"type": "string"},
+            "$ref": {"type": "string"},
+        }
     first_tool: dict[str, Any] = {
         "name": "echo",
         "title": "Echo",
@@ -86,6 +94,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
     }
     if profile == "structured-secret":
         first_tool["_meta"] = {"api_key": "abcdefgh1234"}
+    if profile == "nested-structured-secret":
+        first_tool["_meta"] = {"api_key": {"value": "abcdefgh1234"}}
     return [
         first_tool,
         {

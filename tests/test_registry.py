@@ -111,6 +111,7 @@ async def establish_current_snapshot(
         DiscoverySnapshotCapability(
             workspace_id=context.workspace_id,
             connection_id=connection.id,
+            connection_version_id=connection_version_id,
             snapshot_id=snapshot.id,
             capability_version_id=capability_version.id,
         )
@@ -490,6 +491,26 @@ def test_connection_configuration_allows_explicit_local_loopback_fixture() -> No
                     policy_version="v1",
                 )
                 assert connection.pending_version_id is not None
+
+                binding = SecretBinding(
+                    workspace_id=workspace_id,
+                    provider="fixture",
+                    external_reference="local-http-secret",
+                    version="v1",
+                    created_by_user_id=admin_id,
+                )
+                session.add(binding)
+                await session.flush()
+                with pytest.raises(ValueError, match="HTTPS"):
+                    await ConnectionService(
+                        session, environment="test", allow_loopback_http=True
+                    ).create(
+                        context=context,
+                        name="Credentialed local fixture",
+                        endpoint_url="http://127.0.0.1:8000/mcp",
+                        secret_binding_id=binding.id,
+                        policy_version="v1",
+                    )
 
                 with pytest.raises(ValueError, match="restricted"):
                     ConnectionService(

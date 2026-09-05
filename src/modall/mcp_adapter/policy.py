@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 import httpcore
 import httpx
+import idna
 
 
 class EndpointPolicyError(Exception):
@@ -81,8 +82,8 @@ class EndpointPolicy:
         ):
             raise EndpointPolicyError("endpoint rejected")
         try:
-            host = parsed.hostname.encode("idna").decode("ascii").lower().removesuffix(".")
-        except UnicodeError as exc:
+            host = idna.encode(parsed.hostname.lower().removesuffix(".")).decode("ascii")
+        except idna.IDNAError as exc:
             raise EndpointPolicyError("endpoint rejected") from exc
         addresses = await self._resolver(host, port)
         if not addresses:

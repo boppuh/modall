@@ -21,9 +21,9 @@ def upgrade() -> None:
     )
     op.alter_column("capability_versions", "schema_supported", server_default=None)
     op.create_unique_constraint(
-        "uq_mcp_binding_connection_capability_version",
+        "uq_mcp_binding_connection_version_capability_version",
         "mcp_tool_bindings",
-        ["connection_id", "capability_version_id"],
+        ["connection_id", "connection_version_id", "capability_version_id"],
     )
 
     op.create_table(
@@ -74,6 +74,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("workspace_id", "id"),
         sa.UniqueConstraint("connection_id", "id"),
+        sa.UniqueConstraint("connection_id", "connection_version_id", "id"),
         sa.UniqueConstraint("connection_id", "generation"),
     )
     op.create_foreign_key(
@@ -90,6 +91,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("workspace_id", sa.Uuid(), nullable=False),
         sa.Column("connection_id", sa.Uuid(), nullable=False),
+        sa.Column("connection_version_id", sa.Uuid(), nullable=False),
         sa.Column("snapshot_id", sa.Uuid(), nullable=False),
         sa.Column("capability_version_id", sa.Uuid(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -100,8 +102,12 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
-            ["connection_id", "snapshot_id"],
-            ["discovery_snapshots.connection_id", "discovery_snapshots.id"],
+            ["connection_id", "connection_version_id", "snapshot_id"],
+            [
+                "discovery_snapshots.connection_id",
+                "discovery_snapshots.connection_version_id",
+                "discovery_snapshots.id",
+            ],
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
@@ -110,8 +116,12 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["connection_id", "capability_version_id"],
-            ["mcp_tool_bindings.connection_id", "mcp_tool_bindings.capability_version_id"],
+            ["connection_id", "connection_version_id", "capability_version_id"],
+            [
+                "mcp_tool_bindings.connection_id",
+                "mcp_tool_bindings.connection_version_id",
+                "mcp_tool_bindings.capability_version_id",
+            ],
             ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -184,7 +194,7 @@ def downgrade() -> None:
     op.drop_column("server_connections", "last_refresh_error_code")
     op.drop_column("server_connections", "current_snapshot_id")
     op.drop_constraint(
-        "uq_mcp_binding_connection_capability_version",
+        "uq_mcp_binding_connection_version_capability_version",
         "mcp_tool_bindings",
         type_="unique",
     )

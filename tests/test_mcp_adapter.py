@@ -83,6 +83,10 @@ def test_adapter_discovers_bounded_domain_types_and_drift() -> None:
             unsafe = await unsafe_client.discover(unsafe_endpoint)
             assert unsafe.tools[0].schema_supported is False
 
+        keyword_client, keyword_endpoint = adapter_for("keyword-property-names")
+        keyword_names = await keyword_client.discover(keyword_endpoint)
+        assert keyword_names.tools[0].schema_supported is True
+
     asyncio.run(scenario())
 
 
@@ -120,9 +124,10 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
         with pytest.raises(DiscoveryError, match="secret screening"):
             await escaped_leaking.discover(endpoint, bearer_token=ESCAPED_FIXTURE_TOKEN.encode())
 
-        structured, endpoint = adapter_for("structured-secret")
-        with pytest.raises(DiscoveryError, match="secret screening"):
-            await structured.discover(endpoint)
+        for profile in ("structured-secret", "nested-structured-secret"):
+            structured, endpoint = adapter_for(profile)
+            with pytest.raises(DiscoveryError, match="secret screening"):
+                await structured.discover(endpoint)
 
         oversized_scalar, endpoint = adapter_for("oversized-scalar")
         with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
@@ -157,6 +162,8 @@ def test_endpoint_policy_rejects_unsafe_resolution_and_scheme_combinations() -> 
         await public.validate("https://mcp.example/tools")
         trailing_dot = await public.validate("https://mcp.example./tools")
         assert trailing_dot.host == "mcp.example"
+        unicode_host = await public.validate("https://faß.de/tools")
+        assert unicode_host.host == "xn--fa-hia.de"
         rejected = (
             (public, "http://mcp.example/tools"),
             (public, "https://user@mcp.example/tools"),

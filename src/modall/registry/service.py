@@ -71,7 +71,9 @@ class ConnectionService:
     ) -> ServerConnection:
         await require_current_role(self._session, context, Role.ADMIN, serialize_workspace=True)
         normalized_name = self._validate_name(name)
-        self._validate_configuration(endpoint_url, policy_version)
+        self._validate_configuration(
+            endpoint_url, policy_version, has_secret=secret_binding_id is not None
+        )
         await self._require_scoped_secret(context, secret_binding_id)
 
         connection_id = uuid4()
@@ -117,7 +119,9 @@ class ConnectionService:
         correlation_id: UUID | None = None,
     ) -> ServerConnectionVersion:
         await require_current_role(self._session, context, Role.ADMIN, serialize_workspace=True)
-        self._validate_configuration(endpoint_url, policy_version)
+        self._validate_configuration(
+            endpoint_url, policy_version, has_secret=secret_binding_id is not None
+        )
         await self._require_scoped_secret(context, secret_binding_id)
         connection = await self._locked_connection(context, connection_id)
         if connection.typed_lifecycle == ConnectionLifecycle.DISABLED:
@@ -345,7 +349,9 @@ class ConnectionService:
             raise ValueError("connection name is not valid UTF-8") from exc
         return normalized
 
-    def _validate_configuration(self, endpoint_url: str, policy_version: str) -> None:
+    def _validate_configuration(
+        self, endpoint_url: str, policy_version: str, *, has_secret: bool
+    ) -> None:
         if not endpoint_url or len(endpoint_url) > 2048 or "\x00" in endpoint_url:
             raise ValueError("invalid endpoint URL")
         try:
@@ -406,6 +412,8 @@ class ConnectionService:
             or (not local_fixture and port not in {None, 443})
         ):
             raise ValueError("invalid endpoint URL")
+        if local_fixture and has_secret:
+            raise ValueError("credentials require an HTTPS endpoint")
         if re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path):
             raise ValueError("invalid endpoint URL")
         try:
@@ -648,11 +656,17 @@ class CapabilityService:
             .execution_options(populate_existing=True)
         )
         observed = None
-        if connection is not None and connection.current_snapshot_id is not None:
+        if (
+            connection is not None
+            and connection.current_snapshot_id is not None
+            and binding is not None
+        ):
             observed = await self._session.scalar(
                 select(DiscoverySnapshotCapability.id).where(
                     DiscoverySnapshotCapability.workspace_id == context.workspace_id,
                     DiscoverySnapshotCapability.connection_id == capability.connection_id,
+                    DiscoverySnapshotCapability.connection_version_id
+                    == binding.connection_version_id,
                     DiscoverySnapshotCapability.snapshot_id == connection.current_snapshot_id,
                     DiscoverySnapshotCapability.capability_version_id == expected_version_id,
                 )

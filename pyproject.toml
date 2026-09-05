@@ -19,6 +19,7 @@ dependencies = [
   "mcp==1.29.1",
   "google-re2>=1.1,<2",
   "httpx>=0.28,<1",
+  "idna>=3.10,<4",
   "jsonschema>=4.25,<5",
 ]
 
