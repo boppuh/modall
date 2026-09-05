@@ -216,12 +216,18 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
         session_leaking, endpoint = adapter_for(
             "credential-session-id-leak", limits=fast_failure_limits
         )
-        with pytest.raises(DiscoveryError):
+        with pytest.raises(DiscoveryError, match="MCP discovery failed"):
             await session_leaking.discover(endpoint, bearer_token=FIXTURE_TOKEN.encode())
 
         raw_leaking, endpoint = adapter_for("credential-raw-extension", limits=fast_failure_limits)
-        with pytest.raises(DiscoveryError):
+        with pytest.raises(DiscoveryError, match="secret screening rejected metadata"):
             await raw_leaking.discover(endpoint, bearer_token=FIXTURE_TOKEN.encode())
+
+        unicode_leaking, endpoint = adapter_for(
+            "credential-raw-unicode-extension", limits=fast_failure_limits
+        )
+        with pytest.raises(DiscoveryError, match="secret screening rejected metadata"):
+            await unicode_leaking.discover(endpoint, bearer_token=FIXTURE_TOKEN.encode())
 
         for profile in (
             "structured-secret",
@@ -242,6 +248,7 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
             "malformed-sensitive-property",
             "sensitive-property-ref",
             "sensitive-property-recursive-ref",
+            "sensitive-property-annotation",
         ):
             unsafe_schema, endpoint = adapter_for(profile)
             with pytest.raises(DiscoveryError, match="invalid discovery metadata"):

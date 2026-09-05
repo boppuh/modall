@@ -25,6 +25,7 @@ _SENSITIVE_JSON_FIELD = re.compile(
     r"(?:$|[_-])",
     re.IGNORECASE,
 )
+_OPAQUE_ANNOTATION_VALUE = re.compile(r"[A-Za-z0-9._~+/=\-]{8,}\Z")
 
 
 def _is_sensitive_field(key: str) -> bool:
@@ -51,6 +52,7 @@ def contains_sensitive_schema(value: object) -> bool:
     anchors = _index_schema_anchors(value)
     reference_cache: dict[str, object | None] = {}
     literal_keys = {"const", "default", "enum", "example", "examples"}
+    annotation_keys = {"$comment", "description", "title"}
     schema_map_keys = {"$defs", "definitions", "dependentSchemas", "patternProperties"}
     schema_keys = {
         "additionalProperties",
@@ -110,6 +112,16 @@ def contains_sensitive_schema(value: object) -> bool:
                     sensitive_property
                     and key in literal_keys
                     and _contains_obvious_secret_in_json(child, initially_sensitive=True)
+                ):
+                    return True
+                if (
+                    sensitive_property
+                    and key in annotation_keys
+                    and isinstance(child, str)
+                    and (
+                        _OPAQUE_ANNOTATION_VALUE.fullmatch(child) is not None
+                        or contains_obvious_secret(child)
+                    )
                 ):
                     return True
                 if key not in literal_keys and contains_sensitive_json({key: child}):

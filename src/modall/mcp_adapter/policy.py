@@ -216,13 +216,14 @@ class LimitedByteStream(httpx.AsyncByteStream):
         self._forbidden_values = forbidden_values
         self._mark_sensitive_response = mark_sensitive_response
         self._tail = b""
-        self._tail_limit = max((len(value) for value in forbidden_values), default=0) + 256
+        self._tail_limit = max((len(value) for value in forbidden_values), default=0) * 6 + 256
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         async for chunk in self._stream:
             self._budget.consume(len(chunk))
             window = self._tail + chunk
-            if any(value in window for value in self._forbidden_values):
+            decoded_window = _decode_visible_json_escapes(window)
+            if any(value in decoded_window for value in self._forbidden_values):
                 self._mark_sensitive_response()
                 raise EndpointPolicyError("sensitive upstream response body")
             self._tail = window[-self._tail_limit :]
@@ -230,6 +231,38 @@ class LimitedByteStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         await self._stream.aclose()
+
+
+def _decode_visible_json_escapes(value: bytes) -> bytes:
+    """Decode one JSON escape layer for visible ASCII credential screening."""
+
+    decoded = bytearray()
+    index = 0
+    short_escapes = {ord('"'): ord('"'), ord("\\"): ord("\\"), ord("/"): ord("/")}
+    while index < len(value):
+        if value[index] == ord("\\") and index + 1 < len(value):
+            escaped = value[index + 1]
+            if escaped in short_escapes:
+                decoded.append(short_escapes[escaped])
+                index += 2
+                continue
+            if (
+                index + 5 < len(value)
+                and escaped == ord("u")
+                and value[index + 2 : index + 4] == b"00"
+            ):
+                try:
+                    character = int(value[index + 4 : index + 6], 16)
+                except ValueError:
+                    pass
+                else:
+                    if 33 <= character <= 126:
+                        decoded.append(character)
+                        index += 6
+                        continue
+        decoded.append(value[index])
+        index += 1
+    return bytes(decoded)
 
 
 class RawByteBudget:

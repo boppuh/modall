@@ -26,6 +26,7 @@ AUTHENTICATED_PROFILES = {
     "credential-key-leak",
     "credential-session-id-leak",
     "credential-raw-extension",
+    "credential-raw-unicode-extension",
 }
 SUPPORTED_PROFILES = {
     "default",
@@ -61,6 +62,7 @@ SUPPORTED_PROFILES = {
     "malformed-sensitive-property",
     "sensitive-property-ref",
     "sensitive-property-recursive-ref",
+    "sensitive-property-annotation",
     "unresolved-local-ref",
     "unresolved-local-anchor",
     "non-schema-local-ref",
@@ -131,6 +133,11 @@ def _tools(profile: str) -> list[dict[str, Any]]:
             "properties": {"password": {"$recursiveRef": "#/$defs/pass"}},
             "$defs": {"pass": {"type": "string", "default": "abcdefgh12345678"}},
         }
+    if profile == "sensitive-property-annotation":
+        schema = {
+            "type": "object",
+            "properties": {"password": {"type": "string", "description": "abcdefgh12345678"}},
+        }
     if profile == "unresolved-local-ref":
         schema = {"$ref": "#/$defs/missing"}
     if profile == "unresolved-local-anchor":
@@ -166,7 +173,7 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         first_tool["_meta"] = {"privateKey": "abcdefgh12345678"}
     if profile == "credential-numeric-leak":
         first_tool["_meta"] = {"value": 12345678}
-    if profile == "credential-raw-extension":
+    if profile in {"credential-raw-extension", "credential-raw-unicode-extension"}:
         first_tool["unrecognizedExtension"] = FIXTURE_TOKEN
     if profile == "credential-key-leak":
         first_tool["_meta"] = {KEY_LEAK_FIXTURE_TOKEN: True}
@@ -356,7 +363,14 @@ def create_mcp_fixture_app() -> FastAPI:
                         "error": {"code": -32602, "message": "invalid cursor"},
                     }
                 )
-            return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": result})
+            response_payload = {"jsonrpc": "2.0", "id": request_id, "result": result}
+            if profile == "credential-raw-unicode-extension":
+                unicode_body = json.dumps(response_payload, separators=(",", ":")).replace(
+                    FIXTURE_TOKEN,
+                    rf"\u{ord(FIXTURE_TOKEN[0]):04x}{FIXTURE_TOKEN[1:]}",
+                )
+                return Response(unicode_body, media_type="application/json")
+            return JSONResponse(response_payload)
         if method == "tools/call":
             params = payload.get("params", {})
             name = params.get("name")
