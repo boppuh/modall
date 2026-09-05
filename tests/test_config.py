@@ -6,7 +6,8 @@ from pydantic import ValidationError
 from modall.config import Settings
 
 
-def test_settings_use_safe_local_defaults() -> None:
+def test_settings_use_safe_local_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MODALL_DATABASE_URL", raising=False)
     settings = Settings(_env_file=None)
 
     assert settings.environment == "local"
@@ -19,3 +20,66 @@ def test_settings_use_safe_local_defaults() -> None:
 def test_settings_reject_unsafe_poll_intervals(interval: float) -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, worker_poll_interval_seconds=interval)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"environment": "production"},
+        {
+            "environment": "production",
+            "auth_mode": "oidc",
+            "oidc_issuer": "https://issuer.example",
+            "oidc_audience": "modall",
+            "oidc_jwks_url": "https://issuer.example/jwks",
+        },
+        {"auth_mode": "oidc"},
+        {
+            "auth_mode": "oidc",
+            "oidc_issuer": "http://issuer.example",
+            "oidc_audience": "modall",
+            "oidc_jwks_url": "https://issuer.example/jwks",
+        },
+        {"local_subject": "  "},
+        {"local_subject": "s" * 513},
+    ],
+)
+def test_settings_reject_confused_security_modes(overrides: dict[str, str]) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **overrides)  # type: ignore[arg-type]
+
+
+def test_deployed_security_mode_requires_oidc_and_mounted_secrets() -> None:
+    settings = Settings(
+        _env_file=None,
+        environment="staging",
+        auth_mode="oidc",
+        oidc_issuer="https://issuer.example",
+        oidc_audience="modall",
+        oidc_jwks_url="https://issuer.example/jwks",
+        secret_provider="mounted_file",
+    )
+
+    assert settings.auth_mode == "oidc"
+    assert settings.oidc_issuer == "https://issuer.example"
+    assert settings.secret_provider == "mounted_file"
+
+
+@pytest.mark.parametrize(
+    "issuer",
+    [
+        "https://user@issuer.example",
+        "https://issuer.example?tenant=x",
+        "https://issuer.example#fragment",
+    ],
+)
+def test_oidc_issuer_rejects_forbidden_components(issuer: str) -> None:
+    with pytest.raises(ValidationError, match="not conforming"):
+        Settings(
+            _env_file=None,
+            environment="test",
+            auth_mode="oidc",
+            oidc_issuer=issuer,
+            oidc_audience="modall",
+            oidc_jwks_url="https://issuer.example/jwks",
+        )

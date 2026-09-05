@@ -22,7 +22,7 @@ services:
     build:
       context: .
       dockerfile: docker/python.Dockerfile
-    command: ["modall-api"]
+    command: ["sh", "-c", "alembic upgrade head && exec modall-api"]
     environment:
       MODALL_DATABASE_URL: postgresql://modall:modall@postgres:5432/modall
       MODALL_ENVIRONMENT: local
@@ -56,7 +56,7 @@ services:
       MODALL_LOG_LEVEL: ${MODALL_LOG_LEVEL:-INFO}
       MODALL_WORKER_POLL_INTERVAL_SECONDS: ${MODALL_WORKER_POLL_INTERVAL_SECONDS:-1}
     depends_on:
-      postgres:
+      api:
         condition: service_healthy
     restart: unless-stopped
 
