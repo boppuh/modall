@@ -321,7 +321,8 @@ class ConnectionService:
             decoded_path = unquote(parsed.path, errors="strict")
         except UnicodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
-        if _contains_obvious_secret(decoded_path):
+        canonical_endpoint = f"https://{hostname}{':443' if port == 443 else ''}{decoded_path}"
+        if _contains_obvious_secret(canonical_endpoint):
             raise ValueError("endpoint URL contains credential-shaped content")
         if cls._POLICY_VERSION.fullmatch(policy_version) is None:
             raise ValueError("invalid policy version")
@@ -696,7 +697,7 @@ class CapabilityService:
             raise ValueError("invalid protocol revision")
         scalar_metadata = "\n".join(
             value
-            for value in (tool_identity, tool_name, display_name, description)
+            for value in (tool_identity, tool_name, display_name, description, protocol_revision)
             if value is not None
         )
         if _contains_obvious_secret(scalar_metadata):
@@ -759,5 +760,32 @@ def _validate_schema_payload(
         raise ValueError("schema is not bounded JSON") from exc
     if len(encoded.encode("utf-8")) > 131_072:
         raise ValueError("schema exceeds serialized size limit")
-    if _contains_obvious_secret(encoded):
+    if _contains_obvious_secret(encoded) or any(
+        _contains_obvious_secret_in_json(root) for root in roots
+    ):
         raise ValueError("schema contains credential-shaped content")
+
+
+_SENSITIVE_JSON_FIELD = re.compile(
+    r"(?:api[_-]?key|access[_-]?token|secret|password)", re.IGNORECASE
+)
+
+
+def _contains_obvious_secret_in_json(value: object) -> bool:
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, child in current.items():
+                if (
+                    _SENSITIVE_JSON_FIELD.fullmatch(key)
+                    and isinstance(child, str)
+                    and len(child) >= 8
+                ):
+                    return True
+                stack.append(child)
+        elif isinstance(current, list):
+            stack.extend(current)
+        elif isinstance(current, str) and _contains_obvious_secret(current):
+            return True
+    return False

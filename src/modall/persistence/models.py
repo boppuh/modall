@@ -1,7 +1,7 @@
 """Identity, workspace, secret-binding, and audit persistence models."""
 
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -475,6 +475,23 @@ def _reject_immutable_update(mapper: Mapper[object], connection: object, target:
         raise ValueError("immutable version rows cannot be updated")
 
 
+def _reject_immutable_delete(mapper: Mapper[object], connection: object, target: object) -> None:
+    del mapper, connection, target
+    raise ValueError("immutable version rows cannot be deleted independently")
+
+
+def _reject_capability_identity_update(
+    mapper: Mapper[object], connection: object, target: object
+) -> None:
+    del mapper, connection
+    capability = cast(Capability, target)
+    if any(
+        get_history(capability, attribute).has_changes()
+        for attribute in ("workspace_id", "connection_id", "tool_identity")
+    ):
+        raise ValueError("capability identity cannot be updated")
+
+
 for immutable_model in (
     SecretBinding,
     RegistryEntryVersion,
@@ -484,3 +501,6 @@ for immutable_model in (
     CapabilityStatusEvent,
 ):
     event.listen(immutable_model, "before_update", _reject_immutable_update)
+
+event.listen(McpToolBinding, "before_delete", _reject_immutable_delete)
+event.listen(Capability, "before_update", _reject_capability_identity_update)

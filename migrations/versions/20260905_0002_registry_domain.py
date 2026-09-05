@@ -354,9 +354,38 @@ def upgrade() -> None:
             f"CREATE TRIGGER {table}_immutable BEFORE UPDATE ON {table} "
             "FOR EACH ROW EXECUTE FUNCTION modall_reject_immutable_update()"
         )
+    op.execute(
+        "CREATE FUNCTION modall_reject_binding_delete() RETURNS trigger "
+        "LANGUAGE plpgsql AS $$ BEGIN "
+        "IF EXISTS (SELECT 1 FROM capability_versions "
+        "WHERE id = OLD.capability_version_id) THEN "
+        "RAISE EXCEPTION 'immutable binding row'; END IF; RETURN OLD; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER mcp_tool_bindings_immutable_delete "
+        "BEFORE DELETE ON mcp_tool_bindings FOR EACH ROW "
+        "EXECUTE FUNCTION modall_reject_binding_delete()"
+    )
+    op.execute(
+        "CREATE FUNCTION modall_reject_capability_identity_update() RETURNS trigger "
+        "LANGUAGE plpgsql AS $$ BEGIN "
+        "IF NEW.workspace_id IS DISTINCT FROM OLD.workspace_id "
+        "OR NEW.connection_id IS DISTINCT FROM OLD.connection_id "
+        "OR NEW.tool_identity IS DISTINCT FROM OLD.tool_identity THEN "
+        "RAISE EXCEPTION 'immutable capability identity'; END IF; RETURN NEW; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER capabilities_immutable_identity "
+        "BEFORE UPDATE ON capabilities FOR EACH ROW "
+        "EXECUTE FUNCTION modall_reject_capability_identity_update()"
+    )
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER IF EXISTS capabilities_immutable_identity ON capabilities")
+    op.execute("DROP FUNCTION IF EXISTS modall_reject_capability_identity_update()")
+    op.execute("DROP TRIGGER IF EXISTS mcp_tool_bindings_immutable_delete ON mcp_tool_bindings")
+    op.execute("DROP FUNCTION IF EXISTS modall_reject_binding_delete()")
     for table in (
         "secret_bindings",
         "registry_entry_versions",

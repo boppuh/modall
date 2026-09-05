@@ -15,6 +15,7 @@ from modall.persistence.database import create_engine, create_session_factory, t
 from modall.persistence.models import (
     AuditEvent,
     Base,
+    Capability,
     CapabilityStatusEvent,
     CapabilityVersion,
     McpToolBinding,
@@ -336,6 +337,7 @@ def test_connection_versions_are_immutable() -> None:
         "https://mcp.example/%ZZ",
         "https://mcp.example/sk_live_abcdefghijkl",
         "https://mcp.example/%73%6b_live_abcdefghijkl",
+        "https://sk-abcdefghijklmnop.example.com/mcp",
     ],
 )
 def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> None:
@@ -521,6 +523,20 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
                     event_row.status = CapabilityStatus.DISABLED.value
                     await session.flush()
 
+            with pytest.raises(ValueError, match="deleted independently"):
+                async with transaction(factory) as session:
+                    binding = await session.get(McpToolBinding, first.id)
+                    assert binding is not None
+                    await session.delete(binding)
+                    await session.flush()
+
+            with pytest.raises(ValueError, match="capability identity"):
+                async with transaction(factory) as session:
+                    stored_capability = await session.get(Capability, first.capability_id)
+                    assert stored_capability is not None
+                    stored_capability.tool_identity = "tools/retargeted"
+                    await session.flush()
+
     asyncio.run(scenario())
 
 
@@ -529,6 +545,7 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
     [
         {"description": "x" * 8193},
         {"default": "sk_live_abcdefghijkl"},
+        {"api_key": "abcdefghijkl"},
         {"properties": {str(index): {} for index in range(1025)}},
     ],
 )
@@ -612,6 +629,20 @@ def test_capability_metadata_rejects_excessive_schema_depth() -> None:
                     )
 
     asyncio.run(scenario())
+
+
+def test_capability_metadata_rejects_credential_shaped_protocol_revision() -> None:
+    with pytest.raises(ValueError, match="credential-shaped"):
+        CapabilityService._validate_metadata(
+            tool_identity="tools/review",
+            tool_name="review",
+            display_name="Review",
+            description=None,
+            input_schema={},
+            output_schema=None,
+            metadata_digest="a" * 64,
+            protocol_revision="sk-abcdefghijklmnop",
+        )
 
 
 def test_stale_verification_cannot_survive_disable_enable() -> None:
