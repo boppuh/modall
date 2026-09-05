@@ -5,7 +5,7 @@ from itertools import count
 from typing import Any
 
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
 PROTOCOL_REVISION = "2025-06-18"
 FIXTURE_TOKEN = "fixture-token-not-a-real-secret"
@@ -69,7 +69,9 @@ def create_mcp_fixture_app() -> FastAPI:
         mcp_protocol_version: str | None = Header(default=None),
         mcp_session_id: str | None = Header(default=None),
     ) -> Response:
-        if profile == "authenticated" and authorization != f"Bearer {FIXTURE_TOKEN}":
+        if profile in {"authenticated", "authenticated-redirect"} and authorization != (
+            f"Bearer {FIXTURE_TOKEN}"
+        ):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         accepted_types = {item.strip() for item in (accept or "").split(",")}
         if not {"application/json", "text/event-stream"}.issubset(accepted_types):
@@ -78,6 +80,8 @@ def create_mcp_fixture_app() -> FastAPI:
         payload = await request.json()
         method = payload.get("method")
         request_id = payload.get("id")
+        if profile in {"redirect", "authenticated-redirect"}:
+            return RedirectResponse("https://redirect.invalid/mcp", status_code=307)
         if method == "initialize":
             requested_revision = payload.get("params", {}).get("protocolVersion")
             if requested_revision != PROTOCOL_REVISION:

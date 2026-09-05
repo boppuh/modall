@@ -366,11 +366,27 @@ def test_pinned_sdk_negotiates_and_parses_reference_server() -> None:
             authenticated_tools = await authenticated_session.list_tools()
             assert authenticated_tools.tools[0].name == "echo"
 
+        mismatch_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://fixture",
+        )
+        async with (
+            mismatch_client,
+            streamable_http_client(
+                "http://fixture/mcp/protocol-mismatch", http_client=mismatch_client
+            ) as (read_stream, write_stream, _),
+            ClientSession(read_stream, write_stream) as mismatch_session,
+        ):
+            mismatch = await _sdk_initialize(mismatch_session)
+            assert mismatch.protocolVersion == "2025-11-25"
+            mismatch_tools = await mismatch_session.list_tools()
+            assert mismatch_tools.tools[0].name == "echo"
+
     asyncio.run(scenario())
 
 
-def test_pinned_sdk_surfaces_timeout_and_disconnect_faults() -> None:
-    async def exercise(profile: str) -> None:
+def test_pinned_sdk_surfaces_response_and_transport_faults() -> None:
+    async def exercise(profile: str) -> types.ListToolsResult:
         http_client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=create_mcp_fixture_app()),
             base_url="http://fixture",
@@ -390,7 +406,7 @@ def test_pinned_sdk_surfaces_timeout_and_disconnect_faults() -> None:
             ) as session,
         ):
             await _sdk_initialize(session)
-            await session.list_tools()
+            return await session.list_tools()
 
     async def scenario() -> None:
         with pytest.raises(ExceptionGroup) as timeout_error:
@@ -406,6 +422,53 @@ def test_pinned_sdk_surfaces_timeout_and_disconnect_faults() -> None:
             isinstance(error, ConnectionError) for error in _leaf_exceptions(disconnect_error.value)
         )
 
+        with pytest.raises(ExceptionGroup) as malformed_error:
+            await exercise("malformed")
+        assert any(
+            isinstance(error, McpError) and "Timed out" in str(error)
+            for error in _leaf_exceptions(malformed_error.value)
+        )
+
+        oversized = await exercise("oversized")
+        padding = (oversized.model_extra or {}).get("padding")
+        assert isinstance(padding, str)
+        assert len(padding) > 262_144
+
+    asyncio.run(scenario())
+
+
+def test_pinned_sdk_does_not_follow_redirects_with_or_without_credentials() -> None:
+    async def exercise(profile: str, *, authenticated: bool) -> None:
+        headers = {"Authorization": f"Bearer {FIXTURE_TOKEN}"} if authenticated else {}
+        http_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_mcp_fixture_app()),
+            base_url="http://fixture",
+            headers=headers,
+        )
+        async with (
+            asyncio.timeout(1),
+            http_client,
+            streamable_http_client(f"http://fixture/mcp/{profile}", http_client=http_client) as (
+                read_stream,
+                write_stream,
+                _,
+            ),
+            ClientSession(read_stream, write_stream) as session,
+        ):
+            await _sdk_initialize(session)
+
+    async def scenario() -> None:
+        for profile, authenticated in (
+            ("redirect", False),
+            ("authenticated-redirect", True),
+        ):
+            with pytest.raises(ExceptionGroup) as redirect_error:
+                await exercise(profile, authenticated=authenticated)
+            assert any(
+                isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 307
+                for error in _leaf_exceptions(redirect_error.value)
+            )
+
     asyncio.run(scenario())
 
 
@@ -413,12 +476,17 @@ def test_recorded_registry_pages_are_offline_and_cursor_exact() -> None:
     manifest = json.loads((FIXTURES / "manifest.json").read_text())
     first = json.loads((FIXTURES / "search_page_1.json").read_text())
     second = json.loads((FIXTURES / "search_page_2.json").read_text())
+    recorded = json.loads((FIXTURES / "official_search_sample.json").read_text())
     assert manifest["apiRevision"] == "v0.1"
-    for filename, digest in manifest["files"].items():
-        assert hashlib.sha256((FIXTURES / filename).read_bytes()).hexdigest() == digest
+    assert "not captured upstream responses" in manifest["generated"]["purpose"]
+    for fixture_kind in ("generated", "recorded"):
+        for filename, digest in manifest[fixture_kind]["files"].items():
+            assert hashlib.sha256((FIXTURES / filename).read_bytes()).hexdigest() == digest
     assert first["metadata"]["nextCursor"] == "opaque-page-2"
     assert "nextCursor" not in second["metadata"]
     assert all(item["server"]["remotes"] for item in first["servers"] + second["servers"])
+    assert recorded["servers"][0]["server"]["name"] == ("io.github.domdomegg/airtable-mcp-server")
+    assert "io.modelcontextprotocol.registry/official" in recorded["servers"][0]["_meta"]
 
 
 def test_selected_sdk_supports_qualified_protocol_revision() -> None:

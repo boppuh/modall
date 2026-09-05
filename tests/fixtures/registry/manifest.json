@@ -1,11 +1,20 @@
 {
-  "source": "https://github.com/modelcontextprotocol/registry",
-  "sourceCommit": "6036804f1c62633b5e7d2927f411a6f4127f148a",
+  "sourceRepository": "https://github.com/modelcontextprotocol/registry",
+  "referenceCommit": "6036804f1c62633b5e7d2927f411a6f4127f148a",
   "apiRevision": "v0.1",
-  "capturedAt": "2026-09-05T00:00:00Z",
-  "files": {
-    "search_page_1.json": "ecd99b91edccfdf38b3bae7d400824947640b29b3fb4f93a7aa40b77b5ea81df",
-    "search_page_2.json": "de8545e27a72a5542fdf546f23d7aa83adbbc32c7725f4d09add7aee0f079812",
-    "upstream_error.json": "0b451a8674a4e4bde6221dc992bbdbc65adb44a191ffc1b42abd8f01cc33d211"
+  "generated": {
+    "purpose": "Deterministic pagination and outage scenarios; not captured upstream responses",
+    "files": {
+      "search_page_1.json": "ecd99b91edccfdf38b3bae7d400824947640b29b3fb4f93a7aa40b77b5ea81df",
+      "search_page_2.json": "de8545e27a72a5542fdf546f23d7aa83adbbc32c7725f4d09add7aee0f079812",
+      "upstream_error.json": "0b451a8674a4e4bde6221dc992bbdbc65adb44a191ffc1b42abd8f01cc33d211"
+    }
+  },
+  "recorded": {
+    "sourceUrl": "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.domdomegg%2Fairtable-mcp-server&limit=1",
+    "capturedAt": "2026-09-05T13:40:00Z",
+    "files": {
+      "official_search_sample.json": "fb8633b6e6eb549d2841dbb2691a4da6ddd4e8e50877a2e4f38015790adf4392"
+    }
   }
 }

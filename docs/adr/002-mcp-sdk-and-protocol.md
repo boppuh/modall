@@ -27,8 +27,11 @@ not an incidental dependency upgrade.
 deterministic Streamable HTTP fixture. The suite covers initialization, initialized
 notification, opaque-cursor pagination, schema and metadata drift, authentication, protocol
 mismatch, malformed and oversized responses, timeout, disconnect, text and structured
-results, unsupported content, and tool errors. Official Registry v0.1 response fixtures are
-stored with source commit and SHA-256 provenance and require no network access in CI.
+results, unsupported content, redirects, and tool errors. The pinned SDK accepts an otherwise
+valid oversized envelope, so PR06 must enforce the byte limit in the transport before domain
+normalization. A captured official Registry v0.1 response is stored with its request URL,
+capture time, and SHA-256 provenance; synthetic pagination/outage cases are labeled as generated.
+All fixtures require no network access in CI.
 
 ## Consequences
 
