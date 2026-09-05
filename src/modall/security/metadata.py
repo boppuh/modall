@@ -1,7 +1,9 @@
 """Storage-bound validation for untrusted metadata and JSON schemas."""
 
 import json
+import math
 import re
+from collections import Counter
 from urllib.parse import unquote
 
 
@@ -14,7 +16,7 @@ _OBVIOUS_SECRET = re.compile(
     r"gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|"
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
     r"(?:api[_-]?key|(?:access[_-]?)?token|credential|private[_-]?key|secret|password)"
-    r"[=:/_-]\s*[A-Za-z0-9._~+/=\-]{8,}|"
+    r"[=:/]\s*[A-Za-z0-9._~+/=\-]{8,}|"
     r"(?:authorization|authentication)\s*[:=]\s*(?:bearer\s+)?"
     r"[A-Za-z0-9._~+/=\-]{8,}|bearer\s+[A-Za-z0-9._~+/=\-]{8,})",
     re.IGNORECASE,
@@ -36,6 +38,15 @@ def _is_sensitive_field(key: str) -> bool:
 
 def contains_obvious_secret(value: str) -> bool:
     return _OBVIOUS_SECRET.search(value) is not None
+
+
+def _looks_like_opaque_annotation(value: str) -> bool:
+    if len(value) < 16 or _OPAQUE_ANNOTATION_VALUE.fullmatch(value) is None:
+        return False
+    counts = Counter(value)
+    length = len(value)
+    entropy_bits = sum(count * math.log2(length / count) for count in counts.values())
+    return entropy_bits >= 64
 
 
 def contains_sensitive_json(value: object) -> bool:
@@ -118,10 +129,7 @@ def contains_sensitive_schema(value: object) -> bool:
                     sensitive_property
                     and key in annotation_keys
                     and isinstance(child, str)
-                    and (
-                        _OPAQUE_ANNOTATION_VALUE.fullmatch(child) is not None
-                        or contains_obvious_secret(child)
-                    )
+                    and (_looks_like_opaque_annotation(child) or contains_obvious_secret(child))
                 ):
                     return True
                 if key not in literal_keys and contains_sensitive_json({key: child}):

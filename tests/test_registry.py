@@ -454,6 +454,7 @@ def test_connection_versions_are_immutable() -> None:
         "https://mcp.example/%73%6b_live_abcdefghijkl",
         "https://mcp.example/token%252Fabcdefgh12345678",
         "https://mcp.example/token%20abcdefgh12345678",
+        "https://mcp.example/token%00abcdefgh12345678",
         "https://sk-abcdefghijklmnop.example.com/mcp",
         "https://mcp.example/\ud800",
         "https://mcp.example../path",

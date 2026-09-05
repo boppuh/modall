@@ -113,6 +113,7 @@ def _tools(profile: str) -> list[dict[str, Any]]:
             "properties": {
                 "password": {
                     "type": "string",
+                    "title": "Password",
                     "description": "User password",
                 }
             },

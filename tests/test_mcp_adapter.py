@@ -102,6 +102,18 @@ def test_unstructured_secret_screen_recognizes_generic_markers(value: str) -> No
     assert contains_obvious_secret(value)
 
 
+@pytest.mark.parametrize(
+    "value",
+    (
+        "password-protected input",
+        "api-key-compatible endpoint",
+        "secret-management helper",
+    ),
+)
+def test_unstructured_secret_screen_allows_hyphenated_prose(value: str) -> None:
+    assert contains_obvious_secret(value) is False
+
+
 def test_adapter_discovers_bounded_domain_types_and_drift() -> None:
     async def scenario() -> None:
         client, endpoint = adapter_for("default")
