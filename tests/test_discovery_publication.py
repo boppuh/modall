@@ -169,6 +169,25 @@ def test_successful_refreshes_append_observations_deduplicate_and_detect_drift()
                     await session.scalar(select(func.count()).select_from(CapabilityVersion)) == 2
                 )
 
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                lease = await lease_for(session, context, connection_id, "worker-4")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context,
+                    lease=lease,
+                    result=result_for(),
+                )
+                capability = await session.scalar(
+                    select(Capability).where(Capability.connection_id == connection_id)
+                )
+                assert capability is not None
+                assert capability.typed_status == CapabilityStatus.ENABLED
+                assert capability.pending_version_id is None
+                assert capability.enabled_version_id is not None
+                assert (
+                    await session.scalar(select(func.count()).select_from(CapabilityVersion)) == 2
+                )
+
     asyncio.run(scenario())
 
 

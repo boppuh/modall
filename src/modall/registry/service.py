@@ -519,6 +519,16 @@ class CapabilityService:
             )
             if existing is not None:
                 if (
+                    existing.id == capability.enabled_version_id
+                    and capability.pending_version_id is not None
+                    and capability.typed_status
+                    in {CapabilityStatus.PENDING_REVIEW, CapabilityStatus.UNAVAILABLE}
+                ):
+                    capability.pending_version_id = None
+                    capability.status = CapabilityStatus.ENABLED.value
+                    capability.status_epoch += 1
+                    self._append_status_event(context, capability, existing.id)
+                elif (
                     capability.typed_status == CapabilityStatus.UNAVAILABLE
                     and capability.pending_version_id == existing.id
                 ):
@@ -712,37 +722,43 @@ class CapabilityService:
         protocol_revision: str,
         schema_supported: bool,
     ) -> CapabilityVersion | None:
-        current_id = capability.pending_version_id or capability.enabled_version_id
-        if current_id is None:
+        current_ids = [
+            version_id
+            for version_id in (capability.enabled_version_id, capability.pending_version_id)
+            if version_id is not None
+        ]
+        if not current_ids:
             return None
-        row = await self._session.execute(
+        rows = await self._session.execute(
             select(CapabilityVersion, McpToolBinding)
             .join(
                 McpToolBinding,
                 McpToolBinding.capability_version_id == CapabilityVersion.id,
             )
             .where(
-                CapabilityVersion.id == current_id,
+                CapabilityVersion.id.in_(current_ids),
                 CapabilityVersion.capability_id == capability.id,
                 CapabilityVersion.workspace_id == capability.workspace_id,
             )
         )
-        found = row.one_or_none()
-        if found is None:
-            return None
-        version, binding = found
-        if (
-            version.display_name == display_name
-            and version.description == description
-            and version.input_schema == input_schema
-            and version.output_schema == output_schema
-            and version.metadata_digest == metadata_digest
-            and version.schema_supported == schema_supported
-            and binding.connection_version_id == connection_version_id
-            and binding.tool_name == tool_name
-            and binding.protocol_revision == protocol_revision
-        ):
-            return cast(CapabilityVersion, version)
+        by_id = {version.id: (version, binding) for version, binding in rows.all()}
+        for current_id in current_ids:
+            found = by_id.get(current_id)
+            if found is None:
+                continue
+            version, binding = found
+            if (
+                version.display_name == display_name
+                and version.description == description
+                and version.input_schema == input_schema
+                and version.output_schema == output_schema
+                and version.metadata_digest == metadata_digest
+                and version.schema_supported == schema_supported
+                and binding.connection_version_id == connection_version_id
+                and binding.tool_name == tool_name
+                and binding.protocol_revision == protocol_revision
+            ):
+                return cast(CapabilityVersion, version)
         return None
 
     async def _locked_capability(
