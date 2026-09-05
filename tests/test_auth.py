@@ -27,22 +27,26 @@ class StaticResolver:
 
 def oidc_token(
     *,
-    audience: str = "modall",
+    audience: str | list[str] = "modall",
     issuer: str = "https://issuer.example",
+    authorized_party: str | None = None,
     expired: bool = False,
 ) -> tuple[str, bytes]:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     now = datetime.now(UTC)
     expiry = now - timedelta(minutes=1) if expired else now + timedelta(minutes=5)
+    claims: dict[str, object] = {
+        "iss": issuer,
+        "aud": audience,
+        "sub": "user-123",
+        "name": "Ada",
+        "iat": now,
+        "exp": expiry,
+    }
+    if authorized_party is not None:
+        claims["azp"] = authorized_party
     token = jwt.encode(
-        {
-            "iss": issuer,
-            "aud": audience,
-            "sub": "user-123",
-            "name": "Ada",
-            "iat": now,
-            "exp": expiry,
-        },
+        claims,
         private_key,
         algorithm="RS256",
     )
@@ -89,6 +93,63 @@ def test_oidc_authenticator_validates_and_maps_principal() -> None:
     )
 
 
+def test_oidc_authenticator_validates_multi_audience_authorized_party() -> None:
+    token, public_key = oidc_token(audience=["modall", "other"], authorized_party="modall")
+    authenticator = OidcAuthenticator(
+        issuer="https://issuer.example",
+        audience="modall",
+        resolver=StaticResolver(public_key),
+    )
+
+    assert authenticator.authenticate(token).subject == "user-123"
+
+
+@pytest.mark.parametrize("authorized_party", [None, "other"])
+def test_oidc_authenticator_rejects_invalid_multi_audience_authorized_party(
+    authorized_party: str | None,
+) -> None:
+    token, public_key = oidc_token(audience=["modall", "other"], authorized_party=authorized_party)
+    authenticator = OidcAuthenticator(
+        issuer="https://issuer.example",
+        audience="modall",
+        resolver=StaticResolver(public_key),
+    )
+
+    with pytest.raises(AuthenticationError):
+        authenticator.authenticate(token)
+
+
+def test_oidc_authenticator_suppresses_token_derived_causes() -> None:
+    class FailingResolver:
+        def resolve(self, token: str) -> bytes:
+            raise jwt.PyJWKClientError(f'attacker-controlled token data: "{token}"')
+
+    authenticator = OidcAuthenticator(
+        issuer="https://issuer.example",
+        audience="modall",
+        resolver=FailingResolver(),
+    )
+
+    with pytest.raises(AuthenticationError) as caught:
+        authenticator.authenticate("attacker-kid")
+    assert caught.value.__cause__ is None
+
+
+def test_oidc_authenticator_rejects_oversize_tokens_before_resolution() -> None:
+    class UnexpectedResolver:
+        def resolve(self, token: str) -> bytes:
+            raise AssertionError("oversize token reached key resolution")
+
+    authenticator = OidcAuthenticator(
+        issuer="https://issuer.example",
+        audience="modall",
+        resolver=UnexpectedResolver(),
+    )
+
+    with pytest.raises(AuthenticationError, match="size limit"):
+        authenticator.authenticate("x" * 16_385)
+
+
 @pytest.mark.parametrize("token_kind", ["missing", "expired", "wrong-audience", "malformed"])
 def test_oidc_authenticator_rejects_invalid_tokens(token_kind: str) -> None:
     token, public_key = oidc_token(
@@ -132,16 +193,68 @@ def test_jwks_resolver_returns_signing_key(monkeypatch: pytest.MonkeyPatch) -> N
     expected = object()
 
     class FakeClient:
-        def __init__(self, url: str, *, cache_jwk_set: bool, lifespan: int) -> None:
+        def __init__(
+            self,
+            url: str,
+            *,
+            cache_jwk_set: bool,
+            lifespan: int,
+            timeout: float,
+        ) -> None:
             assert url == "https://issuer.example/jwks"
             assert cache_jwk_set is True
             assert lifespan == 300
+            assert timeout == 2
 
-        def get_signing_key_from_jwt(self, token: str) -> object:
-            assert token == "token"
-            return expected
+        def get_signing_keys(self, *, refresh: bool = False) -> list[object]:
+            assert refresh is False
+            return [expected]
+
+        def match_kid(self, signing_keys: list[object], kid: str) -> object | None:
+            assert signing_keys == [expected]
+            return expected if kid == "known" else None
 
     monkeypatch.setattr("modall.identity.auth.PyJWKClient", FakeClient)
     resolver = PyJwkSigningKeyResolver("https://issuer.example/jwks")
+    token = jwt.encode({}, "s" * 32, algorithm="HS256", headers={"kid": "known"})
 
-    assert resolver.resolve("token") is expected
+    assert resolver.resolve(token) is expected
+
+
+def test_jwks_resolver_bounds_unknown_key_refreshes(monkeypatch: pytest.MonkeyPatch) -> None:
+    refresh_calls: list[bool] = []
+    now = [0.0]
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def get_signing_keys(self, *, refresh: bool = False) -> list[object]:
+            refresh_calls.append(refresh)
+            return []
+
+        def match_kid(self, signing_keys: list[object], kid: str) -> None:
+            return None
+
+    def token(kid: str) -> str:
+        return jwt.encode({}, "s" * 32, algorithm="HS256", headers={"kid": kid})
+
+    monkeypatch.setattr("modall.identity.auth.PyJWKClient", FakeClient)
+    resolver = PyJwkSigningKeyResolver(
+        "https://issuer.example/jwks",
+        refresh_interval_seconds=30,
+        clock=lambda: now[0],
+    )
+
+    with pytest.raises(AuthenticationError):
+        resolver.resolve(token("unknown-a"))
+    with pytest.raises(AuthenticationError):
+        resolver.resolve(token("unknown-b"))
+    assert True not in refresh_calls
+
+    now[0] = 31
+    with pytest.raises(AuthenticationError):
+        resolver.resolve(token("unknown-c"))
+    with pytest.raises(AuthenticationError):
+        resolver.resolve(token("unknown-c"))
+    assert refresh_calls.count(True) == 1

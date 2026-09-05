@@ -8,12 +8,19 @@ from modall.audit.types import AuditAction, ResourceType
 from modall.identity.repository import require_current_role
 from modall.identity.types import Role, WorkspaceContext
 from modall.persistence.models import AuditEvent, SecretBinding
-from modall.secrets.provider import SecretReference, validate_secret_reference
+from modall.secrets.provider import (
+    SecretProviderError,
+    SecretReference,
+    validate_secret_reference,
+)
 
 
 class SecretBindingService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, active_provider: str) -> None:
+        if active_provider not in {"fixture", "mounted_file"}:
+            raise ValueError("unsupported active secret provider")
         self._session = session
+        self._active_provider = active_provider
 
     async def create_binding(
         self,
@@ -28,6 +35,8 @@ class SecretBindingService:
             Role.ADMIN,
             serialize_workspace=True,
         )
+        if reference.provider != self._active_provider:
+            raise SecretProviderError("secret provider does not match active provider")
         validate_secret_reference(reference)
         binding = SecretBinding(
             workspace_id=context.workspace_id,

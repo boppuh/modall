@@ -21,11 +21,17 @@ class IdentityService:
         if (
             not principal.issuer.strip()
             or len(principal.issuer) > 512
+            or "\x00" in principal.issuer
             or not principal.subject.strip()
             or len(principal.subject) > 512
+            or "\x00" in principal.subject
         ):
             raise ValueError("principal identifiers must contain between 1 and 512 characters")
-        display_name = principal.display_name[:256] if principal.display_name is not None else None
+        display_name = (
+            principal.display_name.replace("\x00", "")[:256]
+            if principal.display_name is not None
+            else None
+        )
         statement = select(User).where(
             User.oidc_issuer == principal.issuer,
             User.oidc_subject == principal.subject,
@@ -60,7 +66,7 @@ class IdentityService:
         correlation_id: UUID | None = None,
     ) -> Workspace:
         normalized_name = name.strip()
-        if not normalized_name or len(normalized_name) > 128:
+        if not normalized_name or len(normalized_name) > 128 or "\x00" in normalized_name:
             raise ValueError("workspace name must contain between 1 and 128 characters")
         workspace = Workspace(name=normalized_name)
         self._session.add(workspace)

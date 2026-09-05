@@ -59,8 +59,10 @@ def validate_secret_reference(reference: SecretReference) -> None:
         if (
             not reference.external_reference.strip()
             or len(reference.external_reference) > 256
+            or "\x00" in reference.external_reference
             or not reference.version.strip()
             or len(reference.version) > 128
+            or "\x00" in reference.version
         ):
             raise SecretProviderError("invalid secret reference")
         return

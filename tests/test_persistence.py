@@ -74,7 +74,9 @@ def test_workspace_repository_isolation_authorization_and_atomic_audit() -> None
                     workspace_id=workspace_one,
                     permission=Permission.MANAGE_CONNECTION_CONFIGURATION,
                 )
-                binding_one = await SecretBindingService(session).create_binding(
+                binding_one = await SecretBindingService(
+                    session, active_provider="fixture"
+                ).create_binding(
                     context=context_one,
                     reference=SecretReference("fixture", "server-one", "v1"),
                     correlation_id=uuid4(),
@@ -87,7 +89,9 @@ def test_workspace_repository_isolation_authorization_and_atomic_audit() -> None
                     workspace_id=workspace_two,
                     permission=Permission.MANAGE_CONNECTION_CONFIGURATION,
                 )
-                binding_two = await SecretBindingService(session).create_binding(
+                binding_two = await SecretBindingService(
+                    session, active_provider="fixture"
+                ).create_binding(
                     context=context_two,
                     reference=SecretReference("fixture", "server-two", "v1"),
                 )
@@ -210,6 +214,8 @@ def test_user_resolution_is_idempotent_and_workspace_name_is_required() -> None:
                     await service.create_workspace(owner=first, name="   ")
                 with pytest.raises(ValueError, match="between 1 and 128"):
                     await service.create_workspace(owner=first, name="x" * 129)
+                with pytest.raises(ValueError, match="between 1 and 128"):
+                    await service.create_workspace(owner=first, name="team\x00name")
 
             async with factory() as session:
                 assert await session.scalar(select(func.count()).select_from(User)) == 2
@@ -279,7 +285,7 @@ def test_membership_mutation_rejects_a_stale_admin_context() -> None:
                         role=Role.ADMIN,
                     )
                 with pytest.raises(AuthorizationDenied):
-                    await SecretBindingService(session).create_binding(
+                    await SecretBindingService(session, active_provider="fixture").create_binding(
                         context=original_context,
                         reference=SecretReference("fixture", "stale", "v1"),
                     )
@@ -300,9 +306,18 @@ def test_secret_binding_rejects_unusable_metadata_before_persistence() -> None:
                     permission=Permission.MANAGE_CONNECTION_CONFIGURATION,
                 )
                 with pytest.raises(SecretProviderError, match="invalid"):
-                    await SecretBindingService(session).create_binding(
+                    await SecretBindingService(
+                        session, active_provider="mounted_file"
+                    ).create_binding(
                         context=context,
                         reference=SecretReference("mounted_file", "invalid/ref", "v1"),
+                    )
+                with pytest.raises(SecretProviderError, match="active provider"):
+                    await SecretBindingService(
+                        session, active_provider="mounted_file"
+                    ).create_binding(
+                        context=context,
+                        reference=SecretReference("fixture", "token", "v1"),
                     )
 
             async with factory() as session:
