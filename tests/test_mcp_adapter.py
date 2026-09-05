@@ -100,6 +100,7 @@ def test_structured_secret_screen_inspects_keys_beneath_sensitive_fields() -> No
         {"authentication": {"required": False}},
         {"authentication": {"type": "oauth2_required"}},
         {"tokenExpiration": 1700000000},
+        {"token": {"expires_at": 1700000000}},
     ),
 )
 def test_structured_secret_screen_allows_authentication_status_metadata(
@@ -116,6 +117,7 @@ def test_structured_secret_screen_allows_authentication_status_metadata(
         "credential=abcdefgh12345678",
         "Authorization: Bearer abcdefgh12345678",
         "token:\0abcdefgh12345678",
+        "token AbCdEfGhIjKlMnOpQrStUvWx",
     ),
 )
 def test_unstructured_secret_screen_recognizes_generic_markers(value: str) -> None:

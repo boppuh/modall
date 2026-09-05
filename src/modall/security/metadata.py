@@ -19,7 +19,8 @@ _OBVIOUS_SECRET = re.compile(
 )
 _GENERIC_SECRET_VALUE = re.compile(
     r"(?:api[_-]?key|(?:access[_-]?)?token|credential|private[_-]?key|secret|password)"
-    r"[=:/][\s\x00-\x1f\x7f-\x9f]*(?P<value>[A-Za-z0-9._~+/=\-]{8,})",
+    r"(?:[=:/][\s\x00-\x1f\x7f-\x9f]*|\s+)"
+    r"(?P<value>[A-Za-z0-9._~+/=\-]{8,})",
     re.IGNORECASE,
 )
 _AUTHORIZATION_VALUE = re.compile(
@@ -408,7 +409,7 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
                     and (sensitive_context or (key_is_sensitive and "auth" in key.lower()))
                 )
                 child_is_expiration_metadata = (
-                    key_is_sensitive
+                    (key_is_sensitive or sensitive_context)
                     and isinstance(child, (int, float))
                     and not isinstance(child, bool)
                     and _is_expiration_field(key)
