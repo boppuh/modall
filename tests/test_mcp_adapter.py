@@ -1,0 +1,213 @@
+import asyncio
+import gzip
+from collections.abc import Awaitable, Callable
+
+import httpx
+import pytest
+
+from modall.mcp_adapter.client import DiscoveryError, McpClientAdapter, ProtocolMismatch
+from modall.mcp_adapter.policy import (
+    EndpointPolicy,
+    EndpointPolicyError,
+    LimitedTransport,
+    ResponseLimitExceeded,
+    TransportLimits,
+)
+from tests.support.mcp_fixture_server import (
+    FIXTURE_TOKEN,
+    create_mcp_fixture_app,
+)
+
+
+async def loopback_resolver(host: str, port: int) -> set[str]:
+    del host, port
+    return {"127.0.0.1"}
+
+
+def adapter_for(
+    profile: str,
+    *,
+    app: object | None = None,
+    max_pages: int = 16,
+    max_tools: int = 512,
+    limits: TransportLimits | None = None,
+) -> tuple[McpClientAdapter, str]:
+    fixture_app = app or create_mcp_fixture_app()
+    return (
+        McpClientAdapter(
+            endpoint_policy=EndpointPolicy(
+                environment="test",
+                allow_loopback_http=True,
+                resolver=loopback_resolver,
+            ),
+            limits=limits,
+            max_pages=max_pages,
+            max_tools=max_tools,
+            transport=httpx.ASGITransport(app=fixture_app),  # type: ignore[arg-type]
+        ),
+        f"http://fixture/mcp/{profile}",
+    )
+
+
+def test_adapter_discovers_bounded_domain_types_and_drift() -> None:
+    async def scenario() -> None:
+        client, endpoint = adapter_for("default")
+        discovered = await client.discover(endpoint)
+        assert discovered.protocol_revision == "2025-06-18"
+        assert len(discovered.tools) == 7
+        assert discovered.tools[0].name == "echo"
+        assert discovered.tools[0].schema_supported is True
+        assert len(discovered.canonical_digest) == 64
+        assert discovered.canonical_bytes.startswith(b'{"protocolRevision"')
+
+        app = create_mcp_fixture_app()
+        first_client, schema_endpoint = adapter_for("schema-drift", app=app)
+        second_client, _ = adapter_for("schema-drift", app=app)
+        schema_v1 = await first_client.discover(schema_endpoint)
+        schema_v2 = await second_client.discover(schema_endpoint)
+        assert schema_v1.tools[0].input_schema != schema_v2.tools[0].input_schema
+
+        first_client, metadata_endpoint = adapter_for("metadata-drift", app=app)
+        second_client, _ = adapter_for("metadata-drift", app=app)
+        metadata_v1 = await first_client.discover(metadata_endpoint)
+        metadata_v2 = await second_client.discover(metadata_endpoint)
+        assert metadata_v1.tools[0].input_schema == metadata_v2.tools[0].input_schema
+        assert metadata_v1.tools[0].metadata_digest != metadata_v2.tools[0].metadata_digest
+
+        unsafe_client, unsafe_endpoint = adapter_for("unsafe-schema")
+        unsafe = await unsafe_client.discover(unsafe_endpoint)
+        assert unsafe.tools[0].schema_supported is False
+
+    asyncio.run(scenario())
+
+
+def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> None:
+    async def scenario() -> None:
+        mismatch, endpoint = adapter_for("protocol-mismatch")
+        with pytest.raises(ProtocolMismatch):
+            await mismatch.discover(endpoint)
+
+        for profile in ("oversized", "malformed", "timeout", "disconnect"):
+            client, endpoint = adapter_for(
+                profile,
+                limits=TransportLimits(read_seconds=0.02, total_seconds=0.2),
+            )
+            with pytest.raises(DiscoveryError):
+                await client.discover(endpoint)
+
+        repeated, endpoint = adapter_for("repeated-cursor")
+        with pytest.raises(DiscoveryError, match="repeated a cursor"):
+            await repeated.discover(endpoint)
+
+        page_limited, endpoint = adapter_for("default", max_pages=1)
+        with pytest.raises(DiscoveryError, match="page limit"):
+            await page_limited.discover(endpoint)
+
+        tool_limited, endpoint = adapter_for("default", max_tools=1)
+        with pytest.raises(DiscoveryError, match="tool limit"):
+            await tool_limited.discover(endpoint)
+
+        leaking, endpoint = adapter_for("credential-leak")
+        with pytest.raises(DiscoveryError, match="secret screening"):
+            await leaking.discover(endpoint, bearer_token=FIXTURE_TOKEN.encode())
+
+        invalid_credential, endpoint = adapter_for("authenticated")
+        with pytest.raises(DiscoveryError, match="credential encoding"):
+            await invalid_credential.discover(endpoint, bearer_token=b"bad token")
+
+    asyncio.run(scenario())
+
+
+def test_endpoint_policy_rejects_unsafe_resolution_and_scheme_combinations() -> None:
+    ResolverFactory = Callable[[str, int], Awaitable[set[str]]]
+
+    def resolver(addresses: set[str]) -> ResolverFactory:
+        async def resolve(host: str, port: int) -> set[str]:
+            del host, port
+            return addresses
+
+        return resolve
+
+    async def scenario() -> None:
+        public = EndpointPolicy(environment="production", resolver=resolver({"8.8.8.8"}))
+        await public.validate("https://mcp.example/tools")
+        rejected = (
+            (public, "http://mcp.example/tools"),
+            (public, "https://user@mcp.example/tools"),
+            (public, "https://mcp.example/tools?secret=no"),
+            (
+                EndpointPolicy(
+                    environment="production", resolver=resolver({"8.8.8.8", "127.0.0.1"})
+                ),
+                "https://mcp.example/tools",
+            ),
+            (
+                EndpointPolicy(environment="production", resolver=resolver(set())),
+                "https://mcp.example/tools",
+            ),
+        )
+        for policy, endpoint in rejected:
+            with pytest.raises(EndpointPolicyError):
+                await policy.validate(endpoint)
+
+        local = EndpointPolicy(
+            environment="test", allow_loopback_http=True, resolver=resolver({"127.0.0.1"})
+        )
+        await local.validate("http://fixture/mcp")
+        with pytest.raises(EndpointPolicyError):
+            await EndpointPolicy(environment="test", resolver=resolver({"127.0.0.1"})).validate(
+                "http://fixture/mcp"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
+    async def scenario() -> None:
+        async def declared(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, headers={"Content-Length": "100"}, request=request)
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(declared), 10)
+        ) as client:
+            with pytest.raises(ResponseLimitExceeded):
+                await client.get("https://example.test")
+
+        async def invalid(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, headers={"Content-Length": "invalid"}, request=request)
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(invalid), 10)
+        ) as client:
+            with pytest.raises(EndpointPolicyError):
+                await client.get("https://example.test")
+
+        async def encoded(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Encoding": "gzip"},
+                content=gzip.compress(b"encoded"),
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(encoded), 10)
+        ) as client:
+            with pytest.raises(ResponseLimitExceeded):
+                await client.get("https://example.test")
+
+        async def streamed(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"x" * 11, request=request)
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(streamed), 10)
+        ) as client:
+            with pytest.raises(ResponseLimitExceeded):
+                await client.get("https://example.test")
+
+    asyncio.run(scenario())
+
+    with pytest.raises(ValueError):
+        TransportLimits(response_bytes=0)
+    with pytest.raises(ValueError):
+        McpClientAdapter(endpoint_policy=EndpointPolicy(environment="test"), max_pages=0)

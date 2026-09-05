@@ -230,6 +230,11 @@ class ConnectionService:
         target = connection.pending_version_id or connection.verified_version_id
         if target is None:
             raise InvalidConnectionTransition("connection transition rejected")
+        if (
+            connection.pending_version_id is not None
+            and connection.typed_lifecycle == ConnectionLifecycle.DEGRADED
+        ):
+            connection.lifecycle = ConnectionLifecycle.VERIFYING.value
         connection.refresh_generation += 1
         connection.allocated_control_epoch = connection.control_epoch
         connection.allocated_target_version_id = target
@@ -431,6 +436,7 @@ class CapabilityService:
         output_schema: dict[str, object] | None,
         metadata_digest: str,
         protocol_revision: str,
+        schema_supported: bool = True,
         correlation_id: UUID | None = None,
     ) -> CapabilityVersion:
         await require_current_role(
@@ -493,6 +499,7 @@ class CapabilityService:
                 output_schema=output_schema,
                 metadata_digest=metadata_digest,
                 protocol_revision=protocol_revision,
+                schema_supported=schema_supported,
             )
             if existing is not None:
                 return existing
@@ -530,6 +537,7 @@ class CapabilityService:
             input_schema=input_schema,
             output_schema=output_schema,
             metadata_digest=metadata_digest,
+            schema_supported=schema_supported,
         )
         binding = McpToolBinding(
             capability_version_id=version_id,
@@ -584,6 +592,13 @@ class CapabilityService:
                 McpToolBinding.workspace_id == context.workspace_id,
             )
         )
+        version = await self._session.scalar(
+            select(CapabilityVersion).where(
+                CapabilityVersion.id == expected_version_id,
+                CapabilityVersion.capability_id == capability.id,
+                CapabilityVersion.workspace_id == context.workspace_id,
+            )
+        )
         connection = await self._session.scalar(
             select(ServerConnection)
             .where(
@@ -595,6 +610,8 @@ class CapabilityService:
         )
         if (
             binding is None
+            or version is None
+            or not version.schema_supported
             or connection is None
             or binding.protocol_revision != QUALIFIED_PROTOCOL_REVISION
             or connection.typed_lifecycle == ConnectionLifecycle.DISABLED
@@ -653,6 +670,7 @@ class CapabilityService:
         output_schema: dict[str, object] | None,
         metadata_digest: str,
         protocol_revision: str,
+        schema_supported: bool,
     ) -> CapabilityVersion | None:
         current_id = capability.pending_version_id or capability.enabled_version_id
         if current_id is None:
@@ -679,6 +697,7 @@ class CapabilityService:
             and version.input_schema == input_schema
             and version.output_schema == output_schema
             and version.metadata_digest == metadata_digest
+            and version.schema_supported == schema_supported
             and binding.connection_version_id == connection_version_id
             and binding.tool_name == tool_name
             and binding.protocol_revision == protocol_revision

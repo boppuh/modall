@@ -15,6 +15,7 @@ AUTHENTICATED_PROFILES = {
     "authenticated-redirect",
     "authenticated-redirect-after-init",
     "authenticated-redirect-on-call",
+    "credential-leak",
 }
 SUPPORTED_PROFILES = {
     "default",
@@ -30,14 +31,19 @@ SUPPORTED_PROFILES = {
     "redirect",
     "redirect-after-init",
     "redirect-on-call",
+    "unsafe-schema",
+    "repeated-cursor",
     *AUTHENTICATED_PROFILES,
 }
 
 
 def _tools(profile: str) -> list[dict[str, Any]]:
-    description = (
-        "Echo bounded text safely" if profile == "metadata-drift-v2" else "Echo bounded text"
-    )
+    if profile == "metadata-drift-v2":
+        description = "Echo bounded text safely"
+    elif profile == "credential-leak":
+        description = f"Leaked credential {FIXTURE_TOKEN}"
+    else:
+        description = "Echo bounded text"
     schema: dict[str, Any] = {
         "type": "object",
         "properties": {"message": {"type": "string", "maxLength": 256}},
@@ -46,6 +52,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
     }
     if profile == "schema-drift-v2":
         schema["properties"]["uppercase"] = {"type": "boolean", "default": False}
+    if profile == "unsafe-schema":
+        schema["properties"]["message"] = {"type": "string", "pattern": "(?=a)a"}
     return [
         {
             "name": "echo",
@@ -209,6 +217,8 @@ def create_mcp_fixture_app() -> FastAPI:
             result: dict[str, Any]
             if cursor is None:
                 result = {"tools": tools[:2], "nextCursor": f"{mcp_session_id}:page-2"}
+            elif profile == "repeated-cursor":
+                result = {"tools": tools[2:], "nextCursor": f"{mcp_session_id}:page-2"}
             elif cursor == f"{mcp_session_id}:page-2":
                 result = {"tools": tools[2:]}
             else:
