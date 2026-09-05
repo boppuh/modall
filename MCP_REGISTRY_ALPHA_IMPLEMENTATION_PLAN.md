@@ -238,14 +238,14 @@ An ADR may change a choice before implementation. Public and domain contracts mu
 | `users`, `workspaces`, `workspace_memberships` | Internal identity and current role |
 | `secret_bindings` | Opaque provider/reference/version metadata; never secret material |
 | `registry_entries`, `registry_entry_versions` | Imported or manual catalog metadata and provenance |
-| `server_connections`, `server_connection_versions` | Stable connection identity and immutable endpoint/credential configuration |
-| `discovery_snapshots` | Immutable bounded normalized discovery payload and canonical digest |
+| `server_connections`, `server_connection_versions` | Stable connection identity, current verified version, and monotonic refresh generation plus immutable endpoint/credential configuration |
+| `discovery_snapshots` | Immutable bounded normalized discovery payload, canonical digest, and publishing refresh generation |
 | `capabilities`, `capability_versions` | Stable logical tool identity and immutable schema/metadata version |
 | `mcp_tool_bindings` | Exact capability-version to connection-version/tool/protocol binding |
 | `capability_status_events` | Append-only enable/disable/unavailable decisions |
 | `jobs` | Durable leased work with a monotonically increasing `lease_epoch` on every claim/reclaim |
 | `runs`, `run_attempts`, `run_events` | Public execution identity, exact lineage, state, timing, and bounded content |
-| `idempotency_records` | Workspace/actor/route-scoped HMAC of caller key and original resource reference |
+| `idempotency_records` | Workspace/actor/route-scoped HMAC of caller key, versioned server-HMAC of the canonical request, and original resource reference |
 | `audit_events` | Typed actor/action/resource/outcome/correlation evidence without payload content |
 
 ### 6.2 Invariants
@@ -254,13 +254,15 @@ An ADR may change a choice before implementation. Public and domain contracts mu
 - IDs are server-generated UUIDs and do not encode tenant or content.
 - A connection version is immutable and pins endpoint, secret-binding version, transport, and policy.
 - A capability version is immutable and pins schemas plus exactly one MCP tool binding.
+- An MCP tool binding is executable only while its connection version is the connection's exact current verified version and its observed tool identity/schema remains present in the current published discovery snapshot. Connection-version replacement or schema/tool drift transitions every superseded binding out of executable state before new admission or fencing.
 - Refresh appends a discovery snapshot and any changed capability versions.
+- Every verification/refresh job receives a monotonically increasing connection-scoped generation; only the latest-started generation may publish a snapshot or health projection.
 - A capability status projection changes through append-only events.
 - A run pins one capability version before enqueue and never changes target.
 - Each run has at most one active attempt and one dispatch fence.
 - Every job claim increments `lease_epoch`; only the current unexpired lease owner presenting that exact epoch may create the dispatch fence, so a reclaimed stale worker cannot send.
 - Terminal run states are immutable except for separately appended reconciliation detail.
-- Mutating API idempotency is unique by workspace, actor, method, route, and HMAC-derived key.
+- Mutating API idempotency is unique by workspace, actor, method, route, and HMAC-derived key. A separate versioned server-HMAC covers the canonical capability/connection/request body; matching reuse replays the original resource and mismatching reuse returns `idempotency_conflict`, including after argument content expires.
 - Audit rows contain typed identifiers/enums, not arguments, results, schemas, secrets, or raw upstream errors.
 
 ### 6.3 Retention
@@ -289,6 +291,7 @@ Deletion is ordinary database/object deletion under managed encryption-at-rest g
 - Bound decoded and raw bytes, nesting, string length, property count, tool count, page count, and total discovery time.
 - Store the exact normalized JSON needed for history; do not log payload bodies.
 - Preserve local JSON Schema references but never fetch an external schema reference.
+- Compile `pattern`, `patternProperties`, and other schema regexes only through the approved linear-time/RE2-compatible subset; unsupported constructs keep the version visible but non-invocable. Run schema compilation and validation under an independent wall-clock deadline and resource limit, with timeout failing closed.
 - Apply obvious-secret screening to remote descriptive fields; quarantine the affected snapshot on a match or scanner failure.
 - Render every remote string as text and every schema/result through inert viewers.
 
@@ -320,23 +323,23 @@ Fixture coverage includes:
 
 ### 8.2 Discovery
 
-1. Claim one verification/refresh job.
+1. Claim one verification/refresh job carrying the connection's allocated monotonic refresh generation.
 2. Load the immutable connection version and secret reference.
 3. Recheck current connection state and endpoint policy.
 4. Initialize a short-lived MCP session through the constrained worker network.
 5. Read all tool pages within the configured bounds.
 6. Normalize and validate the complete snapshot.
-7. In one transaction, lock the connection and require both that its version is still current and that its lifecycle remains valid for this operation (`verifying` for initial verification or `active|degraded` for refresh), explicitly rejecting `disabled`. Then append the snapshot and changed capability versions and update connection health.
+7. In one transaction, lock the connection and require that this is still its latest-started refresh generation, its version is still current, and its lifecycle remains valid for this operation (`verifying` for initial verification or `active|degraded` for refresh), explicitly rejecting `disabled`. Then append the snapshot and changed capability versions, atomically mark superseded tool/schema bindings non-executable, and update the current snapshot and health projections.
 
-An obsolete or incomplete refresh does not publish. Discovery may retry because it sends no tool invocation.
+An obsolete, incomplete, disabled, or superseded-generation refresh does not publish. Discovery may retry because it sends no tool invocation.
 
 ### 8.3 Invocation and dispatch fence
 
 1. API validates authorization, capability state, input schema, limits, secret scan, confirmation token, and idempotency.
 2. One transaction creates the run and queued job pinned to exact immutable versions.
-3. Worker claims the job, atomically increments and records its `lease_epoch`, and rechecks current actor membership, connection/capability status, deadline, and cancellation.
+3. Worker claims the job, atomically increments and records its `lease_epoch`, and rechecks current actor membership, connection/capability status, deadline, cancellation, exact current verified connection version, and the binding's presence with identical tool/schema identity in the current discovery snapshot.
 4. Worker initializes a fresh short-lived MCP session using the pinned connection version.
-5. Immediately before `tools/call`, one transaction repeats the mutable checks, requires the job lease is still owned/unexpired and its epoch exactly matches the worker claim, and changes the attempt from `preparing` to `dispatch_fenced` exactly once. A reclaimed or stale worker fails this transaction and sends nothing.
+5. Immediately before `tools/call`, one transaction repeats every mutable and exact-binding/current-snapshot check, requires the job lease is still owned/unexpired and its epoch exactly matches the worker claim, and changes the attempt from `preparing` to `dispatch_fenced` exactly once. A stale binding or worker fails this transaction and sends nothing.
 6. Worker sends one call. No code path automatically invokes again after the fence.
 7. A definitive response records success or failure. Timeout/disconnect/crash after fencing records `indeterminate` unless transport evidence proves no request bytes were accepted.
 8. Worker closes the session and releases transient credentials and buffers.
@@ -361,7 +364,7 @@ All responses use stable IDs, ISO-8601 timestamps, correlation IDs, and machine-
 - `POST /v1/server-connections`
 - `GET /v1/server-connections`
 - `GET /v1/server-connections/{id}`
-- `POST /v1/server-connections/{id}/versions` — Admin-only append of a new immutable endpoint or secret-binding configuration; moves the stable connection back to `verifying` and blocks invocation until that exact version verifies.
+- `POST /v1/server-connections/{id}/versions` — Admin-only append of a new immutable endpoint or secret-binding configuration; atomically makes prior bindings non-executable, moves the stable connection back to `verifying`, and blocks invocation until that exact version verifies and publishes a current discovery snapshot.
 - `POST /v1/server-connections/{id}/verify`
 - `POST /v1/server-connections/{id}/refresh`
 - `POST /v1/server-connections/{id}/disable`
@@ -431,10 +434,10 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 |---|---|---|
 | E2-T1 | Implement registry entries, connections, immutable connection versions, and lifecycle | Invalid transitions and mutable-version writes fail |
 | E2-T2 | Implement constrained MCP transport and endpoint policy | SSRF, DNS, scheme, TLS, redirect, timeout, and size fixtures pass |
-| E2-T3 | Wrap the pinned SDK and qualify initialization plus paginated discovery | Recorded protocol suite passes without SDK leakage into domain types |
+| E2-T3 | Wrap the pinned SDK and qualify initialization, safe-regex schema handling, bounded validation, and paginated discovery | Recorded protocol and adversarial schema-timing suites pass without SDK leakage into domain types |
 | E2-T4 | Implement bounded normalized snapshots and canonical identity | Equivalent snapshots deduplicate; changed snapshots append |
 | E2-T5 | Implement capabilities, immutable versions, bindings, and status events | Drift creates pending versions and preserves enabled history |
-| E2-T6 | Implement explicit/scheduled refresh, health, and overlapping-job protection | Obsolete/incomplete refresh or a refresh racing with disable cannot publish |
+| E2-T6 | Implement explicit/scheduled refresh, monotonic generations, current-snapshot health, and overlapping-job protection | Only the latest-started eligible generation publishes; obsolete/incomplete/disabled refresh cannot change snapshot or health |
 
 ### E3 — Durable invocation — 4–5 person-weeks
 
@@ -443,8 +446,8 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 | E3-T1 | Implement PostgreSQL job leasing, monotonically increasing lease epochs, heartbeat, and recovery | Worker-loss tests reclaim only safe jobs and stale epochs cannot fence |
 | E3-T2 | Implement runs, attempts, events, state machine, and exact lineage | Projection replay reproduces every status |
 | E3-T3 | Implement schema validation, limits, secret guardrail, and caller/request/version-bound one-time confirmation token | Invalid/sensitive/stale/transferred/replayed requests cannot enqueue |
-| E3-T4 | Implement scoped-HMAC idempotency and concurrent creation handling | Same key creates one run; raw key never persists |
-| E3-T5 | Implement lease-epoch-validated fresh-session dispatch fence, send-once policy, deadline, and cancellation | Crash/reclaim/control/cancel races never duplicate a call |
+| E3-T4 | Implement scoped key HMAC, versioned canonical-request HMAC, conflict detection, and concurrent creation handling | Same key/request creates one run; changed capability/arguments conflict after content expiry; raw key never persists |
+| E3-T5 | Implement exact-current-binding and lease-epoch-validated fresh-session dispatch fence, send-once policy, deadline, and cancellation | Crash/reclaim/control/configuration/schema/cancel races never send through stale lineage or duplicate a call |
 | E3-T6 | Implement pre-storage bounded result/error normalization and retention cleanup | Only clean, output-schema-valid text/JSON reaches durable storage; unsupported/sensitive/invalid payload is absent, and every terminal state's retained content expires |
 
 ### E4 — Control-plane API — 2–3 person-weeks
@@ -526,7 +529,7 @@ Critical path:
 - workspace authorization decisions;
 - endpoint/IP policy and URL normalization;
 - snapshot canonicalization;
-- JSON Schema and content bounds;
+- JSON Schema/content bounds, safe regex subset, and independent validation timeout;
 - run projection, idempotency, and safe error mapping.
 
 ### Contract
@@ -544,8 +547,10 @@ Critical path:
 - stale-worker fencing where an old worker pauses, a new worker reclaims and increments the epoch, and the old epoch cannot fence or send;
 - disable/refresh/invocation races;
 - configuration-version append/reverification and disable-during-discovery races;
+- overlapping refresh generation races where an older completion cannot replace the latest snapshot or health;
 - secret retrieval and telemetry redaction;
 - concurrent idempotency and refresh;
+- same-key changed-request conflict after retained arguments expire;
 - pre-storage result rejection, output-schema mismatch suppression, all-terminal-state retention cleanup, and backup restoration.
 
 ### End to end
@@ -557,6 +562,8 @@ Critical path:
 - hostile endpoint cannot access a denied destination;
 - disabled connection blocks queued unfenced work;
 - schema drift preserves history and requires review;
+- connection rotation or schema drift makes superseded bindings non-executable before admission and every fence;
+- adversarial schema regexes cannot monopolize API or worker validation;
 - unsupported or secret-shaped results expose no payload;
 - upstream Registry outage does not impair existing capabilities or invocation.
 
