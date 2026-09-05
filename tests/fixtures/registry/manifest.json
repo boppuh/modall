@@ -1,0 +1,11 @@
+{
+  "source": "https://github.com/modelcontextprotocol/registry",
+  "sourceCommit": "6036804f1c62633b5e7d2927f411a6f4127f148a",
+  "apiRevision": "v0.1",
+  "capturedAt": "2026-09-05T00:00:00Z",
+  "files": {
+    "search_page_1.json": "ecd99b91edccfdf38b3bae7d400824947640b29b3fb4f93a7aa40b77b5ea81df",
+    "search_page_2.json": "de8545e27a72a5542fdf546f23d7aa83adbbc32c7725f4d09add7aee0f079812",
+    "upstream_error.json": "0b451a8674a4e4bde6221dc992bbdbc65adb44a191ffc1b42abd8f01cc33d211"
+  }
+}
