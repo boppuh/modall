@@ -103,6 +103,10 @@ def test_adapter_discovers_bounded_domain_types_and_drift() -> None:
         keyword_names = await keyword_client.discover(keyword_endpoint)
         assert keyword_names.tools[0].schema_supported is True
 
+        credential_property, endpoint = adapter_for("credential-property-schema")
+        credential_property_result = await credential_property.discover(endpoint)
+        assert credential_property_result.tools[0].schema_supported is True
+
     asyncio.run(scenario())
 
 
@@ -141,7 +145,7 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
             await escaped_leaking.discover(endpoint, bearer_token=ESCAPED_FIXTURE_TOKEN.encode())
 
         numeric_leaking, endpoint = adapter_for("credential-numeric-leak")
-        with pytest.raises(DiscoveryError, match="secret screening"):
+        with pytest.raises(CredentialError, match="credential encoding"):
             await numeric_leaking.discover(endpoint, bearer_token=NUMERIC_FIXTURE_TOKEN.encode())
 
         common_key, endpoint = adapter_for("credential-common-key")

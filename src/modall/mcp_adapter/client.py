@@ -27,6 +27,7 @@ from modall.security.metadata import (
     MetadataValidationError,
     contains_obvious_secret,
     contains_sensitive_json,
+    contains_sensitive_schema,
     validate_bounded_json,
     validate_capability_scalars,
     validate_schema_payload,
@@ -101,9 +102,17 @@ class McpClientAdapter:
                 credential_text = bytes(bearer_token).decode("ascii")
             except UnicodeDecodeError as exc:
                 raise CredentialError("credential encoding rejected") from exc
-            if not credential_text or any(
-                not 33 <= ord(character) <= 126 for character in credential_text
+            if (
+                not credential_text
+                or len(credential_text) > 4096
+                or any(not 33 <= ord(character) <= 126 for character in credential_text)
             ):
+                raise CredentialError("credential encoding rejected")
+            try:
+                json.loads(credential_text)
+            except (json.JSONDecodeError, RecursionError):
+                pass
+            else:
                 raise CredentialError("credential encoding rejected")
             headers["Authorization"] = f"Bearer {credential_text}"
         try:
@@ -238,7 +247,7 @@ class McpClientAdapter:
         text = canonical.decode("utf-8")
         if (
             contains_obvious_secret(text)
-            or contains_sensitive_json(payload)
+            or any(_contains_sensitive_tool(tool) for tool in normalized_tools)
             or (
                 credential_text is not None
                 and _contains_decoded_credential(payload, credential_text)
@@ -418,11 +427,6 @@ async def _schema_support_with_deadline(
 
 
 def _contains_decoded_credential(value: object, credential: str) -> bool:
-    no_scalar = object()
-    try:
-        parsed_credential: object = json.loads(credential)
-    except (json.JSONDecodeError, RecursionError):
-        parsed_credential = no_scalar
     stack = [value]
     while stack:
         current = stack.pop()
@@ -432,19 +436,20 @@ def _contains_decoded_credential(value: object, credential: str) -> bool:
             stack.extend(current)
         elif isinstance(current, str) and credential in current:
             return True
-        elif parsed_credential is not no_scalar:
-            if isinstance(parsed_credential, bool) or parsed_credential is None:
-                if type(current) is type(parsed_credential) and current == parsed_credential:
-                    return True
-            elif (
-                isinstance(parsed_credential, (int, float))
-                and not isinstance(parsed_credential, bool)
-                and isinstance(current, (int, float))
-                and not isinstance(current, bool)
-                and current == parsed_credential
-            ):
-                return True
     return False
+
+
+def _contains_sensitive_tool(tool: dict[str, object]) -> bool:
+    ordinary_metadata = {
+        key: value for key, value in tool.items() if key not in {"inputSchema", "outputSchema"}
+    }
+    if contains_sensitive_json(ordinary_metadata):
+        return True
+    return any(
+        contains_sensitive_schema(tool[key])
+        for key in ("inputSchema", "outputSchema")
+        if key in tool
+    )
 
 
 def _find_exception[T: BaseException](error: BaseException, kind: type[T]) -> T | None:

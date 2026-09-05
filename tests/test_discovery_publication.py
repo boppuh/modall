@@ -879,6 +879,13 @@ def test_discovery_failure_classification_is_allowlisted(
     assert classify_discovery_failure(authentication_error) == (
         DiscoveryFailureCode.AUTHENTICATION_FAILED
     )
+    forbidden_response = httpx.Response(403, request=request)
+    forbidden_error = httpx.HTTPStatusError(
+        "upstream body must not escape", request=request, response=forbidden_response
+    )
+    assert classify_discovery_failure(forbidden_error) == (
+        DiscoveryFailureCode.AUTHENTICATION_FAILED
+    )
 
 
 def test_discovery_failure_classification_breaks_cyclic_causes() -> None:

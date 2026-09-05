@@ -47,6 +47,7 @@ SUPPORTED_PROFILES = {
     "composite-structured-secret",
     "numeric-sensitive-metadata",
     "keyword-property-names",
+    "credential-property-schema",
     "unresolved-local-ref",
     "unresolved-local-anchor",
     "non-schema-local-ref",
@@ -90,6 +91,16 @@ def _tools(profile: str) -> list[dict[str, Any]]:
             "pattern": {"type": "string"},
             "$id": {"type": "string"},
             "$ref": {"type": "string"},
+        }
+    if profile == "credential-property-schema":
+        schema = {
+            "type": "object",
+            "properties": {
+                "password": {
+                    "type": "string",
+                    "description": "User password",
+                }
+            },
         }
     if profile == "unresolved-local-ref":
         schema = {"$ref": "#/$defs/missing"}

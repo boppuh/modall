@@ -140,7 +140,7 @@ def classify_discovery_failure(error: BaseException) -> DiscoveryFailureCode:
     if any(isinstance(item, (TimeoutError, httpx.TimeoutException)) for item in errors):
         return DiscoveryFailureCode.TIMEOUT
     if any(
-        isinstance(item, httpx.HTTPStatusError) and item.response.status_code == 401
+        isinstance(item, httpx.HTTPStatusError) and item.response.status_code in {401, 403}
         for item in errors
     ):
         return DiscoveryFailureCode.AUTHENTICATION_FAILED

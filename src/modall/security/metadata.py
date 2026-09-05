@@ -30,6 +30,65 @@ def contains_sensitive_json(value: object) -> bool:
     return _contains_obvious_secret_in_json(value)
 
 
+def contains_sensitive_schema(value: object) -> bool:
+    """Screen schema metadata without treating property names as stored values."""
+
+    stack = [(value, False, False)]
+    literal_keys = {"const", "default", "enum", "example", "examples"}
+    while stack:
+        current, sensitive_property, sensitive_metadata = stack.pop()
+        if isinstance(current, dict):
+            for key, child in current.items():
+                if key == "properties" and isinstance(child, dict):
+                    for property_name, property_schema in child.items():
+                        stack.append(
+                            (
+                                property_schema,
+                                sensitive_property
+                                or _SENSITIVE_JSON_FIELD.search(property_name) is not None,
+                                sensitive_metadata,
+                            )
+                        )
+                    continue
+                if key in {
+                    "$defs",
+                    "definitions",
+                    "dependentSchemas",
+                    "patternProperties",
+                } and isinstance(child, dict):
+                    stack.extend(
+                        (schema, sensitive_property, sensitive_metadata)
+                        for schema in child.values()
+                    )
+                    continue
+                if (
+                    sensitive_property
+                    and key in literal_keys
+                    and _contains_obvious_secret_in_json(child, initially_sensitive=True)
+                ):
+                    return True
+                stack.append(
+                    (
+                        child,
+                        sensitive_property,
+                        sensitive_metadata or _SENSITIVE_JSON_FIELD.search(key) is not None,
+                    )
+                )
+        elif isinstance(current, list):
+            stack.extend((child, sensitive_property, sensitive_metadata) for child in current)
+        elif isinstance(current, str):
+            if (sensitive_metadata and len(current) >= 8) or contains_obvious_secret(current):
+                return True
+        elif (
+            sensitive_metadata
+            and isinstance(current, (int, float))
+            and not isinstance(current, bool)
+            and len(str(current)) >= 8
+        ):
+            return True
+    return False
+
+
 def validate_capability_scalars(
     *,
     tool_identity: str,
@@ -99,7 +158,9 @@ def validate_schema_payload(
         raise MetadataValidationError("schema is not bounded JSON") from exc
     if len(encoded) > 131_072:
         raise MetadataValidationError("schema exceeds serialized size limit")
-    if contains_obvious_secret(serialized) or any(contains_sensitive_json(root) for root in roots):
+    if contains_obvious_secret(serialized) or any(
+        contains_sensitive_schema(root) for root in roots
+    ):
         raise MetadataValidationError("schema contains credential-shaped content")
 
 
@@ -131,8 +192,8 @@ def validate_bounded_json(value: object) -> None:
             raise MetadataValidationError("metadata contains a non-JSON value")
 
 
-def _contains_obvious_secret_in_json(value: object) -> bool:
-    stack = [(value, False)]
+def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool = False) -> bool:
+    stack = [(value, initially_sensitive)]
     while stack:
         current, sensitive_context = stack.pop()
         if isinstance(current, dict):
