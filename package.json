@@ -1,0 +1,21 @@
+{
+  "name": "modall",
+  "private": true,
+  "devDependencies": {
+    "eslint": "^10.0.1"
+  },
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "web:build": "npm run build --workspace @modall/web",
+    "web:dev": "npm run dev --workspace @modall/web",
+    "web:lint": "npm run lint --workspace @modall/web",
+    "web:test": "npm run test --workspace @modall/web",
+    "web:typecheck": "npm run typecheck --workspace @modall/web"
+  },
+  "engines": {
+    "node": ">=22.13 <23",
+    "npm": ">=10 <11"
+  }
+}
