@@ -37,7 +37,7 @@ _SENSITIVE_JSON_FIELD = re.compile(
 _OPAQUE_ANNOTATION_VALUE = re.compile(r"[A-Za-z0-9._~+/=\-]{8,}\Z")
 _SENSITIVE_MARKER_PREFIX = re.compile(
     r"(?:api[-_]?key|(?:access[-_]?)?token|credential|private[-_]?key|secret|password)"
-    r"[-_](?P<value>[A-Za-z0-9_-]{8,})\Z",
+    r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,})\Z",
     re.IGNORECASE,
 )
 _AUTH_MODE_WORDS = {

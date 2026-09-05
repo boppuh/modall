@@ -354,6 +354,7 @@ def test_adapter_suppresses_untrusted_transport_debug_logs(
 def test_raw_structured_screen_handles_sse_and_invalid_utf8() -> None:
     sensitive_event = b'data: {"extension":{"token":"AbCdEfGhIjKlMnOpQrStUvWx"}}\n\n'
     assert _contains_sensitive_structured_response(sensitive_event)
+    assert _contains_sensitive_structured_response(sensitive_event.replace(b"\n\n", b"\r\r"))
     assert not _contains_sensitive_structured_response(b'data: {"status":"ready"}\n\n')
     assert not _contains_sensitive_structured_response(b"\xff")
 

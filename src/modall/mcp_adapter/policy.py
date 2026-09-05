@@ -23,6 +23,8 @@ from modall.security.metadata import (
     decode_safe_url_path,
 )
 
+_SSE_EVENT_BOUNDARY = r"(?:(?:\r\n)|\r|\n){2}"
+
 
 class EndpointPolicyError(Exception):
     """The endpoint cannot be contacted under the active network policy."""
@@ -307,8 +309,8 @@ def _contains_sensitive_structured_response(value: bytes) -> bool:
     except UnicodeDecodeError:
         return False
     candidates = [text]
-    completed_events = re.split(r"\r?\n\r?\n", text)
-    if not re.search(r"\r?\n\r?\n\Z", text):
+    completed_events = re.split(_SSE_EVENT_BOUNDARY, text)
+    if not re.search(f"{_SSE_EVENT_BOUNDARY}\\Z", text):
         completed_events.pop()
     for event in completed_events:
         data_lines = [
