@@ -7,7 +7,7 @@ import logging
 import math
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -142,7 +142,11 @@ class McpClientAdapter:
         self._transport = transport
 
     async def discover(
-        self, endpoint: str, *, bearer_token: bytes | bytearray | None = None
+        self,
+        endpoint: str,
+        *,
+        bearer_token: bytes | bytearray | None = None,
+        before_connect: Callable[[], Awaitable[None]] | None = None,
     ) -> DiscoveryResult:
         headers: dict[str, str] = {"Accept-Encoding": "identity"}
         credential_text: str | None = None
@@ -165,6 +169,8 @@ class McpClientAdapter:
         try:
             async with asyncio.timeout(self._limits.total_seconds):
                 resolution = await self._endpoint_policy.validate(endpoint)
+                if before_connect is not None:
+                    await before_connect()
                 inner = self._transport or PinnedHTTPTransport(resolution)
                 transport = LimitedTransport(
                     inner,

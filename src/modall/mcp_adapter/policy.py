@@ -378,10 +378,12 @@ def _contains_sensitive_sse_event(event: bytes) -> bool:
         return False
     lines = text.splitlines()
     field_values = [line.partition(":")[2].lstrip() for line in lines if ":" in line]
+    complete_field_members = [f"{{{line}}}" for line in lines if ":" in line]
     data_lines = [line.partition(":")[2].lstrip() for line in lines if line.startswith("data:")]
     return (
         contains_obvious_secret(text)
         or any(_contains_sensitive_json_text(value) for value in field_values)
+        or any(_contains_sensitive_json_text(value) for value in complete_field_members)
         or (bool(data_lines) and _contains_sensitive_json_text("\n".join(data_lines)))
     )
 
@@ -431,6 +433,9 @@ class LimitedTransport(httpx.AsyncBaseTransport):
             forbidden in header_name or forbidden in header_value
             for header_name, header_value in response.headers.multi_items()
             for forbidden in self._forbidden_response_values
+        ) or any(
+            contains_obvious_secret(header_name) or contains_obvious_secret(header_value)
+            for header_name, header_value in response.headers.multi_items()
         ):
             self._mark_sensitive_response()
             await response.aclose()
@@ -452,7 +457,8 @@ class LimitedTransport(httpx.AsyncBaseTransport):
             except ValueError as exc:
                 await response.aclose()
                 raise EndpointPolicyError("invalid upstream content length") from exc
-        return httpx.Response(
+        media_type = response.headers.get("content-type", "").partition(";")[0].strip().lower()
+        screened_response = httpx.Response(
             response.status_code,
             headers=response.headers,
             stream=LimitedByteStream(
@@ -460,11 +466,18 @@ class LimitedTransport(httpx.AsyncBaseTransport):
                 self._budget,
                 self._forbidden_response_bytes,
                 self._mark_sensitive_response,
-                response.headers.get("content-type", "").partition(";")[0].strip().lower(),
+                media_type,
             ),
             extensions=response.extensions,
             request=request,
         )
+        if media_type != "text/event-stream" or response.status_code != 200:
+            try:
+                await screened_response.aread()
+            except Exception:
+                await screened_response.aclose()
+                raise
+        return screened_response
 
     async def aclose(self) -> None:
         await self._inner.aclose()

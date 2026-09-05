@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID
@@ -851,10 +852,16 @@ def test_discovery_runner_publishes_success_and_safe_failure_codes() -> None:
             self.outcome = outcome
 
         async def discover(
-            self, endpoint: str, *, bearer_token: bytes | bytearray | None = None
+            self,
+            endpoint: str,
+            *,
+            bearer_token: bytes | bytearray | None = None,
+            before_connect: Callable[[], Awaitable[None]] | None = None,
         ) -> DiscoveryResult:
             assert endpoint.startswith("https://")
             assert bearer_token is None
+            if before_connect is not None:
+                await before_connect()
             if isinstance(self.outcome, Exception):
                 raise self.outcome
             return self.outcome
@@ -936,9 +943,15 @@ def test_discovery_runner_does_not_report_publication_errors_as_endpoint_health(
 ) -> None:
     class StubAdapter:
         async def discover(
-            self, endpoint: str, *, bearer_token: bytes | bytearray | None = None
+            self,
+            endpoint: str,
+            *,
+            bearer_token: bytes | bytearray | None = None,
+            before_connect: Callable[[], Awaitable[None]] | None = None,
         ) -> DiscoveryResult:
             del endpoint, bearer_token
+            if before_connect is not None:
+                await before_connect()
             return result_for()
 
     async def fail_publication(
@@ -987,9 +1000,15 @@ def test_discovery_runner_revalidates_after_secret_retrieval_before_contact(
         contacted = False
 
         async def discover(
-            self, endpoint: str, *, bearer_token: bytes | bytearray | None = None
+            self,
+            endpoint: str,
+            *,
+            bearer_token: bytes | bytearray | None = None,
+            before_connect: Callable[[], Awaitable[None]] | None = None,
         ) -> DiscoveryResult:
             del endpoint, bearer_token
+            if before_connect is not None:
+                await before_connect()
             self.contacted = True
             return result_for()
 

@@ -44,7 +44,7 @@ _SENSITIVE_MARKER_PREFIX = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_PATH_MARKER = re.compile(
-    r"(?:^|[!$&'()*,;:@/])(?:api[-_]?key|"
+    r"(?:^|[!$&'()*,;:=@/])(?:api[-_]?key|"
     r"(?:(?:access|refresh|session|auth|bearer)[-_]?)?token|credential|"
     r"private[-_]?key|secret|password)"
     r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,})(?=$|[!$&'()*,;:@])",
@@ -141,12 +141,20 @@ def contains_sensitive_hostname(hostname: str) -> bool:
         _is_sensitive_field(label) and _looks_like_opaque_value(labels[index + 1])
         for index, label in enumerate(labels[:-1])
     )
+    cross_label_value = any(
+        _is_sensitive_field(label)
+        and any(
+            _looks_like_opaque_value(".".join(labels[index + 1 : end]))
+            for end in range(index + 2, len(labels) + 1)
+        )
+        for index, label in enumerate(labels[:-1])
+    )
     prefixed_value = any(
         (match := _SENSITIVE_MARKER_PREFIX.fullmatch(label)) is not None
         and _looks_like_marker_suffix(match.group("value"))
         for label in labels
     )
-    return adjacent_value or prefixed_value
+    return adjacent_value or cross_label_value or prefixed_value
 
 
 def contains_sensitive_url_path(path: str) -> bool:

@@ -57,12 +57,17 @@ class DiscoveryRunner:
             except (KeyError, ValueError) as exc:
                 raise EndpointPolicyError("pinned policy version is unavailable") from exc
             if secret_reference is None:
-                await self._validate_for_contact(context, lease)
-                result = await adapter.discover(endpoint)
+                result = await adapter.discover(
+                    endpoint,
+                    before_connect=lambda: self._validate_for_contact(context, lease),
+                )
             else:
                 with self._secret_provider.retrieve(secret_reference) as credential:
-                    await self._validate_for_contact(context, lease)
-                    result = await adapter.discover(endpoint, bearer_token=credential)
+                    result = await adapter.discover(
+                        endpoint,
+                        bearer_token=credential,
+                        before_connect=lambda: self._validate_for_contact(context, lease),
+                    )
         except (AuthorizationDenied, InvalidConnectionTransition):
             return None
         except (

@@ -373,12 +373,46 @@ def test_adapter_suppresses_untrusted_transport_debug_logs(
     assert FIXTURE_TOKEN not in caplog.text
 
 
+def test_adapter_revalidates_lease_after_resolution_before_transport_contact() -> None:
+    events: list[str] = []
+
+    async def resolver(host: str, port: int) -> set[str]:
+        del host, port
+        events.append("resolved")
+        return {"8.8.8.8"}
+
+    async def contact(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"transport contacted: {request.url}")
+
+    async def reject_stale_lease() -> None:
+        events.append("lease-revalidated")
+        raise RuntimeError("lease revoked")
+
+    async def scenario() -> None:
+        adapter = McpClientAdapter(
+            endpoint_policy=EndpointPolicy(environment="test", resolver=resolver),
+            transport=httpx.MockTransport(contact),
+        )
+        with pytest.raises(DiscoveryError, match="MCP discovery failed"):
+            await adapter.discover(
+                "https://mcp.example/tools",
+                before_connect=reject_stale_lease,
+            )
+
+    asyncio.run(scenario())
+    assert events == ["resolved", "lease-revalidated"]
+
+
 def test_raw_structured_screen_handles_sse_and_invalid_utf8() -> None:
     sensitive_event = b'data: {"extension":{"token":"AbCdEfGhIjKlMnOpQrStUvWx"}}\n\n'
     assert _contains_sensitive_structured_response(sensitive_event)
     assert _contains_sensitive_structured_response(sensitive_event.replace(b"\n\n", b"\r\r"))
     assert _contains_sensitive_structured_response(
         b': {"token":"AbCdEfGhIjKlMnOpQrStUvWx"}\n'
+        b'data: {"jsonrpc":"2.0","result":{"status":"safe"}}\n\n'
+    )
+    assert _contains_sensitive_structured_response(
+        b'"token": "AbCdEfGhIjKlMnOpQrStUvWx"\n'
         b'data: {"jsonrpc":"2.0","result":{"status":"safe"}}\n\n'
     )
     assert not _contains_sensitive_structured_response(b'data: {"status":"ready"}\n\n')
@@ -643,6 +677,34 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
         ) as client:
             with pytest.raises(EndpointPolicyError, match="response status"):
                 await client.get("https://example.test")
+
+        async def sensitive_header(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"X-Upstream-State": "token=AbCdEfGhIjKlMnOpQrStUvWx"},
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(sensitive_header), 100)
+        ) as client:
+            with pytest.raises(EndpointPolicyError, match="response header"):
+                await client.get("https://example.test")
+
+        async def accepted_sensitive_body(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                202,
+                headers={"Content-Type": "application/json"},
+                content=b'{"token":"AbCdEfGhIjKlMnOpQrStUvWx"}',
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(accepted_sensitive_body), 100)
+        ) as client:
+            request = client.build_request("POST", "https://example.test")
+            with pytest.raises(EndpointPolicyError, match="response body"):
+                await client.send(request, stream=True)
 
         async def sse(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
