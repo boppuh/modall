@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from mcp import ClientSession
+from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 
@@ -168,6 +168,20 @@ def test_reference_server_auth_protocol_and_transport_fault_profiles() -> None:
                 ),
             )
             assert mismatch.json()["result"]["protocolVersion"] == "2025-11-25"
+            mismatch_headers = {
+                **ACCEPT_HEADERS,
+                "Mcp-Protocol-Version": "2025-11-25",
+                "Mcp-Session-Id": mismatch.headers["Mcp-Session-Id"],
+            }
+            mismatch_initialized = await client.post(
+                "/mcp/protocol-mismatch",
+                headers=mismatch_headers,
+                json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+            )
+            assert mismatch_initialized.status_code == 202
+            assert (
+                await client.post("/mcp/protocol-mismatch", headers=mismatch_headers, json=request)
+            ).status_code == 200
             for profile in ("malformed", "oversized", "timeout", "disconnect"):
                 headers = await _handshake(client, profile)
                 if profile == "malformed":
@@ -197,6 +211,18 @@ def test_reference_server_rejects_missing_transport_and_lifecycle_headers() -> N
         async with httpx.AsyncClient(transport=transport, base_url="http://fixture") as client:
             initialize = _request(1, "initialize", {"protocolVersion": PROTOCOL_REVISION})
             assert (await client.post("/mcp/headers", json=initialize)).status_code == 406
+            invalid_initializations: tuple[dict[str, object], ...] = (
+                {},
+                {"protocolVersion": "2025-11-25"},
+            )
+            for invalid_params in invalid_initializations:
+                assert (
+                    await client.post(
+                        "/mcp/headers",
+                        headers=ACCEPT_HEADERS,
+                        json=_request(1, "initialize", invalid_params),
+                    )
+                ).status_code == 400
             response = await client.post("/mcp/headers", headers=ACCEPT_HEADERS, json=initialize)
             assert response.status_code == 200
             assert (
@@ -204,6 +230,7 @@ def test_reference_server_rejects_missing_transport_and_lifecycle_headers() -> N
                     "/mcp/headers", headers=ACCEPT_HEADERS, json=_request(2, "tools/list", {})
                 )
             ).status_code == 400
+
             session_headers = {
                 **ACCEPT_HEADERS,
                 "Mcp-Protocol-Version": PROTOCOL_REVISION,
@@ -232,6 +259,23 @@ def test_reference_server_rejects_missing_transport_and_lifecycle_headers() -> N
                     json=_request(4, "tools/list", {}),
                 )
             ).status_code == 400
+            second = await client.post("/mcp/headers", headers=ACCEPT_HEADERS, json=initialize)
+            assert second.headers["Mcp-Session-Id"] != response.headers["Mcp-Session-Id"]
+            assert (
+                await client.post(
+                    "/mcp/headers", headers=session_headers, json=_request(5, "tools/list", {})
+                )
+            ).status_code == 200
+            second_headers = {
+                **ACCEPT_HEADERS,
+                "Mcp-Protocol-Version": PROTOCOL_REVISION,
+                "Mcp-Session-Id": second.headers["Mcp-Session-Id"],
+            }
+            assert (
+                await client.post(
+                    "/mcp/headers", headers=second_headers, json=_request(6, "tools/list", {})
+                )
+            ).status_code == 409
 
     asyncio.run(scenario())
 
@@ -251,8 +295,22 @@ def test_pinned_sdk_negotiates_and_parses_reference_server() -> None:
             ),
             ClientSession(read_stream, write_stream) as session,
         ):
-            initialized = await session.initialize()
+            initialized = await session.send_request(
+                types.ClientRequest(
+                    types.InitializeRequest(
+                        params=types.InitializeRequestParams(
+                            protocolVersion=PROTOCOL_REVISION,
+                            capabilities=types.ClientCapabilities(),
+                            clientInfo=types.Implementation(name="modall-tests", version="1"),
+                        )
+                    )
+                ),
+                types.InitializeResult,
+            )
             assert initialized.protocolVersion == PROTOCOL_REVISION
+            await session.send_notification(
+                types.ClientNotification(types.InitializedNotification())
+            )
             tools = await session.list_tools()
             assert [tool.name for tool in tools.tools] == ["echo", "status"]
 

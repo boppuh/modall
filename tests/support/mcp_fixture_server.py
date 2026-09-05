@@ -1,6 +1,7 @@
 """Deterministic legacy MCP Streamable HTTP fixture server."""
 
 import asyncio
+from itertools import count
 from typing import Any
 
 from fastapi import FastAPI, Header, Request
@@ -55,7 +56,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
 
 def create_mcp_fixture_app() -> FastAPI:
     app = FastAPI()
-    initialized: dict[str, bool] = {}
+    next_session = count(1)
+    sessions: dict[str, tuple[str, str, bool]] = {}
 
     @app.post("/mcp/{profile}")
     async def mcp(
@@ -76,8 +78,12 @@ def create_mcp_fixture_app() -> FastAPI:
         method = payload.get("method")
         request_id = payload.get("id")
         if method == "initialize":
+            requested_revision = payload.get("params", {}).get("protocolVersion")
+            if requested_revision != PROTOCOL_REVISION:
+                return JSONResponse({"error": "unsupported requested protocol"}, status_code=400)
             revision = "2025-11-25" if profile == "protocol-mismatch" else PROTOCOL_REVISION
-            initialized[profile] = False
+            session_id = f"{profile}-session-{next(next_session)}"
+            sessions[session_id] = (profile, revision, False)
             return JSONResponse(
                 {
                     "jsonrpc": "2.0",
@@ -88,14 +94,15 @@ def create_mcp_fixture_app() -> FastAPI:
                         "serverInfo": {"name": "modall-reference", "version": "1.0.0"},
                     },
                 },
-                headers={"Mcp-Session-Id": f"{profile}-session"},
+                headers={"Mcp-Session-Id": session_id},
             )
-        if mcp_session_id != f"{profile}-session" or mcp_protocol_version != PROTOCOL_REVISION:
+        session = sessions.get(mcp_session_id or "")
+        if session is None or session[:2] != (profile, mcp_protocol_version):
             return JSONResponse({"error": "invalid session or protocol header"}, status_code=400)
         if method == "notifications/initialized":
-            initialized[profile] = True
+            sessions[mcp_session_id or ""] = (profile, session[1], True)
             return Response(status_code=202)
-        if not initialized.get(profile, False):
+        if not session[2]:
             return JSONResponse({"error": "session is not initialized"}, status_code=409)
         if profile == "timeout":
             await asyncio.sleep(0.05)
