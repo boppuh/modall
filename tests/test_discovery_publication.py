@@ -171,8 +171,36 @@ def test_successful_refreshes_append_observations_deduplicate_and_detect_drift()
                 assert capability is not None
                 assert capability.typed_status == CapabilityStatus.PENDING_REVIEW
                 assert capability.pending_version_id is not None
+                drift_version_id = capability.pending_version_id
                 assert (
                     await session.scalar(select(func.count()).select_from(CapabilityVersion)) == 2
+                )
+
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                lease = await lease_for(session, context, connection_id, "worker-5")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context,
+                    lease=lease,
+                    result=result_for(description="A third metadata state"),
+                )
+
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                lease = await lease_for(session, context, connection_id, "worker-6")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context,
+                    lease=lease,
+                    result=result_for(description="Echo text safely"),
+                )
+                capability = await session.scalar(
+                    select(Capability).where(Capability.connection_id == connection_id)
+                )
+                assert capability is not None
+                assert capability.typed_status == CapabilityStatus.PENDING_REVIEW
+                assert capability.pending_version_id == drift_version_id
+                assert (
+                    await session.scalar(select(func.count()).select_from(CapabilityVersion)) == 3
                 )
 
             async with transaction(factory) as session:
@@ -191,7 +219,7 @@ def test_successful_refreshes_append_observations_deduplicate_and_detect_drift()
                 assert capability.pending_version_id is None
                 assert capability.enabled_version_id is not None
                 assert (
-                    await session.scalar(select(func.count()).select_from(CapabilityVersion)) == 2
+                    await session.scalar(select(func.count()).select_from(CapabilityVersion)) == 3
                 )
 
     asyncio.run(scenario())
@@ -336,7 +364,7 @@ def test_enabled_capability_reappears_without_reapproval() -> None:
     asyncio.run(scenario())
 
 
-def test_connection_disable_obsoletes_queued_and_leased_refresh_jobs() -> None:
+def test_connection_control_changes_obsolete_queued_and_leased_refresh_jobs() -> None:
     async def scenario() -> None:
         async with database() as factory:
             admin_id, workspace_id = await bootstrap(factory, subject="disable-jobs-admin")
@@ -356,15 +384,41 @@ def test_connection_disable_obsoletes_queued_and_leased_refresh_jobs() -> None:
                     secret_binding_id=None,
                     policy_version="policy-v1",
                 )
+                append_queued_connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Append queued refresh",
+                    endpoint_url="https://mcp.example/append-queued",
+                    secret_binding_id=None,
+                    policy_version="policy-v1",
+                )
+                append_leased_connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Append leased refresh",
+                    endpoint_url="https://mcp.example/append-leased",
+                    secret_binding_id=None,
+                    policy_version="policy-v1",
+                )
                 queued_job = await RefreshJobService(session).enqueue(
                     context=context, connection_id=queued_connection.id
                 )
                 leased_job = await RefreshJobService(session).enqueue(
                     context=context, connection_id=leased_connection.id
                 )
+                append_queued_job = await RefreshJobService(session).enqueue(
+                    context=context, connection_id=append_queued_connection.id
+                )
+                append_leased_job = await RefreshJobService(session).enqueue(
+                    context=context, connection_id=append_leased_connection.id
+                )
                 await RefreshJobService(session).claim(
                     context=context,
                     job_id=leased_job.id,
+                    worker_id="worker",
+                    lease_duration=timedelta(minutes=1),
+                )
+                await RefreshJobService(session).claim(
+                    context=context,
+                    job_id=append_leased_job.id,
                     worker_id="worker",
                     lease_duration=timedelta(minutes=1),
                 )
@@ -375,7 +429,26 @@ def test_connection_disable_obsoletes_queued_and_leased_refresh_jobs() -> None:
                 await ConnectionService(session).disable(
                     context=context, connection_id=leased_connection.id
                 )
-                for job_id in (queued_job.id, leased_job.id):
+                await ConnectionService(session).append_version(
+                    context=context,
+                    connection_id=append_queued_connection.id,
+                    endpoint_url="https://mcp.example/append-queued-v2",
+                    secret_binding_id=None,
+                    policy_version="policy-v2",
+                )
+                await ConnectionService(session).append_version(
+                    context=context,
+                    connection_id=append_leased_connection.id,
+                    endpoint_url="https://mcp.example/append-leased-v2",
+                    secret_binding_id=None,
+                    policy_version="policy-v2",
+                )
+                for job_id in (
+                    queued_job.id,
+                    leased_job.id,
+                    append_queued_job.id,
+                    append_leased_job.id,
+                ):
                     job = await session.get(DiscoveryRefreshJob, job_id)
                     assert job is not None
                     assert job.status == RefreshJobStatus.OBSOLETE.value

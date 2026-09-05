@@ -33,6 +33,8 @@ from modall.security.metadata import (
 )
 
 QUALIFIED_PROTOCOL_REVISION = "2025-06-18"
+_RE2_OPTIONS = re2.Options()
+_RE2_OPTIONS.log_errors = False
 
 
 class DiscoveryError(Exception):
@@ -239,10 +241,7 @@ class McpClientAdapter:
             or contains_sensitive_json(payload)
             or (
                 credential_text is not None
-                and (
-                    credential_text.encode("ascii") in canonical
-                    or _contains_decoded_credential(payload, credential_text)
-                )
+                and _contains_decoded_credential(payload, credential_text)
             )
         ):
             raise DiscoveryError("discovery metadata failed secret screening")
@@ -304,7 +303,7 @@ def _schema_is_supported(
                     local_references.append((root_schema, child))
                 if schema_position and key == "pattern" and isinstance(child, str):
                     try:
-                        re2.compile(child)
+                        re2.compile(child, options=_RE2_OPTIONS)
                     except re2.error:
                         return False
                 if schema_position and key == "patternProperties" and isinstance(child, dict):
@@ -312,7 +311,7 @@ def _schema_is_supported(
                         if len(pattern) > 512:
                             return False
                         try:
-                            re2.compile(pattern)
+                            re2.compile(pattern, options=_RE2_OPTIONS)
                         except re2.error:
                             return False
                 if schema_position and key == "$id":
@@ -419,18 +418,32 @@ async def _schema_support_with_deadline(
 
 
 def _contains_decoded_credential(value: object, credential: str) -> bool:
+    no_scalar = object()
+    try:
+        parsed_credential: object = json.loads(credential)
+    except (json.JSONDecodeError, RecursionError):
+        parsed_credential = no_scalar
     stack = [value]
     while stack:
         current = stack.pop()
         if isinstance(current, dict):
-            for key, child in current.items():
-                if credential in key:
-                    return True
-                stack.append(child)
+            stack.extend(current.values())
         elif isinstance(current, list):
             stack.extend(current)
         elif isinstance(current, str) and credential in current:
             return True
+        elif parsed_credential is not no_scalar:
+            if isinstance(parsed_credential, bool) or parsed_credential is None:
+                if type(current) is type(parsed_credential) and current == parsed_credential:
+                    return True
+            elif (
+                isinstance(parsed_credential, (int, float))
+                and not isinstance(parsed_credential, bool)
+                and isinstance(current, (int, float))
+                and not isinstance(current, bool)
+                and current == parsed_credential
+            ):
+                return True
     return False
 
 

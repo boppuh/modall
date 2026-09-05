@@ -12,6 +12,7 @@ PROTOCOL_REVISION = "2025-06-18"
 FIXTURE_TOKEN = "fixture-token-not-a-real-secret"
 ESCAPED_FIXTURE_TOKEN = 'opaque"slash\\token123'
 NUMERIC_FIXTURE_TOKEN = "12345678"
+COMMON_KEY_FIXTURE_TOKEN = "type"
 AUTHENTICATED_PROFILES = {
     "authenticated",
     "authenticated-redirect",
@@ -20,6 +21,7 @@ AUTHENTICATED_PROFILES = {
     "credential-leak",
     "credential-escaped-leak",
     "credential-numeric-leak",
+    "credential-common-key",
 }
 SUPPORTED_PROFILES = {
     "default",
@@ -180,6 +182,8 @@ def create_mcp_fixture_app() -> FastAPI:
             expected_token = ESCAPED_FIXTURE_TOKEN
         elif profile == "credential-numeric-leak":
             expected_token = NUMERIC_FIXTURE_TOKEN
+        elif profile == "credential-common-key":
+            expected_token = COMMON_KEY_FIXTURE_TOKEN
         else:
             expected_token = FIXTURE_TOKEN
         if profile in AUTHENTICATED_PROFILES and authorization != f"Bearer {expected_token}":

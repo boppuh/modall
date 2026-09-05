@@ -25,6 +25,7 @@ from modall.mcp_adapter.policy import (
     TransportLimits,
 )
 from tests.support.mcp_fixture_server import (
+    COMMON_KEY_FIXTURE_TOKEN,
     ESCAPED_FIXTURE_TOKEN,
     FIXTURE_TOKEN,
     NUMERIC_FIXTURE_TOKEN,
@@ -142,6 +143,10 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
         numeric_leaking, endpoint = adapter_for("credential-numeric-leak")
         with pytest.raises(DiscoveryError, match="secret screening"):
             await numeric_leaking.discover(endpoint, bearer_token=NUMERIC_FIXTURE_TOKEN.encode())
+
+        common_key, endpoint = adapter_for("credential-common-key")
+        result = await common_key.discover(endpoint, bearer_token=COMMON_KEY_FIXTURE_TOKEN.encode())
+        assert result.tools
 
         for profile in (
             "structured-secret",
@@ -272,6 +277,19 @@ def test_adapter_rejects_schema_above_the_persistence_bound() -> None:
             await adapter.discover(endpoint)
 
     asyncio.run(scenario())
+
+
+def test_unsupported_schema_patterns_do_not_log_remote_content(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    async def scenario() -> None:
+        adapter, endpoint = adapter_for("unsafe-schema")
+        result = await adapter.discover(endpoint)
+        assert result.tools[0].schema_supported is False
+
+    asyncio.run(scenario())
+    captured = capfd.readouterr()
+    assert "(?=a)a" not in captured.err
 
 
 def test_pinned_network_backend_connects_only_to_approved_addresses() -> None:

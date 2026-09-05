@@ -152,6 +152,7 @@ class ConnectionService:
         connection.control_epoch += 1
         connection.allocated_control_epoch = None
         connection.allocated_target_version_id = None
+        await self._obsolete_refresh_jobs(context, connection.id)
         self._audit(context, AuditAction.CONNECTION_VERSION_APPENDED, connection.id, correlation_id)
         await self._session.flush()
         return version
@@ -214,6 +215,12 @@ class ConnectionService:
         connection.control_epoch += 1
         connection.allocated_control_epoch = None
         connection.allocated_target_version_id = None
+        await self._obsolete_refresh_jobs(context, connection.id)
+        self._audit(context, AuditAction.CONNECTION_DISABLED, connection.id, correlation_id)
+        await self._session.flush()
+        return connection
+
+    async def _obsolete_refresh_jobs(self, context: WorkspaceContext, connection_id: UUID) -> None:
         outstanding_jobs = (
             await self._session.scalars(
                 select(DiscoveryRefreshJob)
@@ -231,9 +238,6 @@ class ConnectionService:
             job.status = RefreshJobStatus.OBSOLETE.value
             job.lease_owner = None
             job.lease_expires_at = None
-        self._audit(context, AuditAction.CONNECTION_DISABLED, connection.id, correlation_id)
-        await self._session.flush()
-        return connection
 
     async def enable(
         self,
@@ -568,6 +572,15 @@ class CapabilityService:
                     capability.status = CapabilityStatus.PENDING_REVIEW.value
                     capability.status_epoch += 1
                     self._append_status_event(context, capability, existing.id)
+                elif (
+                    existing.id != capability.enabled_version_id
+                    and existing.id != capability.pending_version_id
+                ):
+                    capability.pending_version_id = existing.id
+                    if capability.typed_status != CapabilityStatus.DISABLED:
+                        capability.status = CapabilityStatus.PENDING_REVIEW.value
+                    capability.status_epoch += 1
+                    self._append_status_event(context, capability, existing.id)
                 return existing
             sequence = (
                 await self._session.scalar(
@@ -760,8 +773,6 @@ class CapabilityService:
             for version_id in (capability.enabled_version_id, capability.pending_version_id)
             if version_id is not None
         ]
-        if not current_ids:
-            return None
         rows = await self._session.execute(
             select(CapabilityVersion, McpToolBinding)
             .join(
@@ -769,17 +780,27 @@ class CapabilityService:
                 McpToolBinding.capability_version_id == CapabilityVersion.id,
             )
             .where(
-                CapabilityVersion.id.in_(current_ids),
                 CapabilityVersion.capability_id == capability.id,
                 CapabilityVersion.workspace_id == capability.workspace_id,
+                McpToolBinding.connection_version_id == connection_version_id,
+                McpToolBinding.tool_name == tool_name,
+                McpToolBinding.protocol_revision == protocol_revision,
             )
         )
-        by_id = {version.id: (version, binding) for version, binding in rows.all()}
-        for current_id in current_ids:
+        found_rows = rows.all()
+        by_id = {version.id: (version, binding) for version, binding in found_rows}
+        historical_ids = [
+            version.id
+            for version, _binding in sorted(
+                found_rows, key=lambda row: row[0].sequence, reverse=True
+            )
+            if version.id not in current_ids
+        ]
+        for current_id in [*current_ids, *historical_ids]:
             found = by_id.get(current_id)
             if found is None:
                 continue
-            version, binding = found
+            version, _binding = found
             if (
                 version.display_name == display_name
                 and version.description == description
@@ -787,9 +808,6 @@ class CapabilityService:
                 and version.output_schema == output_schema
                 and version.metadata_digest == metadata_digest
                 and version.schema_supported == schema_supported
-                and binding.connection_version_id == connection_version_id
-                and binding.tool_name == tool_name
-                and binding.protocol_revision == protocol_revision
             ):
                 return cast(CapabilityVersion, version)
         return None
