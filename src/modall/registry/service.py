@@ -66,6 +66,8 @@ class ConnectionService:
             verified_version_id=None,
             control_epoch=0,
             refresh_generation=0,
+            allocated_control_epoch=None,
+            allocated_target_version_id=None,
             created_by_user_id=context.actor_user_id,
         )
         version = ServerConnectionVersion(
@@ -149,6 +151,8 @@ class ConnectionService:
             or current_target != expected_version_id
             or connection.control_epoch != expected_control_epoch
             or connection.refresh_generation != expected_refresh_generation
+            or connection.allocated_control_epoch != expected_control_epoch
+            or connection.allocated_target_version_id != expected_version_id
         ):
             raise InvalidConnectionTransition("connection transition rejected")
         connection.verified_version_id = expected_version_id
@@ -215,6 +219,8 @@ class ConnectionService:
         if target is None:
             raise InvalidConnectionTransition("connection transition rejected")
         connection.refresh_generation += 1
+        connection.allocated_control_epoch = connection.control_epoch
+        connection.allocated_target_version_id = target
         await self._session.flush()
         return connection.refresh_generation, connection.control_epoch, target
 
@@ -274,7 +280,7 @@ class ConnectionService:
             raise ValueError("invalid endpoint URL") from exc
         unicode_hostname = parsed.hostname.rstrip(".").lower() if parsed.hostname else ""
         try:
-            hostname = unicode_hostname.encode("idna").decode("ascii")
+            hostname = unicode_hostname.encode("idna").decode("ascii").rstrip(".")
         except UnicodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
         try:
@@ -382,6 +388,8 @@ class CapabilityService:
             or current_target != connection_version_id
             or connection.control_epoch != expected_control_epoch
             or connection.refresh_generation != expected_refresh_generation
+            or connection.allocated_control_epoch != expected_control_epoch
+            or connection.allocated_target_version_id != connection_version_id
         ):
             raise InvalidConnectionTransition("connection transition rejected")
 
@@ -488,6 +496,30 @@ class CapabilityService:
         if (
             allowed_version != expected_version_id
             or capability.typed_status == CapabilityStatus.ENABLED
+        ):
+            raise InvalidCapabilityTransition("capability transition rejected")
+        binding = await self._session.scalar(
+            select(McpToolBinding).where(
+                McpToolBinding.capability_version_id == expected_version_id,
+                McpToolBinding.capability_id == capability.id,
+                McpToolBinding.workspace_id == context.workspace_id,
+            )
+        )
+        connection = await self._session.scalar(
+            select(ServerConnection)
+            .where(
+                ServerConnection.id == capability.connection_id,
+                ServerConnection.workspace_id == context.workspace_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            binding is None
+            or connection is None
+            or connection.typed_lifecycle == ConnectionLifecycle.DISABLED
+            or (connection.pending_version_id or connection.verified_version_id)
+            != binding.connection_version_id
         ):
             raise InvalidCapabilityTransition("capability transition rejected")
         capability.enabled_version_id = expected_version_id

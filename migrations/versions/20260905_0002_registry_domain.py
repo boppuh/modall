@@ -87,10 +87,23 @@ def upgrade() -> None:
         sa.Column("verified_version_id", sa.Uuid(), nullable=True),
         sa.Column("control_epoch", sa.Integer(), nullable=False),
         sa.Column("refresh_generation", sa.Integer(), nullable=False),
+        sa.Column("allocated_control_epoch", sa.Integer(), nullable=True),
+        sa.Column("allocated_target_version_id", sa.Uuid(), nullable=True),
         sa.Column("created_by_user_id", sa.Uuid(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("control_epoch >= 0", name="ck_connection_control_epoch"),
         sa.CheckConstraint("refresh_generation >= 0", name="ck_connection_refresh_generation"),
+        sa.CheckConstraint(
+            "(refresh_generation = 0 AND allocated_control_epoch IS NULL AND "
+            "allocated_target_version_id IS NULL) OR "
+            "(refresh_generation > 0 AND allocated_control_epoch IS NOT NULL AND "
+            "allocated_target_version_id IS NOT NULL)",
+            name="ck_connection_refresh_allocation",
+        ),
+        sa.CheckConstraint(
+            "allocated_control_epoch IS NULL OR allocated_control_epoch >= 0",
+            name="ck_connection_allocated_control_epoch",
+        ),
         sa.CheckConstraint(
             "lifecycle IN ('verifying', 'active', 'degraded', 'disabled')",
             name="ck_connection_lifecycle",
@@ -155,6 +168,15 @@ def upgrade() -> None:
         "server_connections",
         "server_connection_versions",
         ["id", "verified_version_id"],
+        ["connection_id", "id"],
+        deferrable=True,
+        initially="DEFERRED",
+    )
+    op.create_foreign_key(
+        "fk_connection_allocated_target_version",
+        "server_connections",
+        "server_connection_versions",
+        ["id", "allocated_target_version_id"],
         ["connection_id", "id"],
         deferrable=True,
         initially="DEFERRED",
@@ -351,6 +373,9 @@ def downgrade() -> None:
     op.drop_table("capabilities")
     op.drop_constraint("fk_connection_verified_version", "server_connections", type_="foreignkey")
     op.drop_constraint("fk_connection_pending_version", "server_connections", type_="foreignkey")
+    op.drop_constraint(
+        "fk_connection_allocated_target_version", "server_connections", type_="foreignkey"
+    )
     op.drop_table("server_connection_versions")
     op.drop_table("server_connections")
     op.drop_constraint("fk_registry_entry_current_version", "registry_entries", type_="foreignkey")

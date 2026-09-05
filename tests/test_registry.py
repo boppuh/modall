@@ -91,6 +91,15 @@ def test_connection_versions_and_lifecycle_are_truthful() -> None:
                 assert connection.verified_version_id is None
                 assert ConnectionService.is_executable(connection, first_version_id) is False
 
+                with pytest.raises(InvalidConnectionTransition):
+                    await ConnectionService(session).promote_pending(
+                        context=context,
+                        connection_id=connection_id,
+                        expected_version_id=first_version_id,
+                        expected_control_epoch=0,
+                        expected_refresh_generation=0,
+                    )
+
                 generation, epoch, target = await ConnectionService(
                     session
                 ).allocate_refresh_generation(context=context, connection_id=connection_id)
@@ -300,6 +309,7 @@ def test_connection_versions_are_immutable() -> None:
         "https://①②⑦.⓪.⓪.①",
         "https://\uff11\uff12\uff17.\uff10.\uff10.\uff11",
         "https://\u2113ocalhost",
+        "https://localhost\u3002",
     ],
 )
 def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> None:
@@ -421,6 +431,19 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
                 assert capability.enabled_version_id == first.id
                 assert CapabilityStatus(capability.status) == CapabilityStatus.PENDING_REVIEW
                 assert capability.status_epoch == 3
+                await ConnectionService(session).append_version(
+                    context=context,
+                    connection_id=connection.id,
+                    endpoint_url="https://mcp.example/tools-v2",
+                    secret_binding_id=None,
+                    policy_version="v2",
+                )
+                with pytest.raises(InvalidCapabilityTransition):
+                    await service.enable(
+                        context=context,
+                        capability_id=capability.id,
+                        expected_version_id=drift.id,
+                    )
 
             async with factory() as session:
                 versions = list(

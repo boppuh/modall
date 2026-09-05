@@ -205,6 +205,17 @@ class ServerConnection(Base):
         CheckConstraint("control_epoch >= 0", name="ck_connection_control_epoch"),
         CheckConstraint("refresh_generation >= 0", name="ck_connection_refresh_generation"),
         CheckConstraint(
+            "(refresh_generation = 0 AND allocated_control_epoch IS NULL AND "
+            "allocated_target_version_id IS NULL) OR "
+            "(refresh_generation > 0 AND allocated_control_epoch IS NOT NULL AND "
+            "allocated_target_version_id IS NOT NULL)",
+            name="ck_connection_refresh_allocation",
+        ),
+        CheckConstraint(
+            "allocated_control_epoch IS NULL OR allocated_control_epoch >= 0",
+            name="ck_connection_allocated_control_epoch",
+        ),
+        CheckConstraint(
             "pending_version_id IS NOT NULL OR verified_version_id IS NOT NULL",
             name="ck_connection_has_version",
         ),
@@ -228,6 +239,14 @@ class ServerConnection(Base):
             deferrable=True,
             initially="DEFERRED",
         ),
+        ForeignKeyConstraint(
+            ["id", "allocated_target_version_id"],
+            ["server_connection_versions.connection_id", "server_connection_versions.id"],
+            name="fk_connection_allocated_target_version",
+            use_alter=True,
+            deferrable=True,
+            initially="DEFERRED",
+        ),
     )
 
     id: Mapped[UuidPrimaryKey]
@@ -238,6 +257,8 @@ class ServerConnection(Base):
     verified_version_id: Mapped[UUID | None]
     control_epoch: Mapped[int] = mapped_column(Integer, default=0)
     refresh_generation: Mapped[int] = mapped_column(Integer, default=0)
+    allocated_control_epoch: Mapped[int | None] = mapped_column(Integer)
+    allocated_target_version_id: Mapped[UUID | None]
     created_by_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     created_at: Mapped[CreatedAt]
 
