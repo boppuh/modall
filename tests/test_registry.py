@@ -5,7 +5,6 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import event, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from modall.audit.types import AuditAction
@@ -159,6 +158,48 @@ def test_connection_versions_and_lifecycle_are_truthful() -> None:
                         metadata_digest="a" * 64,
                         protocol_revision="2025-06-18",
                     )
+                generation, epoch, target = await ConnectionService(
+                    session
+                ).allocate_refresh_generation(context=context, connection_id=connection_id)
+                refreshed = await CapabilityService(session).record_version(
+                    context=context,
+                    connection_id=connection_id,
+                    connection_version_id=target,
+                    expected_control_epoch=epoch,
+                    expected_refresh_generation=generation,
+                    tool_identity="tools/refreshed",
+                    tool_name="refreshed",
+                    display_name="Refreshed",
+                    description=None,
+                    input_schema={},
+                    output_schema=None,
+                    metadata_digest="b" * 64,
+                    protocol_revision="2025-06-18",
+                )
+                await ConnectionService(session).complete_refresh(
+                    context=context,
+                    connection_id=connection_id,
+                    expected_version_id=target,
+                    expected_control_epoch=epoch,
+                    expected_refresh_generation=generation,
+                )
+                with pytest.raises(InvalidConnectionTransition):
+                    await CapabilityService(session).record_version(
+                        context=context,
+                        connection_id=connection_id,
+                        connection_version_id=target,
+                        expected_control_epoch=epoch,
+                        expected_refresh_generation=generation,
+                        tool_identity="tools/late-refresh",
+                        tool_name="late-refresh",
+                        display_name="Late refresh",
+                        description=None,
+                        input_schema={},
+                        output_schema=None,
+                        metadata_digest="c" * 64,
+                        protocol_revision="2025-06-18",
+                    )
+                assert refreshed.capability_id is not None
 
             async with transaction(factory) as session:
                 context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
@@ -359,6 +400,7 @@ def test_connection_versions_are_immutable() -> None:
         "https://mcp.example/%73%6b_live_abcdefghijkl",
         "https://sk-abcdefghijklmnop.example.com/mcp",
         "https://mcp.example/\ud800",
+        "https://mcp.example../path",
     ],
 )
 def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> None:
@@ -480,6 +522,19 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
                 assert capability.enabled_version_id == first.id
                 assert CapabilityStatus(capability.status) == CapabilityStatus.PENDING_REVIEW
                 assert capability.status_epoch == 3
+                await service.disable(
+                    context=context,
+                    capability_id=capability.id,
+                    expected_version_id=drift.id,
+                )
+                disabled_event = await session.scalar(
+                    select(CapabilityStatusEvent).where(
+                        CapabilityStatusEvent.capability_id == capability.id,
+                        CapabilityStatusEvent.status_epoch == 4,
+                    )
+                )
+                assert disabled_event is not None
+                assert disabled_event.capability_version_id == drift.id
                 await ConnectionService(session).append_version(
                     context=context,
                     connection_id=connection.id,
@@ -523,7 +578,7 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
                     ).all()
                 )
                 assert [version.sequence for version in versions] == [1, 2]
-                assert [event.status_epoch for event in events] == [1, 2, 3]
+                assert [event.status_epoch for event in events] == [1, 2, 3, 4]
                 assert len(bindings) == 2
 
             with pytest.raises(ValueError, match="immutable"):
@@ -743,17 +798,18 @@ def test_registry_entry_identity_is_immutable() -> None:
     asyncio.run(scenario())
 
 
-def test_official_registry_entry_requires_external_identity() -> None:
+@pytest.mark.parametrize("external_id", [None, "\t\n"])
+def test_official_registry_entry_requires_external_identity(external_id: str | None) -> None:
     async def scenario() -> None:
         async with database() as factory:
             _, workspace_id = await bootstrap(factory, subject=str(uuid4()))
-            with pytest.raises(IntegrityError, match="official_external_id"):
+            with pytest.raises(ValueError, match="requires an external identity"):
                 async with transaction(factory) as session:
                     session.add(
                         RegistryEntry(
                             workspace_id=workspace_id,
                             source="official",
-                            external_id=None,
+                            external_id=external_id,
                             current_version_id=None,
                         )
                     )
@@ -774,6 +830,11 @@ def test_capability_metadata_rejects_non_utf8_scalar() -> None:
             metadata_digest="a" * 64,
             protocol_revision="2025-06-18",
         )
+
+
+def test_connection_name_rejects_non_utf8_scalar() -> None:
+    with pytest.raises(ValueError, match="UTF-8"):
+        ConnectionService._validate_name("\ud800")
 
 
 def test_stale_verification_cannot_survive_disable_enable() -> None:
@@ -852,10 +913,18 @@ def test_capability_disable_enable_uses_monotonic_epoch() -> None:
                     expected_version_id=version.id,
                 )
                 original_enabled_id = capability.enabled_version_id
-                await service.disable(context=context, capability_id=capability.id)
+                await service.disable(
+                    context=context,
+                    capability_id=capability.id,
+                    expected_version_id=version.id,
+                )
                 assert capability.status_epoch == 3
                 with pytest.raises(InvalidCapabilityTransition):
-                    await service.disable(context=context, capability_id=capability.id)
+                    await service.disable(
+                        context=context,
+                        capability_id=capability.id,
+                        expected_version_id=version.id,
+                    )
                 await service.enable(
                     context=context,
                     capability_id=capability.id,

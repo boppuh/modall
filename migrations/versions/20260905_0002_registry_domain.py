@@ -399,6 +399,10 @@ def upgrade() -> None:
     op.execute(
         "CREATE FUNCTION modall_reject_registry_entry_identity_update() RETURNS trigger "
         "LANGUAGE plpgsql AS $$ BEGIN "
+        "IF NEW.source = 'official' AND "
+        "(NEW.external_id IS NULL OR NEW.external_id !~ '[^[:space:]]') THEN "
+        "RAISE EXCEPTION 'official registry entry requires external identity'; END IF; "
+        "IF TG_OP = 'INSERT' THEN RETURN NEW; END IF; "
         "IF NEW.workspace_id IS DISTINCT FROM OLD.workspace_id "
         "OR NEW.source IS DISTINCT FROM OLD.source "
         "OR NEW.external_id IS DISTINCT FROM OLD.external_id THEN "
@@ -406,7 +410,7 @@ def upgrade() -> None:
     )
     op.execute(
         "CREATE TRIGGER registry_entries_immutable_identity "
-        "BEFORE UPDATE ON registry_entries FOR EACH ROW "
+        "BEFORE INSERT OR UPDATE ON registry_entries FOR EACH ROW "
         "EXECUTE FUNCTION modall_reject_registry_entry_identity_update()"
     )
 

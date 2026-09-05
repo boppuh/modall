@@ -127,6 +127,8 @@ class ConnectionService:
         connection.pending_version_id = version.id
         connection.lifecycle = ConnectionLifecycle.VERIFYING.value
         connection.control_epoch += 1
+        connection.allocated_control_epoch = None
+        connection.allocated_target_version_id = None
         self._audit(context, AuditAction.CONNECTION_VERSION_APPENDED, connection.id, correlation_id)
         await self._session.flush()
         return version
@@ -187,6 +189,8 @@ class ConnectionService:
             raise InvalidConnectionTransition("connection transition rejected")
         connection.lifecycle = ConnectionLifecycle.DISABLED.value
         connection.control_epoch += 1
+        connection.allocated_control_epoch = None
+        connection.allocated_target_version_id = None
         self._audit(context, AuditAction.CONNECTION_DISABLED, connection.id, correlation_id)
         await self._session.flush()
         return connection
@@ -204,6 +208,8 @@ class ConnectionService:
             raise InvalidConnectionTransition("connection transition rejected")
         connection.lifecycle = ConnectionLifecycle.VERIFYING.value
         connection.control_epoch += 1
+        connection.allocated_control_epoch = None
+        connection.allocated_target_version_id = None
         self._audit(context, AuditAction.CONNECTION_ENABLED, connection.id, correlation_id)
         await self._session.flush()
         return connection
@@ -229,6 +235,42 @@ class ConnectionService:
         connection.allocated_target_version_id = target
         await self._session.flush()
         return connection.refresh_generation, connection.control_epoch, target
+
+    async def complete_refresh(
+        self,
+        *,
+        context: WorkspaceContext,
+        connection_id: UUID,
+        expected_version_id: UUID,
+        expected_control_epoch: int,
+        expected_refresh_generation: int,
+    ) -> ServerConnection:
+        """Consume an ordinary refresh allocation in its publication transaction."""
+
+        await require_current_role(
+            self._session,
+            context,
+            Role.ADMIN,
+            Role.OPERATOR,
+            serialize_workspace=True,
+        )
+        connection = await self._locked_connection(context, connection_id)
+        if (
+            connection.typed_lifecycle
+            not in {ConnectionLifecycle.ACTIVE, ConnectionLifecycle.DEGRADED}
+            or connection.pending_version_id is not None
+            or connection.verified_version_id != expected_version_id
+            or connection.control_epoch != expected_control_epoch
+            or connection.refresh_generation != expected_refresh_generation
+            or connection.allocated_control_epoch != expected_control_epoch
+            or connection.allocated_target_version_id != expected_version_id
+        ):
+            raise InvalidConnectionTransition("connection transition rejected")
+        connection.lifecycle = ConnectionLifecycle.ACTIVE.value
+        connection.allocated_control_epoch = None
+        connection.allocated_target_version_id = None
+        await self._session.flush()
+        return connection
 
     @staticmethod
     def is_executable(connection: ServerConnection, connection_version_id: UUID) -> bool:
@@ -273,6 +315,10 @@ class ConnectionService:
         normalized = name.strip()
         if not normalized or len(normalized) > 128 or "\x00" in normalized:
             raise ValueError("connection name must contain between 1 and 128 characters")
+        try:
+            normalized.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("connection name is not valid UTF-8") from exc
         return normalized
 
     @classmethod
@@ -284,13 +330,19 @@ class ConnectionService:
             port = parsed.port
         except ValueError as exc:
             raise ValueError("invalid endpoint URL") from exc
-        unicode_hostname = parsed.hostname.rstrip(".").lower() if parsed.hostname else ""
+        unicode_hostname = parsed.hostname.lower() if parsed.hostname else ""
+        if unicode_hostname.endswith(".."):
+            raise ValueError("invalid endpoint URL")
+        unicode_hostname = unicode_hostname.removesuffix(".")
         if "%" in unicode_hostname:
             raise ValueError("invalid endpoint URL")
         try:
-            hostname = unicode_hostname.encode("idna").decode("ascii").rstrip(".")
+            encoded_hostname = unicode_hostname.encode("idna").decode("ascii")
         except UnicodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
+        if encoded_hostname.endswith(".."):
+            raise ValueError("invalid endpoint URL")
+        hostname = encoded_hostname.removesuffix(".")
         if len(hostname) > 253 or any(
             cls._DNS_LABEL.fullmatch(label) is None for label in hostname.split(".")
         ):
@@ -564,6 +616,7 @@ class CapabilityService:
         *,
         context: WorkspaceContext,
         capability_id: UUID,
+        expected_version_id: UUID,
         correlation_id: UUID | None = None,
     ) -> Capability:
         await require_current_role(
@@ -574,11 +627,16 @@ class CapabilityService:
             serialize_workspace=True,
         )
         capability = await self._locked_capability(context, capability_id)
-        if capability.typed_status == CapabilityStatus.DISABLED:
+        decision_version_id = capability.pending_version_id or capability.enabled_version_id
+        if (
+            capability.typed_status == CapabilityStatus.DISABLED
+            or decision_version_id is None
+            or decision_version_id != expected_version_id
+        ):
             raise InvalidCapabilityTransition("capability transition rejected")
         capability.status = CapabilityStatus.DISABLED.value
         capability.status_epoch += 1
-        self._append_status_event(context, capability, capability.enabled_version_id)
+        self._append_status_event(context, capability, decision_version_id)
         self._audit(context, AuditAction.CAPABILITY_DISABLED, capability.id, correlation_id)
         await self._session.flush()
         return capability

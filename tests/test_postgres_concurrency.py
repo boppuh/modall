@@ -3,7 +3,7 @@ import os
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import DBAPIError
 
 from modall.identity.repository import AuthorizationDenied, AuthorizationService
@@ -253,7 +253,7 @@ def test_database_guards_stable_capability_identity_and_exact_binding() -> None:
                 )
                 session.add(entry)
                 await session.flush()
-                entry_id = entry.id
+                entry_id, workspace_id = entry.id, workspace.id
 
             with pytest.raises(DBAPIError):
                 async with transaction(factory) as session:
@@ -285,6 +285,17 @@ def test_database_guards_stable_capability_identity_and_exact_binding() -> None:
                         update(RegistryEntry)
                         .where(RegistryEntry.id == entry_id)
                         .values(external_id="io.example/retargeted")
+                    )
+
+            with pytest.raises(DBAPIError):
+                async with transaction(factory) as session:
+                    await session.execute(
+                        insert(RegistryEntry).values(
+                            workspace_id=workspace_id,
+                            source="official",
+                            external_id="\t\n",
+                            current_version_id=None,
+                        )
                     )
 
             async with transaction(factory) as session:

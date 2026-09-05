@@ -510,6 +510,17 @@ def _reject_registry_entry_identity_update(
         raise ValueError("registry entry identity cannot be updated")
 
 
+def _validate_registry_entry_insert(
+    mapper: Mapper[object], connection: object, target: object
+) -> None:
+    del mapper, connection
+    entry = cast(RegistryEntry, target)
+    if entry.source == RegistrySource.OFFICIAL.value and (
+        entry.external_id is None or not entry.external_id.strip()
+    ):
+        raise ValueError("official registry entry requires an external identity")
+
+
 for immutable_model in (
     SecretBinding,
     RegistryEntryVersion,
@@ -524,3 +535,4 @@ event.listen(McpToolBinding, "before_delete", _reject_immutable_delete)
 event.listen(CapabilityStatusEvent, "before_delete", _reject_immutable_delete)
 event.listen(Capability, "before_update", _reject_capability_identity_update)
 event.listen(RegistryEntry, "before_update", _reject_registry_entry_identity_update)
+event.listen(RegistryEntry, "before_insert", _validate_registry_entry_insert)
