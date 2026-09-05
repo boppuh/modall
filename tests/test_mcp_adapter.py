@@ -141,6 +141,8 @@ def test_endpoint_policy_rejects_unsafe_resolution_and_scheme_combinations() -> 
     async def scenario() -> None:
         public = EndpointPolicy(environment="production", resolver=resolver({"8.8.8.8"}))
         await public.validate("https://mcp.example/tools")
+        trailing_dot = await public.validate("https://mcp.example./tools")
+        assert trailing_dot.host == "mcp.example"
         rejected = (
             (public, "http://mcp.example/tools"),
             (public, "https://user@mcp.example/tools"),
@@ -185,6 +187,15 @@ def test_total_timeout_bounds_resolution() -> None:
         )
         with pytest.raises(DiscoveryError):
             await adapter.discover("https://mcp.example")
+
+    asyncio.run(scenario())
+
+
+def test_adapter_rejects_schema_above_the_persistence_bound() -> None:
+    async def scenario() -> None:
+        adapter, endpoint = adapter_for("storage-oversized-schema")
+        with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
+            await adapter.discover(endpoint)
 
     asyncio.run(scenario())
 

@@ -1,6 +1,5 @@
 """Workspace-scoped connection versioning and lifecycle operations."""
 
-import json
 import re
 from ipaddress import ip_address
 from socket import inet_aton
@@ -26,6 +25,7 @@ from modall.persistence.models import (
     ServerConnectionVersion,
 )
 from modall.registry.types import CapabilityStatus, ConnectionLifecycle, Transport
+from modall.security.metadata import contains_obvious_secret, validate_schema_payload
 
 QUALIFIED_PROTOCOL_REVISION = "2025-06-18"
 
@@ -273,7 +273,11 @@ class ConnectionService:
         connection = await self._locked_connection(context, connection_id)
         if (
             connection.typed_lifecycle
-            not in {ConnectionLifecycle.ACTIVE, ConnectionLifecycle.DEGRADED}
+            not in {
+                ConnectionLifecycle.VERIFYING,
+                ConnectionLifecycle.ACTIVE,
+                ConnectionLifecycle.DEGRADED,
+            }
             or connection.pending_version_id is not None
             or connection.verified_version_id != expected_version_id
             or connection.control_epoch != expected_control_epoch
@@ -411,7 +415,7 @@ class ConnectionService:
             canonical_endpoint.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
-        if _contains_obvious_secret(canonical_endpoint):
+        if contains_obvious_secret(canonical_endpoint):
             raise ValueError("endpoint URL contains credential-shaped content")
         if self._POLICY_VERSION.fullmatch(policy_version) is None:
             raise ValueError("invalid policy version")
@@ -827,98 +831,6 @@ class CapabilityService:
             for value in (tool_identity, tool_name, display_name, description, protocol_revision)
             if value is not None
         )
-        if _contains_obvious_secret(scalar_metadata):
+        if contains_obvious_secret(scalar_metadata):
             raise ValueError("capability metadata contains credential-shaped content")
-        _validate_schema_payload(input_schema, output_schema)
-
-
-_OBVIOUS_SECRET = re.compile(
-    r"(?:sk_live_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{16,}|"
-    r"gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|"
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
-    r"(?:api[_-]?key|access[_-]?token|secret|password)[=:/_-][A-Za-z0-9._~+/=\-]{8,})",
-    re.IGNORECASE,
-)
-
-
-def _contains_obvious_secret(value: str) -> bool:
-    return _OBVIOUS_SECRET.search(value) is not None
-
-
-def _validate_schema_payload(
-    input_schema: dict[str, object], output_schema: dict[str, object] | None
-) -> None:
-    """Reject discovery schemas outside conservative storage bounds."""
-
-    roots: tuple[object, ...] = (
-        (input_schema,)
-        if output_schema is None
-        else (
-            input_schema,
-            output_schema,
-        )
-    )
-    stack = [(root, 1) for root in roots]
-    node_count = 0
-    while stack:
-        value, depth = stack.pop()
-        node_count += 1
-        if depth > 32 or node_count > 4096:
-            raise ValueError("schema exceeds structural limits")
-        if isinstance(value, dict):
-            if len(value) > 1024:
-                raise ValueError("schema exceeds property limits")
-            for key, child in value.items():
-                if not isinstance(key, str) or len(key) > 8192:
-                    raise ValueError("schema contains an invalid key")
-                stack.append((child, depth + 1))
-        elif isinstance(value, list):
-            if len(value) > 1024:
-                raise ValueError("schema exceeds item limits")
-            stack.extend((child, depth + 1) for child in value)
-        elif isinstance(value, str):
-            if len(value) > 8192:
-                raise ValueError("schema string exceeds limits")
-        elif value is not None and not isinstance(value, (bool, int, float)):
-            raise ValueError("schema contains a non-JSON value")
-    try:
-        serialized = json.dumps(roots, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        encoded = serialized.encode("utf-8")
-    except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError) as exc:
-        raise ValueError("schema is not bounded JSON") from exc
-    if len(encoded) > 131_072:
-        raise ValueError("schema exceeds serialized size limit")
-    if _contains_obvious_secret(serialized) or any(
-        _contains_obvious_secret_in_json(root) for root in roots
-    ):
-        raise ValueError("schema contains credential-shaped content")
-
-
-_SENSITIVE_JSON_FIELD = re.compile(
-    r"(?:api[_-]?key|access[_-]?token|secret|password)", re.IGNORECASE
-)
-
-
-def _contains_obvious_secret_in_json(value: object) -> bool:
-    stack = [(value, False)]
-    while stack:
-        current, sensitive_context = stack.pop()
-        if isinstance(current, dict):
-            for key, child in current.items():
-                key_is_sensitive = _SENSITIVE_JSON_FIELD.fullmatch(key) is not None
-                if key_is_sensitive and isinstance(child, str) and len(child) >= 8:
-                    return True
-                if sensitive_context and key in {"const", "default", "enum", "example", "examples"}:
-                    literals = [child]
-                    while literals:
-                        literal = literals.pop()
-                        if isinstance(literal, str) and len(literal) >= 8:
-                            return True
-                        if isinstance(literal, list):
-                            literals.extend(literal)
-                stack.append((child, sensitive_context or key_is_sensitive))
-        elif isinstance(current, list):
-            stack.extend((child, sensitive_context) for child in current)
-        elif isinstance(current, str) and _contains_obvious_secret(current):
-            return True
-    return False
+        validate_schema_payload(input_schema, output_schema)

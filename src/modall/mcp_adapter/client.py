@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -20,6 +19,11 @@ from modall.mcp_adapter.policy import (
     LimitedTransport,
     PinnedHTTPTransport,
     TransportLimits,
+)
+from modall.security.metadata import (
+    MetadataValidationError,
+    contains_obvious_secret,
+    validate_schema_payload,
 )
 
 QUALIFIED_PROTOCOL_REVISION = "2025-06-18"
@@ -174,6 +178,10 @@ class McpClientAdapter:
             identities.add(identity)
             encoded = _canonical_json(normalized)
             metadata_digest = hashlib.sha256(encoded).hexdigest()
+            try:
+                validate_schema_payload(tool.inputSchema, tool.outputSchema)
+            except MetadataValidationError as exc:
+                raise DiscoveryError("invalid discovery metadata") from exc
             schema_supported = await _schema_support_with_deadline(
                 tool.inputSchema, tool.outputSchema
             )
@@ -201,7 +209,7 @@ class McpClientAdapter:
         if len(canonical) > self._limits.response_bytes:
             raise DiscoveryError("normalized discovery exceeded byte limit")
         text = canonical.decode("utf-8")
-        if _contains_obvious_secret(text) or (
+        if contains_obvious_secret(text) or (
             credential_text is not None and _contains_decoded_credential(payload, credential_text)
         ):
             raise DiscoveryError("discovery metadata failed secret screening")
@@ -232,14 +240,6 @@ def _canonical_json(value: object) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
         raise DiscoveryError("invalid discovery metadata") from exc
-
-
-_OBVIOUS_SECRET = re.compile(
-    r"(?:sk_live_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|"
-    r"AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|"
-    r"(?:api[_-]?key|access[_-]?token|secret|password)[=:/_-][A-Za-z0-9._~+/=\-]{8,})",
-    re.IGNORECASE,
-)
 
 
 def _schema_is_supported(
@@ -310,10 +310,6 @@ async def _schema_support_with_deadline(
             return await asyncio.to_thread(_schema_is_supported, input_schema, output_schema)
     except TimeoutError:
         return False
-
-
-def _contains_obvious_secret(value: str) -> bool:
-    return _OBVIOUS_SECRET.search(value) is not None
 
 
 def _contains_decoded_credential(value: object, credential: str) -> bool:

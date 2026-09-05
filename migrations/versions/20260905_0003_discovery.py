@@ -156,9 +156,24 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("connection_id", "generation"),
     )
+    for table in (
+        "discovery_payloads",
+        "discovery_snapshots",
+        "discovery_snapshot_capabilities",
+    ):
+        op.execute(
+            f"CREATE TRIGGER {table}_immutable BEFORE UPDATE ON {table} "
+            "FOR EACH ROW EXECUTE FUNCTION modall_reject_immutable_update()"
+        )
 
 
 def downgrade() -> None:
+    for table in (
+        "discovery_payloads",
+        "discovery_snapshots",
+        "discovery_snapshot_capabilities",
+    ):
+        op.execute(f"DROP TRIGGER IF EXISTS {table}_immutable ON {table}")
     op.drop_table("discovery_refresh_jobs")
     op.drop_table("discovery_snapshot_capabilities")
     op.drop_constraint("fk_connection_current_snapshot", "server_connections", type_="foreignkey")

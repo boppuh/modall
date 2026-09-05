@@ -36,6 +36,7 @@ SUPPORTED_PROFILES = {
     "unsafe-schema",
     "remote-schema-ref",
     "dynamic-schema-ref",
+    "storage-oversized-schema",
     "repeated-cursor",
     *AUTHENTICATED_PROFILES,
 }
@@ -64,6 +65,10 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         schema["properties"]["message"] = {"$ref": "child.json"}
     if profile == "dynamic-schema-ref":
         schema["properties"]["message"] = {"$dynamicRef": "https://attacker.example/schema"}
+    if profile == "storage-oversized-schema":
+        schema["properties"] = {
+            f"field{index}": {"type": "string", "description": "x" * 160} for index in range(900)
+        }
     return [
         {
             "name": "echo",

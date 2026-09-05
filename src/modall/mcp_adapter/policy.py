@@ -81,7 +81,7 @@ class EndpointPolicy:
         ):
             raise EndpointPolicyError("endpoint rejected")
         try:
-            host = parsed.hostname.encode("idna").decode("ascii").lower()
+            host = parsed.hostname.encode("idna").decode("ascii").lower().removesuffix(".")
         except UnicodeError as exc:
             raise EndpointPolicyError("endpoint rejected") from exc
         addresses = await self._resolver(host, port)

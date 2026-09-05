@@ -287,6 +287,20 @@ def test_failed_pending_verification_can_be_retried_and_promoted() -> None:
                 assert retrying.pending_version_id is None
                 assert retrying.verified_version_id == pending_version_id
 
+                await ConnectionService(session).disable(
+                    context=context, connection_id=connection_id
+                )
+                await ConnectionService(session).enable(
+                    context=context, connection_id=connection_id
+                )
+                reverify_lease = await lease_for(session, context, connection_id, "worker-3")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context,
+                    lease=reverify_lease,
+                    result=result_for(),
+                )
+                assert retrying.lifecycle == ConnectionLifecycle.ACTIVE.value
+
     asyncio.run(scenario())
 
 
