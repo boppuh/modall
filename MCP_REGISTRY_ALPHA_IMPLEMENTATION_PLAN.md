@@ -255,8 +255,8 @@ An ADR may change a choice before implementation. Public and domain contracts mu
 - IDs are server-generated UUIDs and do not encode tenant or content.
 - A connection version is immutable and pins endpoint, secret-binding version, transport, and policy.
 - A capability version is immutable and pins schemas plus exactly one MCP tool binding.
-- An MCP tool binding is executable only while its connection version is the connection's exact current verified version and its observed tool identity/schema remains present in the current published discovery snapshot. Connection-version replacement or schema/tool drift transitions every superseded binding out of executable state before new admission or fencing.
-- Every successful refresh appends an immutable discovery observation, including when its canonical payload is unchanged. Normalized payload blobs may deduplicate by canonical digest; a derived capability version may deduplicate only when its exact connection-version/tool/protocol binding and schemas are unchanged, so reverification of a new connection version always creates a new pending capability version even for identical remote metadata.
+- An MCP tool binding is executable only while its connection version is the connection's exact current verified version and its observed tool identity, schemas, and complete versioned metadata digest remain present in the current published discovery snapshot. Connection-version replacement or schema/tool/metadata drift transitions every superseded binding out of executable state before new admission or fencing.
+- Every successful refresh appends an immutable discovery observation, including when its canonical payload is unchanged. Normalized payload blobs may deduplicate by canonical digest; a derived capability version may deduplicate only when its exact connection-version/tool/protocol binding, schemas, and all versioned metadata are unchanged, so metadata-only drift creates a new pending version and reverification of a new connection version does the same even for identical remote metadata.
 - Every verification/refresh job receives a monotonically increasing connection-scoped generation; only the latest-started generation may publish a snapshot or health projection.
 - A capability status projection changes through append-only events.
 - Every connection enable/disable and capability status transition increments its stable identity's monotonic control/status epoch.
@@ -342,7 +342,7 @@ An unsuccessful discovery never publishes a snapshot. Only the latest otherwise-
 
 1. API validates authorization, capability state, input schema, limits, secret scan, confirmation token, and idempotency.
 2. One transaction creates the run and queued job pinned to exact immutable versions and the current connection control/capability status epochs.
-3. Worker claims the job, atomically increments and records its `lease_epoch`, and rechecks current actor membership, connection/capability status, exact pinned control/status epochs, deadline, cancellation, exact current verified connection version, and the binding's presence with identical tool/schema identity in the current discovery snapshot.
+3. Worker claims the job, atomically increments and records its `lease_epoch`, and rechecks current actor membership, connection/capability status, exact pinned control/status epochs, deadline, cancellation, exact current verified connection version, and the binding's presence with identical tool, schema, and complete versioned metadata identity in the current discovery snapshot.
 4. Worker initializes a fresh short-lived MCP session using the pinned connection version.
 5. Immediately before `tools/call`, one transaction repeats every mutable, pinned control/status epoch, and exact-binding/current-snapshot check, requires the job lease is still owned/unexpired and its epoch exactly matches the worker claim, and changes the attempt from `preparing` to `dispatch_fenced` exactly once. A stale lifecycle epoch, binding, or worker fails this transaction and sends nothing.
 6. Worker sends one call. No code path automatically invokes again after the fence.
@@ -444,7 +444,7 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 | E2-T1 | Implement registry entries, connections, immutable connection versions, and lifecycle | Invalid transitions and mutable-version writes fail |
 | E2-T2 | Implement constrained MCP transport and endpoint policy | SSRF, DNS, scheme, TLS, redirect, timeout, and size fixtures pass |
 | E2-T3 | Wrap the pinned SDK and qualify initialization, safe-regex schema handling, bounded validation, and paginated discovery | Recorded protocol and adversarial schema-timing suites pass without SDK leakage into domain types |
-| E2-T4 | Implement bounded normalized payloads, immutable refresh observations, and canonical identity | Every successful refresh appends its generation observation; equivalent payloads deduplicate, while derived versions deduplicate only with an unchanged exact binding |
+| E2-T4 | Implement bounded normalized payloads, immutable refresh observations, and canonical identity | Every successful refresh appends its generation observation; equivalent payloads deduplicate, while derived versions deduplicate only with an unchanged exact binding, schemas, and versioned metadata |
 | E2-T5 | Implement capabilities, immutable versions, bindings, monotonic control/status epochs, and status events | Drift creates pending versions, enabled history is preserved, and enable/disable ABA changes cannot revive stale work |
 | E2-T6 | Implement explicit/scheduled refresh, monotonic generations, current-snapshot health, and overlapping-job protection | Only the latest-started eligible generation publishes; its failure preserves snapshot but degrades health, while obsolete/disabled/superseded work changes neither |
 
@@ -558,6 +558,7 @@ Critical path:
 - configuration-version append/reverification and disable-during-discovery races;
 - overlapping refresh generation races where an older completion cannot replace the latest snapshot or health;
 - unchanged refreshes append distinct generation observations while reusing the canonical payload and unchanged capability versions;
+- metadata-only drift creates a pending capability version and prevents the stale metadata binding from fencing;
 - latest eligible discovery timeout/invalid/secret result preserves the snapshot but records degraded health; obsolete or disabled failures cannot mutate health;
 - endpoint validation rejects credential-like and otherwise present query strings before configuration persistence;
 - Registry metadata match/timeout/scanner-failure paths write neither search-cache nor imported content;
