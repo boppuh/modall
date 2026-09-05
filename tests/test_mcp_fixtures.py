@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from mcp import ClientSession, types
+from mcp import ClientSession, McpError, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 
@@ -313,6 +313,21 @@ def test_pinned_sdk_negotiates_and_parses_reference_server() -> None:
             )
             tools = await session.list_tools()
             assert [tool.name for tool in tools.tools] == ["echo", "status"]
+            echo = await session.call_tool("echo", {"message": "hello"})
+            assert echo.structuredContent == {"message": "hello"}
+            assert isinstance(echo.content[0], types.TextContent)
+            assert echo.content[0].text == "hello"
+            status = await session.call_tool("status", {})
+            assert status.structuredContent is None
+            assert isinstance(status.content[0], types.TextContent)
+            assert status.isError is False
+            unsupported = await session.call_tool("unsupported-content", {})
+            assert isinstance(unsupported.content[0], types.ImageContent)
+            failed = await session.call_tool("fail", {})
+            assert failed.isError is True
+            with pytest.raises(McpError) as unknown:
+                await session.call_tool("missing", {})
+            assert unknown.value.error.code == -32602
 
     asyncio.run(scenario())
 
