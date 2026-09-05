@@ -202,13 +202,17 @@ def test_user_resolution_is_idempotent_and_workspace_name_is_required() -> None:
                 first = await service.resolve_user(principal)
                 second = await service.resolve_user(principal)
                 assert first.id == second.id
+                named = await service.resolve_user(Principal("issuer", "long-name", "x" * 300))
+                assert named.display_name == "x" * 256
+                with pytest.raises(ValueError, match="principal identifiers"):
+                    await service.resolve_user(Principal("i" * 513, "subject", None))
                 with pytest.raises(ValueError, match="between 1 and 128"):
                     await service.create_workspace(owner=first, name="   ")
                 with pytest.raises(ValueError, match="between 1 and 128"):
                     await service.create_workspace(owner=first, name="x" * 129)
 
             async with factory() as session:
-                assert await session.scalar(select(func.count()).select_from(User)) == 1
+                assert await session.scalar(select(func.count()).select_from(User)) == 2
 
     asyncio.run(scenario())
 

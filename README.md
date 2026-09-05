@@ -41,7 +41,8 @@ Staging and production settings fail validation unless OIDC (`MODALL_OIDC_ISSUER
 configured. Mounted secrets are read only from `MODALL_SECRET_MOUNT_ROOT`. The immutable filename
 is the unpadded base64url encoding of the external reference, a `.`, and the unpadded base64url
 encoding of the version (for example, `api-token`/`v2` maps to `YXBpLXRva2Vu.djI`). The database
-stores only the opaque reference and version.
+stores only the opaque reference and version. Bindings whose encoded filename exceeds the portable
+255-byte component limit are rejected before persistence.
 
 The API and worker are intentionally thin in this foundation PR. Persistence, identity,
 registry, discovery, execution, and operator workflows land in the independently reviewed

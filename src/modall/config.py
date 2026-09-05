@@ -37,8 +37,8 @@ class Settings(BaseSettings):
 
         issuer_url: HttpUrl | None = None
         if self.oidc_issuer is not None:
-            if self.oidc_issuer != self.oidc_issuer.strip():
-                raise ValueError("OIDC issuer must not contain surrounding whitespace")
+            if self.oidc_issuer != self.oidc_issuer.strip() or len(self.oidc_issuer) > 512:
+                raise ValueError("OIDC issuer must be at most 512 characters without whitespace")
             issuer_url = HttpUrl(self.oidc_issuer)
         deployed = self.environment in {"staging", "production"}
         if deployed and self.auth_mode != "oidc":
@@ -55,8 +55,8 @@ class Settings(BaseSettings):
             and (issuer_url.scheme != "https" or self.oidc_jwks_url.scheme != "https")
         ):
             raise ValueError("OIDC issuer and JWKS URL require HTTPS")
-        if not self.local_subject.strip():
-            raise ValueError("local subject must not be blank")
+        if not self.local_subject.strip() or len(self.local_subject) > 512:
+            raise ValueError("local subject must contain between 1 and 512 characters")
         return self
 
 

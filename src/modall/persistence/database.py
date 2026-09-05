@@ -1,5 +1,7 @@
 """Async SQLAlchemy engine and transaction boundaries."""
 
+import asyncio
+import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -18,7 +20,7 @@ def create_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
 
 def async_database_url(database_url: str) -> str:
     scheme, separator, remainder = database_url.partition("://")
-    if separator and (scheme == "postgresql" or scheme.startswith("postgresql+")):
+    if separator and (scheme in {"postgres", "postgresql"} or scheme.startswith("postgresql+")):
         return f"postgresql+asyncpg://{remainder}"
     return database_url
 
@@ -30,13 +32,17 @@ def alembic_database_url(database_url: str) -> str:
 
 
 class DatabaseProbe:
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, *, timeout_seconds: float = 2.5) -> None:
+        if timeout_seconds <= 0 or not math.isfinite(timeout_seconds):
+            raise ValueError("database probe timeout must be positive and finite")
         self._engine = engine
+        self._timeout_seconds = timeout_seconds
 
     async def ready(self) -> bool:
         try:
-            async with self._engine.connect() as connection:
-                await connection.execute(text("SELECT 1"))
+            async with asyncio.timeout(self._timeout_seconds):
+                async with self._engine.connect() as connection:
+                    await connection.execute(text("SELECT 1"))
         except Exception:
             return False
         return True

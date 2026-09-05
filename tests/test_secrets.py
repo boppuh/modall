@@ -46,6 +46,7 @@ def test_fixture_provider_fails_without_reference_disclosure() -> None:
     [
         reference("mounted_file", "", "v1"),
         reference("mounted_file", "token", "v" * 129),
+        reference("mounted_file", "r" * 128, "v" * 128),
         reference("mounted_file", "invalid/ref", "v1"),
         reference("fixture", "", "v1"),
         reference("fixture", "token", ""),

@@ -41,6 +41,7 @@ def test_settings_reject_unsafe_poll_intervals(interval: float) -> None:
             "oidc_jwks_url": "https://issuer.example/jwks",
         },
         {"local_subject": "  "},
+        {"local_subject": "s" * 513},
     ],
 )
 def test_settings_reject_confused_security_modes(overrides: dict[str, str]) -> None:

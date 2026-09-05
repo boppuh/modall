@@ -87,6 +87,7 @@ class MountedFileSecretProvider:
     """Read a deployment secret projected beneath one non-traversable mount root."""
 
     _REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+    _MAX_FILENAME_BYTES = 255
 
     def __init__(self, root: Path, *, max_bytes: int = 65_536) -> None:
         if max_bytes <= 0:
@@ -109,7 +110,10 @@ class MountedFileSecretProvider:
         def encode(component: str) -> str:
             return base64.urlsafe_b64encode(component.encode()).rstrip(b"=").decode("ascii")
 
-        return f"{encode(external_reference)}.{encode(version)}"
+        filename = f"{encode(external_reference)}.{encode(version)}"
+        if len(filename.encode("ascii")) > cls._MAX_FILENAME_BYTES:
+            raise SecretProviderError("invalid secret reference")
+        return filename
 
     def retrieve(self, reference: SecretReference) -> SecretLease:
         if reference.provider != "mounted_file":

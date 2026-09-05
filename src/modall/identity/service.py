@@ -18,6 +18,14 @@ class IdentityService:
         self._session = session
 
     async def resolve_user(self, principal: Principal) -> User:
+        if (
+            not principal.issuer.strip()
+            or len(principal.issuer) > 512
+            or not principal.subject.strip()
+            or len(principal.subject) > 512
+        ):
+            raise ValueError("principal identifiers must contain between 1 and 512 characters")
+        display_name = principal.display_name[:256] if principal.display_name is not None else None
         statement = select(User).where(
             User.oidc_issuer == principal.issuer,
             User.oidc_subject == principal.subject,
@@ -30,7 +38,7 @@ class IdentityService:
                 user = User(
                     oidc_issuer=principal.issuer,
                     oidc_subject=principal.subject,
-                    display_name=principal.display_name,
+                    display_name=display_name,
                 )
                 self._session.add(user)
                 await self._session.flush()

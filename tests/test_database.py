@@ -1,6 +1,8 @@
 import asyncio
 from pathlib import Path
+from typing import cast
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from modall.persistence.database import (
@@ -18,6 +20,10 @@ def test_async_database_url_selects_asyncpg() -> None:
     )
     assert (
         async_database_url("postgresql+psycopg://user:pass@db/database")
+        == "postgresql+asyncpg://user:pass@db/database"
+    )
+    assert (
+        async_database_url("postgres://user:pass@db/database")
         == "postgresql+asyncpg://user:pass@db/database"
     )
     assert (
@@ -53,3 +59,36 @@ def test_database_probe_fails_closed(tmp_path: Path) -> None:
         await probe.close()
 
     asyncio.run(scenario())
+
+
+def test_database_probe_bounds_hanging_connections() -> None:
+    class HangingConnection:
+        async def __aenter__(self) -> None:
+            await asyncio.Event().wait()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class HangingEngine:
+        def connect(self) -> HangingConnection:
+            return HangingConnection()
+
+        async def dispose(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        probe = DatabaseProbe(cast(AsyncEngine, HangingEngine()), timeout_seconds=0.01)
+        assert await probe.ready() is False
+        await probe.close()
+
+    asyncio.run(scenario())
+
+
+def test_database_probe_rejects_invalid_timeout() -> None:
+    engine = create_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        for timeout in (0, float("inf"), float("nan")):
+            with pytest.raises(ValueError):
+                DatabaseProbe(engine, timeout_seconds=timeout)
+    finally:
+        asyncio.run(engine.dispose())
