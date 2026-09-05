@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 PROTOCOL_REVISION = "2025-06-18"
 FIXTURE_TOKEN = "fixture-token-not-a-real-secret"
 ESCAPED_FIXTURE_TOKEN = 'opaque"slash\\token123'
-NUMERIC_FIXTURE_TOKEN = "12345678"
+NUMERIC_FIXTURE_TOKEN = "12345678901234567890"
 COMMON_KEY_FIXTURE_TOKEN = "type"
 KEY_LEAK_FIXTURE_TOKEN = "r4Nd0mBearerValue98765"
 AUTHENTICATED_PROFILES = {
@@ -182,7 +182,7 @@ def _tools(profile: str) -> list[dict[str, Any]]:
     if profile == "raw-control-extension":
         first_tool["unrecognizedExtension"] = "token:\0abcdefgh12345678"
     if profile == "credential-numeric-leak":
-        first_tool["_meta"] = {"value": 12345678}
+        first_tool["_meta"] = {"value": int(NUMERIC_FIXTURE_TOKEN)}
     if profile in {"credential-raw-extension", "credential-raw-unicode-extension"}:
         first_tool["unrecognizedExtension"] = FIXTURE_TOKEN
     if profile == "credential-key-leak":

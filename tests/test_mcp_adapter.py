@@ -95,6 +95,7 @@ def test_structured_secret_screen_inspects_keys_beneath_sensitive_fields() -> No
         {"authentication": "optional"},
         {"authentication": "oauth2_required"},
         {"authentication": {"required": False}},
+        {"authentication": {"type": "oauth2_required"}},
     ),
 )
 def test_structured_secret_screen_allows_authentication_status_metadata(
@@ -127,6 +128,11 @@ def test_unstructured_secret_screen_recognizes_generic_markers(value: str) -> No
     ),
 )
 def test_unstructured_secret_screen_allows_hyphenated_prose(value: str) -> None:
+    assert contains_obvious_secret(value) is False
+
+
+@pytest.mark.parametrize("value", ("Password: required", "Password: protected"))
+def test_unstructured_secret_screen_allows_status_prose(value: str) -> None:
     assert contains_obvious_secret(value) is False
 
 
@@ -230,7 +236,7 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
             await escaped_leaking.discover(endpoint, bearer_token=ESCAPED_FIXTURE_TOKEN.encode())
 
         numeric_leaking, endpoint = adapter_for("credential-numeric-leak")
-        with pytest.raises(CredentialError, match="credential encoding"):
+        with pytest.raises(DiscoveryError, match="secret screening"):
             await numeric_leaking.discover(endpoint, bearer_token=NUMERIC_FIXTURE_TOKEN.encode())
 
         common_key, endpoint = adapter_for("credential-common-key")
@@ -345,6 +351,8 @@ def test_endpoint_policy_rejects_unsafe_resolution_and_scheme_combinations() -> 
             (public, "https://user@mcp.example/tools"),
             (public, "https://mcp.example/tools?secret=no"),
             (public, "https://mcp.example:0/tools"),
+            (public, "https://token.abcdefgh12345678.example.com/mcp"),
+            (public, "https://mcp.example/token-AbCdEfGh12345678"),
             (
                 EndpointPolicy(
                     environment="production", resolver=resolver({"8.8.8.8", "127.0.0.1"})

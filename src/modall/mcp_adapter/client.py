@@ -151,12 +151,6 @@ class McpClientAdapter:
                 or _credential_entropy_bits(credential_text) < 64
             ):
                 raise CredentialError("credential encoding rejected")
-            try:
-                json.loads(credential_text)
-            except (json.JSONDecodeError, RecursionError):
-                pass
-            else:
-                raise CredentialError("credential encoding rejected")
             headers["Authorization"] = f"Bearer {credential_text}"
         try:
             async with asyncio.timeout(self._limits.total_seconds):

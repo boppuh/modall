@@ -13,7 +13,12 @@ import httpcore
 import httpx
 
 from modall.security.endpoints import normalize_endpoint_host
-from modall.security.metadata import contains_obvious_secret
+from modall.security.metadata import (
+    contains_obvious_secret,
+    contains_sensitive_hostname,
+    contains_sensitive_url_path,
+    decode_safe_url_path,
+)
 
 
 class EndpointPolicyError(Exception):
@@ -102,6 +107,17 @@ class EndpointPolicy:
             host = normalize_endpoint_host(parsed.hostname).value
         except ValueError as exc:
             raise EndpointPolicyError("endpoint rejected") from exc
+        try:
+            decoded_path = decode_safe_url_path(parsed.path)
+        except ValueError as exc:
+            raise EndpointPolicyError("endpoint rejected") from exc
+        canonical_endpoint = f"{parsed.scheme}://{host}:{port}{decoded_path}"
+        if (
+            contains_obvious_secret(canonical_endpoint)
+            or contains_sensitive_hostname(host)
+            or contains_sensitive_url_path(decoded_path)
+        ):
+            raise EndpointPolicyError("endpoint rejected")
         try:
             addresses = await self._resolver(host, port)
         except Exception as exc:

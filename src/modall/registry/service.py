@@ -2,7 +2,7 @@
 
 import re
 from typing import cast
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -34,6 +34,7 @@ from modall.security.metadata import (
     contains_obvious_secret,
     contains_sensitive_hostname,
     contains_sensitive_url_path,
+    decode_safe_url_path,
     validate_capability_scalars,
     validate_schema_payload,
 )
@@ -424,17 +425,7 @@ class ConnectionService:
             raise ValueError("invalid endpoint URL")
         if local_fixture and has_secret:
             raise ValueError("credentials require an HTTPS endpoint")
-        if re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path):
-            raise ValueError("invalid endpoint URL")
-        try:
-            decoded_path = unquote(parsed.path, errors="strict")
-        except UnicodeError as exc:
-            raise ValueError("invalid endpoint URL") from exc
-        if re.search(r"%[0-9A-Fa-f]{2}", decoded_path) or any(
-            character.isspace() or ord(character) < 32 or 127 <= ord(character) <= 159
-            for character in decoded_path
-        ):
-            raise ValueError("invalid endpoint URL")
+        decoded_path = decode_safe_url_path(parsed.path)
         canonical_endpoint = (
             f"{parsed.scheme}://{hostname}{f':{port}' if port is not None else ''}{decoded_path}"
         )

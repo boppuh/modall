@@ -14,9 +14,12 @@ class MetadataValidationError(ValueError):
 _OBVIOUS_SECRET = re.compile(
     r"(?:sk_live_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{16,}|"
     r"gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|"
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----)",
+    re.IGNORECASE,
+)
+_GENERIC_SECRET_VALUE = re.compile(
     r"(?:api[_-]?key|(?:access[_-]?)?token|credential|private[_-]?key|secret|password)"
-    r"[=:/][\s\x00-\x1f\x7f-\x9f]*[A-Za-z0-9._~+/=\-]{8,})",
+    r"[=:/][\s\x00-\x1f\x7f-\x9f]*(?P<value>[A-Za-z0-9._~+/=\-]{8,})",
     re.IGNORECASE,
 )
 _AUTHORIZATION_VALUE = re.compile(
@@ -72,6 +75,11 @@ def _is_sensitive_field(key: str) -> bool:
 def contains_obvious_secret(value: str) -> bool:
     if _OBVIOUS_SECRET.search(value) is not None:
         return True
+    if any(
+        _looks_like_opaque_value(match.group("value"))
+        for match in _GENERIC_SECRET_VALUE.finditer(value)
+    ):
+        return True
     return any(
         _looks_like_opaque_value(match.group("assigned") or match.group("bearer"))
         for match in _AUTHORIZATION_VALUE.finditer(value)
@@ -92,6 +100,10 @@ def _is_auth_mode(value: str) -> bool:
     return bool(words) and all(word in _AUTH_MODE_WORDS for word in words)
 
 
+def _looks_like_marker_suffix(value: str) -> bool:
+    return any(character.isdigit() for character in value) and _looks_like_opaque_value(value)
+
+
 def contains_sensitive_hostname(hostname: str) -> bool:
     """Detect credential markers adjacent to opaque DNS-label content."""
 
@@ -102,7 +114,7 @@ def contains_sensitive_hostname(hostname: str) -> bool:
     )
     prefixed_value = any(
         (match := _SENSITIVE_MARKER_PREFIX.fullmatch(label)) is not None
-        and _looks_like_opaque_value(match.group("value"))
+        and _looks_like_marker_suffix(match.group("value"))
         for label in labels
     )
     return adjacent_value or prefixed_value
@@ -113,9 +125,26 @@ def contains_sensitive_url_path(path: str) -> bool:
 
     return any(
         (match := _SENSITIVE_MARKER_PREFIX.fullmatch(segment)) is not None
-        and _looks_like_opaque_value(match.group("value"))
+        and _looks_like_marker_suffix(match.group("value"))
         for segment in path.split("/")
     )
+
+
+def decode_safe_url_path(path: str) -> str:
+    """Strictly decode a URL path while rejecting ambiguous or control content."""
+
+    if re.search(r"%(?![0-9A-Fa-f]{2})", path):
+        raise ValueError("invalid endpoint URL")
+    try:
+        decoded_path = unquote(path, errors="strict")
+    except UnicodeError as exc:
+        raise ValueError("invalid endpoint URL") from exc
+    if re.search(r"%[0-9A-Fa-f]{2}", decoded_path) or any(
+        character.isspace() or ord(character) < 32 or 127 <= ord(character) <= 159
+        for character in decoded_path
+    ):
+        raise ValueError("invalid endpoint URL")
+    return decoded_path
 
 
 def contains_sensitive_json(value: object) -> bool:
@@ -374,10 +403,9 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
                     return True
                 key_is_sensitive = _is_sensitive_field(key)
                 child_is_auth_mode = (
-                    key_is_sensitive
-                    and isinstance(child, str)
-                    and "auth" in key.lower()
+                    isinstance(child, str)
                     and _is_auth_mode(child)
+                    and (sensitive_context or (key_is_sensitive and "auth" in key.lower()))
                 )
                 if (
                     key_is_sensitive
@@ -394,9 +422,10 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
                             return True
                         if isinstance(literal, list):
                             literals.extend(literal)
-                stack.append(
-                    (child, sensitive_context or (key_is_sensitive and not child_is_auth_mode))
+                next_sensitive_context = (
+                    False if child_is_auth_mode else sensitive_context or key_is_sensitive
                 )
+                stack.append((child, next_sensitive_context))
         elif isinstance(current, list):
             stack.extend((child, sensitive_context) for child in current)
         elif (
