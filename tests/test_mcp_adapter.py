@@ -227,6 +227,7 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
             "schema-annotation-secret",
             "malformed-sensitive-property",
             "sensitive-property-ref",
+            "sensitive-property-recursive-ref",
         ):
             unsafe_schema, endpoint = adapter_for(profile)
             with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
@@ -484,6 +485,23 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
             assert (await client.get("https://example.test/page-1")).content == b"123456"
             with pytest.raises(ResponseLimitExceeded):
                 await client.get("https://example.test/page-2")
+
+        async def sensitive_status(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                request=request,
+                extensions={"reason_phrase": b"fixture-token-not-a-real-secret"},
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(
+                httpx.MockTransport(sensitive_status),
+                100,
+                forbidden_response_values=(FIXTURE_TOKEN,),
+            )
+        ) as client:
+            with pytest.raises(EndpointPolicyError, match="response status"):
+                await client.get("https://example.test")
 
     asyncio.run(scenario())
 

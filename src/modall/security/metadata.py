@@ -46,6 +46,8 @@ def contains_sensitive_schema(value: object) -> bool:
 
     stack = [(value, False)]
     visited: set[tuple[int, bool]] = set()
+    anchors = _index_schema_anchors(value)
+    reference_cache: dict[str, object | None] = {}
     literal_keys = {"const", "default", "enum", "example", "examples"}
     schema_map_keys = {"$defs", "definitions", "dependentSchemas", "patternProperties"}
     schema_keys = {
@@ -72,11 +74,15 @@ def contains_sensitive_schema(value: object) -> bool:
             for key, child in current.items():
                 if (
                     sensitive_property
-                    and key in {"$ref", "$dynamicRef"}
+                    and key in {"$ref", "$dynamicRef", "$recursiveRef"}
                     and isinstance(child, str)
                     and child.startswith("#")
                 ):
-                    target = _resolve_local_schema_reference(value, child)
+                    if child not in reference_cache:
+                        reference_cache[child] = _resolve_local_schema_reference(
+                            value, child, anchors
+                        )
+                    target = reference_cache[child]
                     if target is not None:
                         stack.append((target, True))
                     continue
@@ -121,7 +127,30 @@ def contains_sensitive_schema(value: object) -> bool:
     return False
 
 
-def _resolve_local_schema_reference(root: object, reference: str) -> object | None:
+def _index_schema_anchors(root: object) -> dict[str, object]:
+    anchors: dict[str, object] = {}
+    candidates = [root]
+    visited: set[int] = set()
+    while candidates:
+        current = candidates.pop()
+        identity = id(current)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        if isinstance(current, dict):
+            for keyword in ("$anchor", "$dynamicAnchor"):
+                anchor = current.get(keyword)
+                if isinstance(anchor, str):
+                    anchors.setdefault(anchor, current)
+            candidates.extend(current.values())
+        elif isinstance(current, list):
+            candidates.extend(current)
+    return anchors
+
+
+def _resolve_local_schema_reference(
+    root: object, reference: str, anchors: dict[str, object]
+) -> object | None:
     fragment = unquote(reference[1:])
     if not fragment:
         return root
@@ -136,16 +165,7 @@ def _resolve_local_schema_reference(root: object, reference: str) -> object | No
             else:
                 return None
         return current
-    candidates = [root]
-    while candidates:
-        current = candidates.pop()
-        if isinstance(current, dict):
-            if current.get("$anchor") == fragment or current.get("$dynamicAnchor") == fragment:
-                return current
-            candidates.extend(current.values())
-        elif isinstance(current, list):
-            candidates.extend(current)
-    return None
+    return anchors.get(fragment)
 
 
 def validate_capability_scalars(

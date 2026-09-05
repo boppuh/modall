@@ -59,6 +59,7 @@ SUPPORTED_PROFILES = {
     "schema-annotation-secret",
     "malformed-sensitive-property",
     "sensitive-property-ref",
+    "sensitive-property-recursive-ref",
     "unresolved-local-ref",
     "unresolved-local-anchor",
     "non-schema-local-ref",
@@ -121,6 +122,12 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         schema = {
             "type": "object",
             "properties": {"password": {"$ref": "#/$defs/pass"}},
+            "$defs": {"pass": {"type": "string", "default": "abcdefgh12345678"}},
+        }
+    if profile == "sensitive-property-recursive-ref":
+        schema = {
+            "type": "object",
+            "properties": {"password": {"$recursiveRef": "#/$defs/pass"}},
             "$defs": {"pass": {"type": "string", "default": "abcdefgh12345678"}},
         }
     if profile == "unresolved-local-ref":

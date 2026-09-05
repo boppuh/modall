@@ -13,6 +13,7 @@ import httpcore
 import httpx
 
 from modall.security.endpoints import normalize_endpoint_host
+from modall.security.metadata import contains_obvious_secret
 
 
 class EndpointPolicyError(Exception):
@@ -253,6 +254,12 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         ):
             await response.aclose()
             raise EndpointPolicyError("sensitive upstream response header")
+        reason_phrase = response.reason_phrase
+        if contains_obvious_secret(reason_phrase) or any(
+            forbidden in reason_phrase for forbidden in self._forbidden_response_values
+        ):
+            await response.aclose()
+            raise EndpointPolicyError("sensitive upstream response status")
         declared = response.headers.get("content-length")
         if declared is not None:
             try:
