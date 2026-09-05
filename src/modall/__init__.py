@@ -1,0 +1,1 @@
+"""Modall application package."""
