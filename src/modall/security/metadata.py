@@ -18,7 +18,8 @@ _OBVIOUS_SECRET = re.compile(
     re.IGNORECASE,
 )
 _GENERIC_SECRET_VALUE = re.compile(
-    r"(?:api[_-]?key|(?:access[_-]?)?token|credential|private[_-]?key|secret|password)"
+    r"(?:api[_-]?key|(?:(?:access|refresh|session|auth|bearer)[_-]?)?token|credential|"
+    r"private[_-]?key|secret|password)"
     r"(?:[=:/][\s\x00-\x1f\x7f-\x9f]*|\s+)"
     r"[\"'`]?\s*(?P<value>[A-Za-z0-9._~+/=\-]{8,})",
     re.IGNORECASE,
@@ -37,12 +38,15 @@ _SENSITIVE_JSON_FIELD = re.compile(
 )
 _OPAQUE_ANNOTATION_VALUE = re.compile(r"[A-Za-z0-9._~+/=\-]{8,}\Z")
 _SENSITIVE_MARKER_PREFIX = re.compile(
-    r"(?:api[-_]?key|(?:access[-_]?)?token|credential|private[-_]?key|secret|password)"
+    r"(?:api[-_]?key|(?:(?:access|refresh|session|auth|bearer)[-_]?)?token|credential|"
+    r"private[-_]?key|secret|password)"
     r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,})\Z",
     re.IGNORECASE,
 )
 _SENSITIVE_PATH_MARKER = re.compile(
-    r"(?:^|/)(?:api[-_]?key|(?:access[-_]?)?token|credential|private[-_]?key|secret|password)"
+    r"(?:^|[!$&'()*,;:@/])(?:api[-_]?key|"
+    r"(?:(?:access|refresh|session|auth|bearer)[-_]?)?token|credential|"
+    r"private[-_]?key|secret|password)"
     r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,})(?=$|[!$&'()*,;:@])",
     re.IGNORECASE,
 )

@@ -53,6 +53,7 @@ class _SuppressUntrustedSdkLogs(logging.Filter):
 
 _SDK_LOG_FILTER = _SuppressUntrustedSdkLogs()
 _SDK_LOGGER_NAMES = (
+    "client",
     "mcp.client.session",
     "mcp.client.streamable_http",
     "httpcore",

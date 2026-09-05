@@ -368,7 +368,7 @@ def test_adapter_suppresses_untrusted_transport_debug_logs(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     with _suppress_untrusted_sdk_logs():
-        for logger_name in ("httpcore.connection", "httpcore.http11", "httpx"):
+        for logger_name in ("client", "httpcore.connection", "httpcore.http11", "httpx"):
             logging.getLogger(logger_name).debug("remote header %s", FIXTURE_TOKEN)
     assert FIXTURE_TOKEN not in caplog.text
 
