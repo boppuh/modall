@@ -806,3 +806,12 @@ def test_discovery_failure_classification_is_allowlisted(
     assert classify_discovery_failure(authentication_error) == (
         DiscoveryFailureCode.AUTHENTICATION_FAILED
     )
+
+
+def test_discovery_failure_classification_breaks_cyclic_causes() -> None:
+    credential_error = CredentialError("safe")
+    group = ExceptionGroup("cleanup", [credential_error])
+    credential_error.__cause__ = group
+    assert classify_discovery_failure(credential_error) == (
+        DiscoveryFailureCode.AUTHENTICATION_FAILED
+    )

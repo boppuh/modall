@@ -460,6 +460,7 @@ def test_connection_versions_are_immutable() -> None:
         " https://mcp.example/path",
         "https://mcp.example/path ",
         "\x1fhttps://mcp.example/path",
+        "http://127.0.0.1:0/mcp",
     ],
 )
 def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> None:
@@ -507,6 +508,17 @@ def test_connection_configuration_allows_explicit_local_loopback_fixture() -> No
                     policy_version="v1",
                 )
                 assert ipv6_connection.pending_version_id is not None
+
+                with pytest.raises(ValueError, match="endpoint"):
+                    await ConnectionService(
+                        session, environment="test", allow_loopback_http=True
+                    ).create(
+                        context=context,
+                        name="Port zero fixture",
+                        endpoint_url="http://127.0.0.1:0/mcp",
+                        secret_binding_id=None,
+                        policy_version="v1",
+                    )
 
                 binding = SecretBinding(
                     workspace_id=workspace_id,

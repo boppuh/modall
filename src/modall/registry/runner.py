@@ -153,11 +153,17 @@ def classify_discovery_failure(error: BaseException) -> DiscoveryFailureCode:
     return DiscoveryFailureCode.TRANSPORT_FAILED
 
 
-def _flatten(error: BaseException) -> list[BaseException]:
+def _flatten(error: BaseException, seen: set[int] | None = None) -> list[BaseException]:
+    if seen is None:
+        seen = set()
+    identity = id(error)
+    if identity in seen:
+        return []
+    seen.add(identity)
     flattened = [error]
     if isinstance(error, BaseExceptionGroup):
         for child in error.exceptions:
-            flattened.extend(_flatten(child))
+            flattened.extend(_flatten(child, seen))
     if error.__cause__ is not None:
-        flattened.extend(_flatten(error.__cause__))
+        flattened.extend(_flatten(error.__cause__, seen))
     return flattened

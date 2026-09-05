@@ -74,7 +74,12 @@ class EndpointPolicy:
     async def validate(self, endpoint: str) -> EndpointResolution:
         try:
             parsed = urlsplit(endpoint)
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            parsed_port = parsed.port
+            port = (
+                parsed_port
+                if parsed_port is not None
+                else (443 if parsed.scheme == "https" else 80)
+            )
         except ValueError as exc:
             raise EndpointPolicyError("endpoint rejected") from exc
         if (
@@ -84,6 +89,7 @@ class EndpointPolicy:
             or parsed.query
             or parsed.fragment
             or parsed.scheme not in {"http", "https"}
+            or port == 0
         ):
             raise EndpointPolicyError("endpoint rejected")
         try:

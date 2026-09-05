@@ -403,6 +403,7 @@ class ConnectionService:
         )
         if (
             (parsed.scheme != "https" and not local_fixture)
+            or port == 0
             or not hostname
             or (
                 not local_fixture

@@ -151,8 +151,14 @@ def _contains_obvious_secret_in_json(value: object) -> bool:
                 stack.append((child, sensitive_context or key_is_sensitive))
         elif isinstance(current, list):
             stack.extend((child, sensitive_context) for child in current)
-        elif isinstance(current, str) and (
-            (sensitive_context and len(current) >= 8) or contains_obvious_secret(current)
+        elif (
+            sensitive_context
+            and isinstance(current, (int, float))
+            and not isinstance(current, bool)
+            and len(str(current)) >= 8
+        ) or (
+            isinstance(current, str)
+            and ((sensitive_context and len(current) >= 8) or contains_obvious_secret(current))
         ):
             return True
     return False

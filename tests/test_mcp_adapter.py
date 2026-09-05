@@ -147,6 +147,7 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
             "structured-secret",
             "nested-structured-secret",
             "composite-structured-secret",
+            "numeric-sensitive-metadata",
         ):
             structured, endpoint = adapter_for(profile)
             with pytest.raises(DiscoveryError, match="secret screening"):
@@ -197,6 +198,7 @@ def test_endpoint_policy_rejects_unsafe_resolution_and_scheme_combinations() -> 
             (public, "http://mcp.example/tools"),
             (public, "https://user@mcp.example/tools"),
             (public, "https://mcp.example/tools?secret=no"),
+            (public, "https://mcp.example:0/tools"),
             (
                 EndpointPolicy(
                     environment="production", resolver=resolver({"8.8.8.8", "127.0.0.1"})
