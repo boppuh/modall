@@ -65,6 +65,7 @@ def upgrade() -> None:
             ["discovery_payloads.workspace_id", "discovery_payloads.id"],
             ondelete="RESTRICT",
         ),
+        sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("workspace_id", "id"),
         sa.UniqueConstraint("connection_id", "id"),
