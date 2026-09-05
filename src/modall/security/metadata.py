@@ -16,7 +16,7 @@ _OBVIOUS_SECRET = re.compile(
     r"gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|"
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
     r"(?:api[_-]?key|(?:access[_-]?)?token|credential|private[_-]?key|secret|password)"
-    r"[=:/]\s*[A-Za-z0-9._~+/=\-]{8,})",
+    r"[=:/][\s\x00-\x1f\x7f-\x9f]*[A-Za-z0-9._~+/=\-]{8,})",
     re.IGNORECASE,
 )
 _AUTHORIZATION_VALUE = re.compile(
@@ -32,6 +32,11 @@ _SENSITIVE_JSON_FIELD = re.compile(
     re.IGNORECASE,
 )
 _OPAQUE_ANNOTATION_VALUE = re.compile(r"[A-Za-z0-9._~+/=\-]{8,}\Z")
+_SENSITIVE_HOST_LABEL_PREFIX = re.compile(
+    r"(?:api[-_]?key|(?:access[-_]?)?token|credential|private[-_]?key|secret|password)"
+    r"[-_](?P<value>[A-Za-z0-9_-]{8,})\Z",
+    re.IGNORECASE,
+)
 _AUTH_MODE_WORDS = {
     "anonymous",
     "api",
@@ -88,13 +93,19 @@ def _is_auth_mode(value: str) -> bool:
 
 
 def contains_sensitive_hostname(hostname: str) -> bool:
-    """Detect credential markers followed by an opaque DNS label."""
+    """Detect credential markers adjacent to opaque DNS-label content."""
 
     labels = hostname.rstrip(".").split(".")
-    return any(
+    adjacent_value = any(
         _is_sensitive_field(label) and _looks_like_opaque_value(labels[index + 1])
         for index, label in enumerate(labels[:-1])
     )
+    prefixed_value = any(
+        (match := _SENSITIVE_HOST_LABEL_PREFIX.fullmatch(label)) is not None
+        and _looks_like_opaque_value(match.group("value"))
+        for label in labels
+    )
+    return adjacent_value or prefixed_value
 
 
 def contains_sensitive_json(value: object) -> bool:

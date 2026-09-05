@@ -110,6 +110,7 @@ def test_structured_secret_screen_allows_authentication_status_metadata(
         "https://mcp.example/token/abcdefgh12345678",
         "credential=abcdefgh12345678",
         "Authorization: Bearer abcdefgh12345678",
+        "token:\0abcdefgh12345678",
     ),
 )
 def test_unstructured_secret_screen_recognizes_generic_markers(value: str) -> None:
@@ -265,6 +266,10 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
         )
         with pytest.raises(DiscoveryError, match="secret screening rejected metadata"):
             await raw_whitespace.discover(endpoint)
+
+        raw_control, endpoint = adapter_for("raw-control-extension", limits=fast_failure_limits)
+        with pytest.raises(DiscoveryError, match="secret screening rejected metadata"):
+            await raw_control.discover(endpoint)
 
         for profile in (
             "structured-secret",

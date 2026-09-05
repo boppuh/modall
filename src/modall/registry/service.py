@@ -430,7 +430,7 @@ class ConnectionService:
         except UnicodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
         if re.search(r"%[0-9A-Fa-f]{2}", decoded_path) or any(
-            character.isspace() or ord(character) < 32 or ord(character) == 127
+            character.isspace() or ord(character) < 32 or 127 <= ord(character) <= 159
             for character in decoded_path
         ):
             raise ValueError("invalid endpoint URL")
