@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from modall.identity.repository import AuthorizationDenied, require_current_role
 from modall.identity.types import Role, WorkspaceContext
@@ -102,7 +103,6 @@ class RefreshJobService:
         )
         if not worker_id or len(worker_id) > 128 or lease_duration <= timedelta(0):
             raise ValueError("invalid refresh lease")
-        claimed_at = await _database_now(self._session)
         job = await self._session.scalar(
             select(DiscoveryRefreshJob)
             .where(
@@ -114,6 +114,7 @@ class RefreshJobService:
         )
         if job is None:
             raise AuthorizationDenied("workspace access denied")
+        claimed_at = await _database_now(self._session)
         expires_at = job.lease_expires_at
         if expires_at is not None and expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=UTC)
@@ -165,8 +166,8 @@ class RefreshJobService:
         )
         if lease_duration <= timedelta(0):
             raise ValueError("invalid refresh lease")
-        renewed_at = await _database_now(self._session)
         job = await self._locked_job_for_lease(context, lease)
+        renewed_at = await _database_now(self._session)
         expires_at = job.lease_expires_at
         if expires_at is None:
             raise InvalidConnectionTransition("refresh lease rejected")
@@ -225,7 +226,7 @@ class RefreshJobService:
             DiscoveryRefreshJob.generation == lease.generation,
         ]
         if require_unexpired:
-            conditions.append(DiscoveryRefreshJob.lease_expires_at > func.current_timestamp())
+            conditions.append(DiscoveryRefreshJob.lease_expires_at > _database_clock(self._session))
         job = await self._session.scalar(
             select(DiscoveryRefreshJob)
             .where(*conditions)
@@ -400,7 +401,7 @@ class DiscoveryPublicationService:
                 DiscoveryRefreshJob.status == RefreshJobStatus.LEASED.value,
                 DiscoveryRefreshJob.lease_owner == lease.worker_id,
                 DiscoveryRefreshJob.lease_epoch == lease.lease_epoch,
-                DiscoveryRefreshJob.lease_expires_at > func.current_timestamp(),
+                DiscoveryRefreshJob.lease_expires_at > _database_clock(self._session),
                 DiscoveryRefreshJob.connection_id == lease.connection_id,
                 DiscoveryRefreshJob.connection_version_id == lease.connection_version_id,
                 DiscoveryRefreshJob.control_epoch == lease.control_epoch,
@@ -491,9 +492,15 @@ async def _lock_eligible_connection(
 
 
 async def _database_now(session: AsyncSession) -> datetime:
-    current = await session.scalar(select(func.current_timestamp()))
+    current = await session.scalar(select(_database_clock(session)))
     if not isinstance(current, datetime):
         raise RuntimeError("database clock is unavailable")
     if current.tzinfo is None:
         return current.replace(tzinfo=UTC)
     return current.astimezone(UTC)
+
+
+def _database_clock(session: AsyncSession) -> ColumnElement[datetime]:
+    if session.get_bind().dialect.name == "postgresql":
+        return func.clock_timestamp()
+    return func.current_timestamp()

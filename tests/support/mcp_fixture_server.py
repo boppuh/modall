@@ -57,6 +57,7 @@ SUPPORTED_PROFILES = {
     "camel-secret-metadata",
     "private-key-metadata",
     "raw-obvious-extension",
+    "raw-whitespace-extension",
     "keyword-property-names",
     "credential-property-schema",
     "schema-annotation-secret",
@@ -175,6 +176,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         first_tool["_meta"] = {"privateKey": "abcdefgh12345678"}
     if profile == "raw-obvious-extension":
         first_tool["unrecognizedExtension"] = "sk_live_abcdefghijkl"
+    if profile == "raw-whitespace-extension":
+        first_tool["unrecognizedExtension"] = "token:\tabcdefgh12345678"
     if profile == "credential-numeric-leak":
         first_tool["_meta"] = {"value": 12345678}
     if profile in {"credential-raw-extension", "credential-raw-unicode-extension"}:

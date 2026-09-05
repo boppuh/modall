@@ -16,9 +16,13 @@ _OBVIOUS_SECRET = re.compile(
     r"gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|"
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
     r"(?:api[_-]?key|(?:access[_-]?)?token|credential|private[_-]?key|secret|password)"
-    r"[=:/]\s*[A-Za-z0-9._~+/=\-]{8,}|"
+    r"[=:/]\s*[A-Za-z0-9._~+/=\-]{8,})",
+    re.IGNORECASE,
+)
+_AUTHORIZATION_VALUE = re.compile(
     r"(?:authorization|authentication)\s*[:=]\s*(?:bearer\s+)?"
-    r"[A-Za-z0-9._~+/=\-]{8,}|bearer\s+[A-Za-z0-9._~+/=\-]{8,})",
+    r"(?P<assigned>[A-Za-z0-9._~+/=\-]{8,})|"
+    r"bearer\s+(?P<bearer>[A-Za-z0-9._~+/=\-]{8,})",
     re.IGNORECASE,
 )
 _SENSITIVE_JSON_FIELD = re.compile(
@@ -28,6 +32,30 @@ _SENSITIVE_JSON_FIELD = re.compile(
     re.IGNORECASE,
 )
 _OPAQUE_ANNOTATION_VALUE = re.compile(r"[A-Za-z0-9._~+/=\-]{8,}\Z")
+_AUTH_MODE_WORDS = {
+    "anonymous",
+    "api",
+    "apikey",
+    "auth",
+    "authentication",
+    "authorization",
+    "basic",
+    "bearer",
+    "digest",
+    "disabled",
+    "enabled",
+    "key",
+    "mtls",
+    "none",
+    "oauth",
+    "oauth2",
+    "oidc",
+    "optional",
+    "public",
+    "required",
+    "supported",
+    "unsupported",
+}
 
 
 def _is_sensitive_field(key: str) -> bool:
@@ -37,7 +65,12 @@ def _is_sensitive_field(key: str) -> bool:
 
 
 def contains_obvious_secret(value: str) -> bool:
-    return _OBVIOUS_SECRET.search(value) is not None
+    if _OBVIOUS_SECRET.search(value) is not None:
+        return True
+    return any(
+        _looks_like_opaque_value(match.group("assigned") or match.group("bearer"))
+        for match in _AUTHORIZATION_VALUE.finditer(value)
+    )
 
 
 def _looks_like_opaque_value(value: str) -> bool:
@@ -47,6 +80,21 @@ def _looks_like_opaque_value(value: str) -> bool:
     length = len(value)
     entropy_bits = sum(count * math.log2(length / count) for count in counts.values())
     return entropy_bits >= length * 3.5
+
+
+def _is_auth_mode(value: str) -> bool:
+    words = [word for word in re.split(r"[_-]+", value.lower()) if word]
+    return bool(words) and all(word in _AUTH_MODE_WORDS for word in words)
+
+
+def contains_sensitive_hostname(hostname: str) -> bool:
+    """Detect credential markers followed by an opaque DNS label."""
+
+    labels = hostname.rstrip(".").split(".")
+    return any(
+        _is_sensitive_field(label) and _looks_like_opaque_value(labels[index + 1])
+        for index, label in enumerate(labels[:-1])
+    )
 
 
 def contains_sensitive_json(value: object) -> bool:
@@ -304,7 +352,18 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
                 if sensitive_context and _looks_like_opaque_value(key):
                     return True
                 key_is_sensitive = _is_sensitive_field(key)
-                if key_is_sensitive and isinstance(child, str) and _looks_like_opaque_value(child):
+                child_is_auth_mode = (
+                    key_is_sensitive
+                    and isinstance(child, str)
+                    and "auth" in key.lower()
+                    and _is_auth_mode(child)
+                )
+                if (
+                    key_is_sensitive
+                    and isinstance(child, str)
+                    and not child_is_auth_mode
+                    and _looks_like_opaque_value(child)
+                ):
                     return True
                 if sensitive_context and key in {"const", "default", "enum", "example", "examples"}:
                     literals = [child]
@@ -314,7 +373,9 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
                             return True
                         if isinstance(literal, list):
                             literals.extend(literal)
-                stack.append((child, sensitive_context or key_is_sensitive))
+                stack.append(
+                    (child, sensitive_context or (key_is_sensitive and not child_is_auth_mode))
+                )
         elif isinstance(current, list):
             stack.extend((child, sensitive_context) for child in current)
         elif (

@@ -93,6 +93,7 @@ def test_structured_secret_screen_inspects_keys_beneath_sensitive_fields() -> No
     "value",
     (
         {"authentication": "optional"},
+        {"authentication": "oauth2_required"},
         {"authentication": {"required": False}},
     ),
 )
@@ -121,6 +122,7 @@ def test_unstructured_secret_screen_recognizes_generic_markers(value: str) -> No
         "password-protected input",
         "api-key-compatible endpoint",
         "secret-management helper",
+        "Uses Bearer authentication for requests",
     ),
 )
 def test_unstructured_secret_screen_allows_hyphenated_prose(value: str) -> None:
@@ -257,6 +259,12 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
         raw_obvious, endpoint = adapter_for("raw-obvious-extension", limits=fast_failure_limits)
         with pytest.raises(DiscoveryError, match="secret screening rejected metadata"):
             await raw_obvious.discover(endpoint)
+
+        raw_whitespace, endpoint = adapter_for(
+            "raw-whitespace-extension", limits=fast_failure_limits
+        )
+        with pytest.raises(DiscoveryError, match="secret screening rejected metadata"):
+            await raw_whitespace.discover(endpoint)
 
         for profile in (
             "structured-secret",

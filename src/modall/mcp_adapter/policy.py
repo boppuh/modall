@@ -236,11 +236,20 @@ class LimitedByteStream(httpx.AsyncByteStream):
 
 
 def _decode_visible_json_escapes(value: bytes) -> bytes:
-    """Decode one JSON escape layer for visible ASCII credential screening."""
+    """Decode one JSON escape layer for ASCII credential screening."""
 
     decoded = bytearray()
     index = 0
-    short_escapes = {ord('"'): ord('"'), ord("\\"): ord("\\"), ord("/"): ord("/")}
+    short_escapes = {
+        ord('"'): ord('"'),
+        ord("\\"): ord("\\"),
+        ord("/"): ord("/"),
+        ord("b"): 8,
+        ord("f"): 12,
+        ord("n"): 10,
+        ord("r"): 13,
+        ord("t"): 9,
+    }
     while index < len(value):
         if value[index] == ord("\\") and index + 1 < len(value):
             escaped = value[index + 1]
@@ -258,7 +267,7 @@ def _decode_visible_json_escapes(value: bytes) -> bytes:
                 except ValueError:
                     pass
                 else:
-                    if 33 <= character <= 126:
+                    if 0 <= character <= 127:
                         decoded.append(character)
                         index += 6
                         continue
