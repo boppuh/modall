@@ -24,6 +24,7 @@ from modall.security.metadata import (
 )
 
 _SSE_EVENT_BOUNDARY = r"(?:(?:\r\n)|\r|\n){2}"
+_SSE_EVENT_BOUNDARY_BYTES = re.compile(rb"(?:(?:\r\n)|\r|\n){2}")
 
 
 class EndpointPolicyError(Exception):
@@ -231,30 +232,54 @@ class LimitedByteStream(httpx.AsyncByteStream):
         budget: "RawByteBudget",
         forbidden_values: tuple[bytes, ...],
         mark_sensitive_response: Callable[[], None],
+        media_type: str,
     ) -> None:
         self._stream = stream
         self._budget = budget
         self._forbidden_values = forbidden_values
         self._mark_sensitive_response = mark_sensitive_response
         self._tail = b""
-        self._raw_body = bytearray()
+        self._structured_buffer = bytearray()
+        self._buffer_json_document = media_type != "text/event-stream"
+        self._sse_scan_from = 0
         self._tail_limit = max((len(value) for value in forbidden_values), default=0) * 6 + 256
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         async for chunk in self._stream:
             self._budget.consume(len(chunk))
-            self._raw_body.extend(chunk)
             window = self._tail + chunk
             decoded_window = _decode_visible_json_escapes(window)
-            if (
-                any(value in decoded_window for value in self._forbidden_values)
-                or contains_obvious_secret(decoded_window.decode("utf-8", errors="ignore"))
-                or _contains_sensitive_structured_response(bytes(self._raw_body))
-            ):
-                self._mark_sensitive_response()
-                raise EndpointPolicyError("sensitive upstream response body")
+            if any(
+                value in decoded_window for value in self._forbidden_values
+            ) or contains_obvious_secret(decoded_window.decode("utf-8", errors="ignore")):
+                self._reject_sensitive_body()
             self._tail = window[-self._tail_limit :]
+            self._structured_buffer.extend(chunk)
+            if self._buffer_json_document:
+                continue
+            self._screen_completed_sse_events()
             yield chunk
+        if self._buffer_json_document:
+            body = bytes(self._structured_buffer)
+            if _contains_sensitive_json_document(body):
+                self._reject_sensitive_body()
+            if body:
+                yield body
+
+    def _screen_completed_sse_events(self) -> None:
+        while match := _SSE_EVENT_BOUNDARY_BYTES.search(
+            self._structured_buffer, self._sse_scan_from
+        ):
+            event = bytes(self._structured_buffer[: match.start()])
+            del self._structured_buffer[: match.end()]
+            self._sse_scan_from = 0
+            if _contains_sensitive_sse_event(event):
+                self._reject_sensitive_body()
+        self._sse_scan_from = max(0, len(self._structured_buffer) - 3)
+
+    def _reject_sensitive_body(self) -> None:
+        self._mark_sensitive_response()
+        raise EndpointPolicyError("sensitive upstream response body")
 
     async def aclose(self) -> None:
         await self._stream.aclose()
@@ -308,26 +333,53 @@ def _contains_sensitive_structured_response(value: bytes) -> bool:
         text = value.decode("utf-8")
     except UnicodeDecodeError:
         return False
-    candidates = [text]
+    if _contains_sensitive_json_text(text):
+        return True
     completed_events = re.split(_SSE_EVENT_BOUNDARY, text)
     if not re.search(f"{_SSE_EVENT_BOUNDARY}\\Z", text):
         completed_events.pop()
-    for event in completed_events:
-        data_lines = [
-            line.partition(":")[2].lstrip()
-            for line in event.splitlines()
-            if line.startswith("data:")
-        ]
-        if data_lines:
-            candidates.append("\n".join(data_lines))
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except (json.JSONDecodeError, RecursionError):
-            continue
-        if contains_sensitive_json(parsed):
-            return True
-    return False
+    return any(_contains_sensitive_sse_event(event.encode()) for event in completed_events)
+
+
+class _DuplicateJsonMember(ValueError):
+    pass
+
+
+def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, child in pairs:
+        if key in value:
+            raise _DuplicateJsonMember
+        value[key] = child
+    return value
+
+
+def _contains_sensitive_json_text(value: str) -> bool:
+    try:
+        parsed = json.loads(value, object_pairs_hook=_reject_duplicate_members)
+    except _DuplicateJsonMember:
+        return True
+    except (json.JSONDecodeError, RecursionError):
+        return False
+    return contains_sensitive_json(parsed)
+
+
+def _contains_sensitive_json_document(value: bytes) -> bool:
+    try:
+        return _contains_sensitive_json_text(value.decode("utf-8"))
+    except UnicodeDecodeError:
+        return False
+
+
+def _contains_sensitive_sse_event(event: bytes) -> bool:
+    try:
+        text = event.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    data_lines = [
+        line.partition(":")[2].lstrip() for line in text.splitlines() if line.startswith("data:")
+    ]
+    return bool(data_lines) and _contains_sensitive_json_text("\n".join(data_lines))
 
 
 class RawByteBudget:
@@ -404,6 +456,7 @@ class LimitedTransport(httpx.AsyncBaseTransport):
                 self._budget,
                 self._forbidden_response_bytes,
                 self._mark_sensitive_response,
+                response.headers.get("content-type", "").partition(";")[0].strip().lower(),
             ),
             extensions=response.extensions,
             request=request,

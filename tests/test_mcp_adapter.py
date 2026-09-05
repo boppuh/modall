@@ -2,7 +2,7 @@ import asyncio
 import gzip
 import logging
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from socket import gaierror
 
 import httpcore
@@ -29,7 +29,11 @@ from modall.mcp_adapter.policy import (
     TransportLimits,
     _contains_sensitive_structured_response,
 )
-from modall.security.metadata import contains_obvious_secret, contains_sensitive_json
+from modall.security.metadata import (
+    contains_obvious_secret,
+    contains_sensitive_json,
+    validate_capability_scalars,
+)
 from tests.support.mcp_fixture_server import (
     COMMON_KEY_FIXTURE_TOKEN,
     ESCAPED_FIXTURE_TOKEN,
@@ -101,6 +105,8 @@ def test_structured_secret_screen_inspects_keys_beneath_sensitive_fields() -> No
         {"authentication": {"type": "oauth2_required"}},
         {"tokenExpiration": 1700000000},
         {"token": {"expires_at": 1700000000}},
+        {"authentication": {"type": "authorization_code"}},
+        {"authentication": {"type": "device_authorization"}},
     ),
 )
 def test_structured_secret_screen_allows_authentication_status_metadata(
@@ -118,6 +124,7 @@ def test_structured_secret_screen_allows_authentication_status_metadata(
         "Authorization: Bearer abcdefgh12345678",
         "token:\0abcdefgh12345678",
         "token AbCdEfGhIjKlMnOpQrStUvWx",
+        'Use token: "AbCdEfGhIjKlMnOpQrStUvWx"',
     ),
 )
 def test_unstructured_secret_screen_recognizes_generic_markers(value: str) -> None:
@@ -140,6 +147,16 @@ def test_unstructured_secret_screen_allows_hyphenated_prose(value: str) -> None:
 @pytest.mark.parametrize("value", ("Password: required", "Password: protected"))
 def test_unstructured_secret_screen_allows_status_prose(value: str) -> None:
     assert contains_obvious_secret(value) is False
+
+
+def test_capability_scalar_screen_does_not_join_independent_fields() -> None:
+    validate_capability_scalars(
+        tool_identity="token",
+        tool_name="token",
+        display_name="ConfigurationPanel",
+        description=None,
+        protocol_revision="2025-06-18",
+    )
 
 
 def test_adapter_discovers_bounded_domain_types_and_drift() -> None:
@@ -359,6 +376,9 @@ def test_raw_structured_screen_handles_sse_and_invalid_utf8() -> None:
     assert _contains_sensitive_structured_response(sensitive_event.replace(b"\n\n", b"\r\r"))
     assert not _contains_sensitive_structured_response(b'data: {"status":"ready"}\n\n')
     assert not _contains_sensitive_structured_response(b"\xff")
+    assert _contains_sensitive_structured_response(
+        b'{"extension":{"token":"AbCdEfGhIjKlMnOpQrStUvWx"},"extension":{"status":"safe"}}'
+    )
 
 
 def test_endpoint_policy_rejects_unsafe_resolution_and_scheme_combinations() -> None:
@@ -538,6 +558,17 @@ def test_pinned_network_backend_connects_only_to_approved_addresses() -> None:
 
 
 def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
+    class OneByteStream(httpx.AsyncByteStream):
+        def __init__(self, content: bytes) -> None:
+            self._content = content
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for value in self._content:
+                yield bytes((value,))
+
+        async def aclose(self) -> None:
+            return None
+
     async def scenario() -> None:
         async def declared(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, headers={"Content-Length": "100"}, request=request)
@@ -604,6 +635,35 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
             )
         ) as client:
             with pytest.raises(EndpointPolicyError, match="response status"):
+                await client.get("https://example.test")
+
+        async def sse(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                stream=OneByteStream(b'data: {"status":"ready"}\r\r'),
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(sse), 100)
+        ) as client:
+            assert (await client.get("https://example.test")).content.endswith(b"\r\r")
+
+        async def sensitive_sse(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                stream=OneByteStream(
+                    b'data: {"extension":{"token":"AbCdEfGhIjKlMnOpQrStUvWx"}}\n\n'
+                ),
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(sensitive_sse), 100)
+        ) as client:
+            with pytest.raises(EndpointPolicyError, match="sensitive upstream response body"):
                 await client.get("https://example.test")
 
     asyncio.run(scenario())

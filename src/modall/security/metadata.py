@@ -20,7 +20,7 @@ _OBVIOUS_SECRET = re.compile(
 _GENERIC_SECRET_VALUE = re.compile(
     r"(?:api[_-]?key|(?:access[_-]?)?token|credential|private[_-]?key|secret|password)"
     r"(?:[=:/][\s\x00-\x1f\x7f-\x9f]*|\s+)"
-    r"(?P<value>[A-Za-z0-9._~+/=\-]{8,})",
+    r"[\"'`]?\s*(?P<value>[A-Za-z0-9._~+/=\-]{8,})",
     re.IGNORECASE,
 )
 _AUTHORIZATION_VALUE = re.compile(
@@ -41,6 +41,11 @@ _SENSITIVE_MARKER_PREFIX = re.compile(
     r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,})\Z",
     re.IGNORECASE,
 )
+_SENSITIVE_PATH_MARKER = re.compile(
+    r"(?:^|/)(?:api[-_]?key|(?:access[-_]?)?token|credential|private[-_]?key|secret|password)"
+    r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,})\Z",
+    re.IGNORECASE,
+)
 _AUTH_MODE_WORDS = {
     "anonymous",
     "api",
@@ -50,16 +55,22 @@ _AUTH_MODE_WORDS = {
     "authorization",
     "basic",
     "bearer",
+    "client",
+    "code",
+    "credentials",
+    "device",
     "digest",
     "disabled",
     "enabled",
     "key",
+    "jwt",
     "mtls",
     "none",
     "oauth",
     "oauth2",
     "oidc",
     "optional",
+    "pkce",
     "public",
     "required",
     "supported",
@@ -122,12 +133,17 @@ def contains_sensitive_hostname(hostname: str) -> bool:
 
 
 def contains_sensitive_url_path(path: str) -> bool:
-    """Detect marker-prefixed opaque values in decoded URL path segments."""
+    """Detect marker-prefixed opaque values, including decoded separators."""
 
-    return any(
+    segment_match = any(
         (match := _SENSITIVE_MARKER_PREFIX.fullmatch(segment)) is not None
         and _looks_like_marker_suffix(match.group("value"))
         for segment in path.split("/")
+    )
+    cross_segment_match = _SENSITIVE_PATH_MARKER.search(path)
+    return segment_match or (
+        cross_segment_match is not None
+        and _looks_like_marker_suffix(cross_segment_match.group("value"))
     )
 
 
@@ -313,12 +329,11 @@ def validate_capability_scalars(
                 value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise MetadataValidationError("capability metadata is not valid UTF-8") from exc
-    scalar_metadata = "\n".join(
-        value
+    if any(
+        contains_obvious_secret(value)
         for value in (tool_identity, tool_name, display_name, description, protocol_revision)
         if value is not None
-    )
-    if contains_obvious_secret(scalar_metadata):
+    ):
         raise MetadataValidationError("capability metadata contains credential-shaped content")
 
 
