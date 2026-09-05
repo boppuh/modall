@@ -444,5 +444,10 @@ def _reject_immutable_update(mapper: object, connection: object, target: object)
     raise ValueError("immutable version rows cannot be updated")
 
 
-for immutable_model in (RegistryEntryVersion, ServerConnectionVersion, CapabilityVersion):
+for immutable_model in (
+    RegistryEntryVersion,
+    ServerConnectionVersion,
+    CapabilityVersion,
+    McpToolBinding,
+):
     event.listen(immutable_model, "before_update", _reject_immutable_update)

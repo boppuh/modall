@@ -2,6 +2,7 @@
 
 import re
 from ipaddress import ip_address
+from socket import inet_aton
 from typing import cast
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
@@ -98,6 +99,8 @@ class ConnectionService:
         self._validate_configuration(endpoint_url, policy_version)
         await self._require_scoped_secret(context, secret_binding_id)
         connection = await self._locked_connection(context, connection_id)
+        if connection.typed_lifecycle == ConnectionLifecycle.DISABLED:
+            raise InvalidConnectionTransition("connection transition rejected")
         sequence = await self._session.scalar(
             select(func.max(ServerConnectionVersion.sequence)).where(
                 ServerConnectionVersion.connection_id == connection.id
@@ -128,6 +131,8 @@ class ConnectionService:
         context: WorkspaceContext,
         connection_id: UUID,
         expected_version_id: UUID,
+        expected_control_epoch: int,
+        expected_refresh_generation: int,
         correlation_id: UUID | None = None,
     ) -> ServerConnection:
         await require_current_role(
@@ -141,6 +146,8 @@ class ConnectionService:
         if (
             connection.typed_lifecycle == ConnectionLifecycle.DISABLED
             or connection.pending_version_id != expected_version_id
+            or connection.control_epoch != expected_control_epoch
+            or connection.refresh_generation != expected_refresh_generation
         ):
             raise InvalidConnectionTransition("connection transition rejected")
         connection.verified_version_id = expected_version_id
@@ -268,7 +275,12 @@ class ConnectionService:
         try:
             ip_address(hostname)
         except ValueError:
-            is_ip_literal = False
+            try:
+                inet_aton(hostname)
+            except OSError:
+                is_ip_literal = False
+            else:
+                is_ip_literal = True
         else:
             is_ip_literal = True
         if (
@@ -321,6 +333,8 @@ class CapabilityService:
         context: WorkspaceContext,
         connection_id: UUID,
         connection_version_id: UUID,
+        expected_control_epoch: int,
+        expected_refresh_generation: int,
         tool_identity: str,
         tool_name: str,
         display_name: str,
@@ -346,15 +360,25 @@ class CapabilityService:
             metadata_digest=metadata_digest,
             protocol_revision=protocol_revision,
         )
-        connection_version = await self._session.scalar(
-            select(ServerConnectionVersion).where(
-                ServerConnectionVersion.id == connection_version_id,
-                ServerConnectionVersion.connection_id == connection_id,
-                ServerConnectionVersion.workspace_id == context.workspace_id,
+        connection = await self._session.scalar(
+            select(ServerConnection)
+            .where(
+                ServerConnection.id == connection_id,
+                ServerConnection.workspace_id == context.workspace_id,
             )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
-        if connection_version is None:
+        if connection is None:
             raise AuthorizationDenied("workspace access denied")
+        current_target = connection.pending_version_id or connection.verified_version_id
+        if (
+            connection.typed_lifecycle == ConnectionLifecycle.DISABLED
+            or current_target != connection_version_id
+            or connection.control_epoch != expected_control_epoch
+            or connection.refresh_generation != expected_refresh_generation
+        ):
+            raise InvalidConnectionTransition("connection transition rejected")
 
         capability = await self._session.scalar(
             select(Capability)

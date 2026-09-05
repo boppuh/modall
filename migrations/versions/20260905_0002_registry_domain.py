@@ -312,7 +312,12 @@ def upgrade() -> None:
         "CREATE FUNCTION modall_reject_immutable_update() RETURNS trigger "
         "LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'immutable version row'; END; $$"
     )
-    for table in ("registry_entry_versions", "server_connection_versions", "capability_versions"):
+    for table in (
+        "registry_entry_versions",
+        "server_connection_versions",
+        "capability_versions",
+        "mcp_tool_bindings",
+    ):
         op.execute(
             f"CREATE TRIGGER {table}_immutable BEFORE UPDATE ON {table} "
             "FOR EACH ROW EXECUTE FUNCTION modall_reject_immutable_update()"
@@ -320,7 +325,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    for table in ("registry_entry_versions", "server_connection_versions", "capability_versions"):
+    for table in (
+        "registry_entry_versions",
+        "server_connection_versions",
+        "capability_versions",
+        "mcp_tool_bindings",
+    ):
         op.execute(f"DROP TRIGGER IF EXISTS {table}_immutable ON {table}")
     op.execute("DROP FUNCTION IF EXISTS modall_reject_immutable_update()")
     op.drop_table("capability_status_events")

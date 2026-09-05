@@ -98,16 +98,31 @@ def test_connection_versions_and_lifecycle_are_truthful() -> None:
 
             async with transaction(factory) as session:
                 context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                current_generation, current_epoch, _ = await ConnectionService(
+                    session
+                ).allocate_refresh_generation(context=context, connection_id=connection_id)
                 with pytest.raises(InvalidConnectionTransition):
                     await ConnectionService(session).promote_pending(
                         context=context,
                         connection_id=connection_id,
                         expected_version_id=uuid4(),
+                        expected_control_epoch=current_epoch,
+                        expected_refresh_generation=current_generation,
+                    )
+                with pytest.raises(InvalidConnectionTransition):
+                    await ConnectionService(session).promote_pending(
+                        context=context,
+                        connection_id=connection_id,
+                        expected_version_id=first_version_id,
+                        expected_control_epoch=epoch,
+                        expected_refresh_generation=generation,
                     )
                 promoted = await ConnectionService(session).promote_pending(
                     context=context,
                     connection_id=connection_id,
                     expected_version_id=first_version_id,
+                    expected_control_epoch=current_epoch,
+                    expected_refresh_generation=current_generation,
                 )
                 assert promoted.typed_lifecycle == ConnectionLifecycle.ACTIVE
                 assert promoted.pending_version_id is None
@@ -171,10 +186,15 @@ def test_disable_enable_and_role_boundaries() -> None:
                 connection_id = connection.id
                 version_id = connection.pending_version_id
                 assert version_id is not None
+                generation, epoch, _ = await ConnectionService(session).allocate_refresh_generation(
+                    context=context, connection_id=connection_id
+                )
                 await ConnectionService(session).promote_pending(
                     context=context,
                     connection_id=connection_id,
                     expected_version_id=version_id,
+                    expected_control_epoch=epoch,
+                    expected_refresh_generation=generation,
                 )
 
             async with transaction(factory) as session:
@@ -199,6 +219,14 @@ def test_disable_enable_and_role_boundaries() -> None:
 
             async with transaction(factory) as session:
                 context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                with pytest.raises(InvalidConnectionTransition):
+                    await ConnectionService(session).append_version(
+                        context=context,
+                        connection_id=connection_id,
+                        endpoint_url="https://mcp.example/disabled-change",
+                        secret_binding_id=None,
+                        policy_version="v2",
+                    )
                 enabled = await ConnectionService(session).enable(
                     context=context, connection_id=connection_id
                 )
@@ -246,6 +274,9 @@ def test_connection_versions_are_immutable() -> None:
         "https://mcp.example?token=x",
         "https://mcp.example#fragment",
         "https://127.0.0.1",
+        "https://2130706433",
+        "https://127.1",
+        "https://0x7f000001",
     ],
 )
 def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> None:
@@ -281,11 +312,16 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
                 )
                 connection_version_id = connection.pending_version_id
                 assert connection_version_id is not None
+                refresh_generation, control_epoch, _ = await ConnectionService(
+                    session
+                ).allocate_refresh_generation(context=context, connection_id=connection.id)
                 service = CapabilityService(session)
                 first = await service.record_version(
                     context=context,
                     connection_id=connection.id,
                     connection_version_id=connection_version_id,
+                    expected_control_epoch=control_epoch,
+                    expected_refresh_generation=refresh_generation,
                     tool_identity="tools/review",
                     tool_name="review",
                     display_name="Review",
@@ -299,6 +335,8 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
                     context=context,
                     connection_id=connection.id,
                     connection_version_id=connection_version_id,
+                    expected_control_epoch=control_epoch,
+                    expected_refresh_generation=refresh_generation,
                     tool_identity="tools/review",
                     tool_name="review",
                     display_name="Review",
@@ -317,10 +355,35 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
                 assert capability.typed_status == CapabilityStatus.ENABLED
                 assert capability.status_epoch == 2
 
+                refresh_generation, control_epoch, _ = await ConnectionService(
+                    session
+                ).allocate_refresh_generation(context=context, connection_id=connection.id)
+                stale_generation = refresh_generation
+                refresh_generation, control_epoch, _ = await ConnectionService(
+                    session
+                ).allocate_refresh_generation(context=context, connection_id=connection.id)
+                with pytest.raises(InvalidConnectionTransition):
+                    await service.record_version(
+                        context=context,
+                        connection_id=connection.id,
+                        connection_version_id=connection_version_id,
+                        expected_control_epoch=control_epoch,
+                        expected_refresh_generation=stale_generation,
+                        tool_identity="tools/review",
+                        tool_name="review",
+                        display_name="Review",
+                        description="Stale drift",
+                        input_schema={"type": "object"},
+                        output_schema=None,
+                        metadata_digest="b" * 64,
+                        protocol_revision="2025-06-18",
+                    )
                 drift = await service.record_version(
                     context=context,
                     connection_id=connection.id,
                     connection_version_id=connection_version_id,
+                    expected_control_epoch=control_epoch,
+                    expected_refresh_generation=refresh_generation,
                     tool_identity="tools/review",
                     tool_name="review",
                     display_name="Review",
@@ -368,6 +431,49 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
                 assert [event.status_epoch for event in events] == [1, 2, 3]
                 assert len(bindings) == 2
 
+            with pytest.raises(ValueError, match="immutable"):
+                async with transaction(factory) as session:
+                    binding = await session.get(McpToolBinding, first.id)
+                    assert binding is not None
+                    binding.tool_name = "retargeted"
+                    await session.flush()
+
+    asyncio.run(scenario())
+
+
+def test_stale_verification_cannot_survive_disable_enable() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="stale-verification")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Fenced",
+                    endpoint_url="https://mcp.example/fenced",
+                    secret_binding_id=None,
+                    policy_version="v1",
+                )
+                version_id = connection.pending_version_id
+                assert version_id is not None
+                generation, stale_epoch, _ = await ConnectionService(
+                    session
+                ).allocate_refresh_generation(context=context, connection_id=connection.id)
+                await ConnectionService(session).disable(
+                    context=context, connection_id=connection.id
+                )
+                await ConnectionService(session).enable(
+                    context=context, connection_id=connection.id
+                )
+                with pytest.raises(InvalidConnectionTransition):
+                    await ConnectionService(session).promote_pending(
+                        context=context,
+                        connection_id=connection.id,
+                        expected_version_id=version_id,
+                        expected_control_epoch=stale_epoch,
+                        expected_refresh_generation=generation,
+                    )
+
     asyncio.run(scenario())
 
 
@@ -386,11 +492,16 @@ def test_capability_disable_enable_uses_monotonic_epoch() -> None:
                 )
                 version_id = connection.pending_version_id
                 assert version_id is not None
+                refresh_generation, control_epoch, _ = await ConnectionService(
+                    session
+                ).allocate_refresh_generation(context=context, connection_id=connection.id)
                 service = CapabilityService(session)
                 version = await service.record_version(
                     context=context,
                     connection_id=connection.id,
                     connection_version_id=version_id,
+                    expected_control_epoch=control_epoch,
+                    expected_refresh_generation=refresh_generation,
                     tool_identity="tools/run",
                     tool_name="run",
                     display_name="Run",
@@ -458,6 +569,8 @@ def test_registry_services_reject_cross_workspace_ids() -> None:
                         context=first_context,
                         connection_id=connection_id,
                         connection_version_id=connection_version_id,
+                        expected_control_epoch=0,
+                        expected_refresh_generation=0,
                         tool_identity="tools/private",
                         tool_name="private",
                         display_name="Private",
