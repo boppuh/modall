@@ -1,0 +1,471 @@
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from uuid import UUID, uuid4
+
+import pytest
+from sqlalchemy import event, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from modall.audit.types import AuditAction
+from modall.identity.repository import AuthorizationDenied, AuthorizationService
+from modall.identity.service import IdentityService
+from modall.identity.types import Permission, Principal, Role, WorkspaceContext
+from modall.persistence.database import create_engine, create_session_factory, transaction
+from modall.persistence.models import (
+    AuditEvent,
+    Base,
+    CapabilityStatusEvent,
+    CapabilityVersion,
+    McpToolBinding,
+    ServerConnection,
+    ServerConnectionVersion,
+)
+from modall.registry.service import (
+    CapabilityService,
+    ConnectionService,
+    InvalidCapabilityTransition,
+    InvalidConnectionTransition,
+)
+from modall.registry.types import CapabilityStatus, ConnectionLifecycle
+
+
+@asynccontextmanager
+async def database() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = create_engine("sqlite+aiosqlite:///:memory:")
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def enable_foreign_keys(dbapi_connection: object, connection_record: object) -> None:
+        del connection_record
+        cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = create_session_factory(engine)
+    try:
+        yield factory
+    finally:
+        await engine.dispose()
+
+
+async def bootstrap(
+    factory: async_sessionmaker[AsyncSession], *, subject: str
+) -> tuple[UUID, UUID]:
+    async with transaction(factory) as session:
+        identity = IdentityService(session)
+        user = await identity.resolve_user(Principal("issuer", subject, subject))
+        workspace = await identity.create_workspace(owner=user, name=f"Workspace {subject}")
+        return user.id, workspace.id
+
+
+async def admin_context(
+    session: AsyncSession, *, user_id: UUID, workspace_id: UUID
+) -> WorkspaceContext:
+    return await AuthorizationService(session).authorize(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        permission=Permission.MANAGE_CONNECTION_CONFIGURATION,
+    )
+
+
+def test_connection_versions_and_lifecycle_are_truthful() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="connection-admin")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name=" Production MCP ",
+                    endpoint_url="https://mcp.example/v1",
+                    secret_binding_id=None,
+                    policy_version="policy-v1",
+                )
+                connection_id = connection.id
+                first_version_id = connection.pending_version_id
+                assert connection.name == "Production MCP"
+                assert connection.typed_lifecycle == ConnectionLifecycle.VERIFYING
+                assert first_version_id is not None
+                assert connection.verified_version_id is None
+                assert ConnectionService.is_executable(connection, first_version_id) is False
+
+                generation, epoch, target = await ConnectionService(
+                    session
+                ).allocate_refresh_generation(context=context, connection_id=connection_id)
+                assert (generation, epoch, target) == (1, 0, first_version_id)
+
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                with pytest.raises(InvalidConnectionTransition):
+                    await ConnectionService(session).promote_pending(
+                        context=context,
+                        connection_id=connection_id,
+                        expected_version_id=uuid4(),
+                    )
+                promoted = await ConnectionService(session).promote_pending(
+                    context=context,
+                    connection_id=connection_id,
+                    expected_version_id=first_version_id,
+                )
+                assert promoted.typed_lifecycle == ConnectionLifecycle.ACTIVE
+                assert promoted.pending_version_id is None
+                assert promoted.verified_version_id == first_version_id
+                assert ConnectionService.is_executable(promoted, first_version_id) is True
+
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                version = await ConnectionService(session).append_version(
+                    context=context,
+                    connection_id=connection_id,
+                    endpoint_url="https://mcp.example/v2",
+                    secret_binding_id=None,
+                    policy_version="policy-v2",
+                )
+                assert version.sequence == 2
+                loaded_connection = await session.get(ServerConnection, connection_id)
+                assert loaded_connection is not None
+                assert loaded_connection.pending_version_id == version.id
+                assert loaded_connection.verified_version_id == first_version_id
+                assert loaded_connection.control_epoch == 1
+                assert loaded_connection.typed_lifecycle == ConnectionLifecycle.VERIFYING
+                assert ConnectionService.is_executable(loaded_connection, first_version_id) is False
+
+            async with factory() as session:
+                events = list(
+                    (
+                        await session.scalars(
+                            select(AuditEvent).where(AuditEvent.workspace_id == workspace_id)
+                        )
+                    ).all()
+                )
+                assert AuditAction.CONNECTION_CREATED.value in {event.action for event in events}
+                assert AuditAction.CONNECTION_VERSION_APPENDED.value in {
+                    event.action for event in events
+                }
+                assert AuditAction.CONNECTION_VERIFIED.value in {event.action for event in events}
+
+    asyncio.run(scenario())
+
+
+def test_disable_enable_and_role_boundaries() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="lifecycle-admin")
+            async with transaction(factory) as session:
+                identity = IdentityService(session)
+                operator = await identity.resolve_user(Principal("issuer", "operator", None))
+                operator_id = operator.id
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                await identity.set_membership_role(
+                    context=context, user_id=operator_id, role=Role.OPERATOR
+                )
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Lifecycle",
+                    endpoint_url="https://mcp.example/service",
+                    secret_binding_id=None,
+                    policy_version="v1",
+                )
+                connection_id = connection.id
+                version_id = connection.pending_version_id
+                assert version_id is not None
+                await ConnectionService(session).promote_pending(
+                    context=context,
+                    connection_id=connection_id,
+                    expected_version_id=version_id,
+                )
+
+            async with transaction(factory) as session:
+                operator_context = await AuthorizationService(session).authorize(
+                    user_id=operator_id,
+                    workspace_id=workspace_id,
+                    permission=Permission.DISABLE_CONNECTION,
+                )
+                disabled = await ConnectionService(session).disable(
+                    context=operator_context, connection_id=connection_id
+                )
+                assert disabled.typed_lifecycle == ConnectionLifecycle.DISABLED
+                assert disabled.control_epoch == 1
+                with pytest.raises(InvalidConnectionTransition):
+                    await ConnectionService(session).allocate_refresh_generation(
+                        context=operator_context, connection_id=connection_id
+                    )
+                with pytest.raises(AuthorizationDenied):
+                    await ConnectionService(session).enable(
+                        context=operator_context, connection_id=connection_id
+                    )
+
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                enabled = await ConnectionService(session).enable(
+                    context=context, connection_id=connection_id
+                )
+                assert enabled.typed_lifecycle == ConnectionLifecycle.VERIFYING
+                assert enabled.control_epoch == 2
+                with pytest.raises(InvalidConnectionTransition):
+                    await ConnectionService(session).enable(
+                        context=context, connection_id=connection_id
+                    )
+
+    asyncio.run(scenario())
+
+
+def test_connection_versions_are_immutable() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="immutable-admin")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Immutable",
+                    endpoint_url="https://mcp.example/v1",
+                    secret_binding_id=None,
+                    policy_version="v1",
+                )
+                version_id = connection.pending_version_id
+                assert version_id is not None
+
+            with pytest.raises(ValueError, match="immutable"):
+                async with transaction(factory) as session:
+                    version = await session.get(ServerConnectionVersion, version_id)
+                    assert version is not None
+                    version.endpoint_url = "https://attacker.example"
+                    await session.flush()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://mcp.example",
+        "https://user@mcp.example",
+        "https://mcp.example?token=x",
+        "https://mcp.example#fragment",
+        "https://127.0.0.1",
+    ],
+)
+def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject=str(uuid4()))
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                with pytest.raises(ValueError, match="endpoint"):
+                    await ConnectionService(session).create(
+                        context=context,
+                        name="Unsafe",
+                        endpoint_url=endpoint,
+                        secret_binding_id=None,
+                        policy_version="v1",
+                    )
+
+    asyncio.run(scenario())
+
+
+def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="capability-admin")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Capability source",
+                    endpoint_url="https://mcp.example/tools",
+                    secret_binding_id=None,
+                    policy_version="v1",
+                )
+                connection_version_id = connection.pending_version_id
+                assert connection_version_id is not None
+                service = CapabilityService(session)
+                first = await service.record_version(
+                    context=context,
+                    connection_id=connection.id,
+                    connection_version_id=connection_version_id,
+                    tool_identity="tools/review",
+                    tool_name="review",
+                    display_name="Review",
+                    description="Review code",
+                    input_schema={"type": "object"},
+                    output_schema=None,
+                    metadata_digest="a" * 64,
+                    protocol_revision="2025-06-18",
+                )
+                duplicate = await service.record_version(
+                    context=context,
+                    connection_id=connection.id,
+                    connection_version_id=connection_version_id,
+                    tool_identity="tools/review",
+                    tool_name="review",
+                    display_name="Review",
+                    description="Review code",
+                    input_schema={"type": "object"},
+                    output_schema=None,
+                    metadata_digest="a" * 64,
+                    protocol_revision="2025-06-18",
+                )
+                assert duplicate.id == first.id
+                capability = await service.enable(
+                    context=context,
+                    capability_id=first.capability_id,
+                    expected_version_id=first.id,
+                )
+                assert capability.typed_status == CapabilityStatus.ENABLED
+                assert capability.status_epoch == 2
+
+                drift = await service.record_version(
+                    context=context,
+                    connection_id=connection.id,
+                    connection_version_id=connection_version_id,
+                    tool_identity="tools/review",
+                    tool_name="review",
+                    display_name="Review",
+                    description="Review code and tests",
+                    input_schema={"type": "object"},
+                    output_schema=None,
+                    metadata_digest="b" * 64,
+                    protocol_revision="2025-06-18",
+                )
+                assert drift.sequence == 2
+                assert capability.pending_version_id == drift.id
+                assert capability.enabled_version_id == first.id
+                assert CapabilityStatus(capability.status) == CapabilityStatus.PENDING_REVIEW
+                assert capability.status_epoch == 3
+
+            async with factory() as session:
+                versions = list(
+                    (
+                        await session.scalars(
+                            select(CapabilityVersion)
+                            .where(CapabilityVersion.capability_id == first.capability_id)
+                            .order_by(CapabilityVersion.sequence)
+                        )
+                    ).all()
+                )
+                events = list(
+                    (
+                        await session.scalars(
+                            select(CapabilityStatusEvent)
+                            .where(CapabilityStatusEvent.capability_id == first.capability_id)
+                            .order_by(CapabilityStatusEvent.status_epoch)
+                        )
+                    ).all()
+                )
+                bindings = list(
+                    (
+                        await session.scalars(
+                            select(McpToolBinding).where(
+                                McpToolBinding.workspace_id == workspace_id
+                            )
+                        )
+                    ).all()
+                )
+                assert [version.sequence for version in versions] == [1, 2]
+                assert [event.status_epoch for event in events] == [1, 2, 3]
+                assert len(bindings) == 2
+
+    asyncio.run(scenario())
+
+
+def test_capability_disable_enable_uses_monotonic_epoch() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="capability-lifecycle")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Capability lifecycle",
+                    endpoint_url="https://mcp.example/tools",
+                    secret_binding_id=None,
+                    policy_version="v1",
+                )
+                version_id = connection.pending_version_id
+                assert version_id is not None
+                service = CapabilityService(session)
+                version = await service.record_version(
+                    context=context,
+                    connection_id=connection.id,
+                    connection_version_id=version_id,
+                    tool_identity="tools/run",
+                    tool_name="run",
+                    display_name="Run",
+                    description=None,
+                    input_schema={},
+                    output_schema={},
+                    metadata_digest="c" * 64,
+                    protocol_revision="2025-06-18",
+                )
+                capability = await service.enable(
+                    context=context,
+                    capability_id=version.capability_id,
+                    expected_version_id=version.id,
+                )
+                original_enabled_id = capability.enabled_version_id
+                await service.disable(context=context, capability_id=capability.id)
+                assert capability.status_epoch == 3
+                with pytest.raises(InvalidCapabilityTransition):
+                    await service.disable(context=context, capability_id=capability.id)
+                await service.enable(
+                    context=context,
+                    capability_id=capability.id,
+                    expected_version_id=version.id,
+                )
+                assert capability.enabled_version_id == original_enabled_id
+                assert capability.status_epoch == 4
+
+    asyncio.run(scenario())
+
+
+def test_registry_services_reject_cross_workspace_ids() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            first_user, first_workspace = await bootstrap(factory, subject="scope-first")
+            second_user, second_workspace = await bootstrap(factory, subject="scope-second")
+            async with transaction(factory) as session:
+                second_context = await admin_context(
+                    session, user_id=second_user, workspace_id=second_workspace
+                )
+                connection = await ConnectionService(session).create(
+                    context=second_context,
+                    name="Private",
+                    endpoint_url="https://private.example/mcp",
+                    secret_binding_id=None,
+                    policy_version="v1",
+                )
+                connection_id = connection.id
+                connection_version_id = connection.pending_version_id
+                assert connection_version_id is not None
+
+            async with transaction(factory) as session:
+                first_context = await admin_context(
+                    session, user_id=first_user, workspace_id=first_workspace
+                )
+                with pytest.raises(AuthorizationDenied):
+                    await ConnectionService(session).append_version(
+                        context=first_context,
+                        connection_id=connection_id,
+                        endpoint_url="https://private.example/mcp-v2",
+                        secret_binding_id=None,
+                        policy_version="v2",
+                    )
+                with pytest.raises(AuthorizationDenied):
+                    await CapabilityService(session).record_version(
+                        context=first_context,
+                        connection_id=connection_id,
+                        connection_version_id=connection_version_id,
+                        tool_identity="tools/private",
+                        tool_name="private",
+                        display_name="Private",
+                        description=None,
+                        input_schema={},
+                        output_schema=None,
+                        metadata_digest="d" * 64,
+                        protocol_revision="2025-06-18",
+                    )
+
+    asyncio.run(scenario())
