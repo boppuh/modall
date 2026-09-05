@@ -415,6 +415,7 @@ class CapabilityVersion(Base):
 class McpToolBinding(Base):
     __tablename__ = "mcp_tool_bindings"
     __table_args__ = (
+        UniqueConstraint("connection_id", "capability_version_id"),
         ForeignKeyConstraint(
             ["workspace_id", "capability_version_id"],
             ["capability_versions.workspace_id", "capability_versions.id"],
@@ -513,8 +514,8 @@ class DiscoverySnapshot(Base):
             ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
-            ["workspace_id", "connection_version_id"],
-            ["server_connection_versions.workspace_id", "server_connection_versions.id"],
+            ["connection_id", "connection_version_id"],
+            ["server_connection_versions.connection_id", "server_connection_versions.id"],
             ondelete="NO ACTION",
             deferrable=True,
             initially="DEFERRED",
@@ -539,6 +540,40 @@ class DiscoverySnapshot(Base):
     generation: Mapped[int] = mapped_column(Integer)
     control_epoch: Mapped[int] = mapped_column(Integer)
     protocol_revision: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[CreatedAt]
+
+
+class DiscoverySnapshotCapability(Base):
+    __tablename__ = "discovery_snapshot_capabilities"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "snapshot_id"],
+            ["discovery_snapshots.workspace_id", "discovery_snapshots.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["connection_id", "snapshot_id"],
+            ["discovery_snapshots.connection_id", "discovery_snapshots.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "capability_version_id"],
+            ["capability_versions.workspace_id", "capability_versions.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["connection_id", "capability_version_id"],
+            ["mcp_tool_bindings.connection_id", "mcp_tool_bindings.capability_version_id"],
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("snapshot_id", "capability_version_id"),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    connection_id: Mapped[UUID]
+    snapshot_id: Mapped[UUID]
+    capability_version_id: Mapped[UUID]
     created_at: Mapped[CreatedAt]
 
 
@@ -638,6 +673,7 @@ for immutable_model in (
     CapabilityStatusEvent,
     DiscoveryPayload,
     DiscoverySnapshot,
+    DiscoverySnapshotCapability,
 ):
     event.listen(immutable_model, "before_update", _reject_immutable_update)
 

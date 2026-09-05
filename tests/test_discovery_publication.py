@@ -37,6 +37,7 @@ from modall.registry.runner import DiscoveryRunner, classify_discovery_failure
 from modall.registry.service import (
     CapabilityService,
     ConnectionService,
+    InvalidCapabilityTransition,
     InvalidConnectionTransition,
 )
 from modall.registry.types import CapabilityStatus, ConnectionLifecycle, DiscoveryFailureCode
@@ -186,6 +187,16 @@ def test_missing_tools_and_eligible_failure_update_only_current_projections() ->
                     result=result_for(),
                 )
                 snapshot_id = snapshot.id
+                capability = await session.scalar(
+                    select(Capability).where(Capability.connection_id == connection_id)
+                )
+                assert capability is not None and capability.pending_version_id is not None
+                historical_version_id = capability.pending_version_id
+                await CapabilityService(session).enable(
+                    context=context,
+                    capability_id=capability.id,
+                    expected_version_id=historical_version_id,
+                )
 
             async with transaction(factory) as session:
                 context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
@@ -200,6 +211,12 @@ def test_missing_tools_and_eligible_failure_update_only_current_projections() ->
                 )
                 assert capability is not None
                 assert capability.typed_status == CapabilityStatus.UNAVAILABLE
+                with pytest.raises(InvalidCapabilityTransition):
+                    await CapabilityService(session).enable(
+                        context=context,
+                        capability_id=capability.id,
+                        expected_version_id=historical_version_id,
+                    )
 
             async with transaction(factory) as session:
                 context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
@@ -401,6 +418,55 @@ def test_discovery_runner_publishes_success_and_safe_failure_codes() -> None:
     assert classify_discovery_failure(RuntimeError("safe")) == (
         DiscoveryFailureCode.TRANSPORT_FAILED
     )
+
+
+def test_discovery_runner_does_not_report_publication_errors_as_endpoint_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubAdapter:
+        async def discover(
+            self, endpoint: str, *, bearer_token: bytes | bytearray | None = None
+        ) -> DiscoveryResult:
+            del endpoint, bearer_token
+            return result_for()
+
+    async def fail_publication(
+        service: DiscoveryPublicationService, **values: object
+    ) -> DiscoverySnapshot:
+        del service, values
+        raise RuntimeError("database publication failed")
+
+    monkeypatch.setattr(DiscoveryPublicationService, "publish_success", fail_publication)
+
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="publication-error-admin")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Publication error",
+                    endpoint_url="https://mcp.example/publication-error",
+                    secret_binding_id=None,
+                    policy_version="policy-v1",
+                )
+                connection_id = connection.id
+                lease = await lease_for(session, context, connection_id, "runner")
+
+            runner = DiscoveryRunner(
+                session_factory=factory,
+                secret_provider=FixtureSecretProvider({}),
+                adapter_factory=lambda: cast(McpClientAdapter, StubAdapter()),
+            )
+            with pytest.raises(RuntimeError, match="publication failed"):
+                await runner.run(context=context, lease=lease)
+
+            async with factory() as session:
+                loaded = await session.get(ServerConnection, connection_id)
+                assert loaded is not None
+                assert loaded.last_refresh_error_code is None
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

@@ -19,6 +19,7 @@ from modall.persistence.models import (
     Capability,
     CapabilityStatusEvent,
     CapabilityVersion,
+    DiscoverySnapshotCapability,
     McpToolBinding,
     SecretBinding,
     ServerConnection,
@@ -41,8 +42,18 @@ class ConnectionService:
     _POLICY_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
     _DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        environment: str = "production",
+        allow_loopback_http: bool = False,
+    ) -> None:
+        if allow_loopback_http and environment not in {"local", "test"}:
+            raise ValueError("loopback HTTP is restricted to local and test environments")
         self._session = session
+        self._environment = environment
+        self._allow_loopback_http = allow_loopback_http
 
     async def create(
         self,
@@ -326,8 +337,7 @@ class ConnectionService:
             raise ValueError("connection name is not valid UTF-8") from exc
         return normalized
 
-    @classmethod
-    def _validate_configuration(cls, endpoint_url: str, policy_version: str) -> None:
+    def _validate_configuration(self, endpoint_url: str, policy_version: str) -> None:
         if not endpoint_url or len(endpoint_url) > 2048 or "\x00" in endpoint_url:
             raise ValueError("invalid endpoint URL")
         try:
@@ -349,11 +359,12 @@ class ConnectionService:
             raise ValueError("invalid endpoint URL")
         hostname = encoded_hostname.removesuffix(".")
         if len(hostname) > 253 or any(
-            cls._DNS_LABEL.fullmatch(label) is None for label in hostname.split(".")
+            self._DNS_LABEL.fullmatch(label) is None for label in hostname.split(".")
         ):
             raise ValueError("invalid endpoint URL")
+        parsed_ip = None
         try:
-            ip_address(hostname)
+            parsed_ip = ip_address(hostname)
         except ValueError:
             try:
                 inet_aton(hostname)
@@ -363,17 +374,28 @@ class ConnectionService:
                 is_ip_literal = True
         else:
             is_ip_literal = True
+        local_fixture = (
+            self._environment in {"local", "test"}
+            and self._allow_loopback_http
+            and parsed.scheme == "http"
+            and (
+                hostname == "localhost"
+                or hostname.endswith(".localhost")
+                or (parsed_ip is not None and parsed_ip.is_loopback)
+            )
+        )
         if (
-            parsed.scheme != "https"
+            (parsed.scheme != "https" and not local_fixture)
             or not hostname
-            or hostname == "localhost"
-            or hostname.endswith(".localhost")
-            or is_ip_literal
+            or (
+                not local_fixture
+                and (hostname == "localhost" or hostname.endswith(".localhost") or is_ip_literal)
+            )
             or parsed.username is not None
             or parsed.password is not None
             or parsed.query
             or parsed.fragment
-            or port not in {None, 443}
+            or (not local_fixture and port not in {None, 443})
         ):
             raise ValueError("invalid endpoint URL")
         if re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path):
@@ -382,14 +404,16 @@ class ConnectionService:
             decoded_path = unquote(parsed.path, errors="strict")
         except UnicodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
-        canonical_endpoint = f"https://{hostname}{':443' if port == 443 else ''}{decoded_path}"
+        canonical_endpoint = (
+            f"{parsed.scheme}://{hostname}{f':{port}' if port is not None else ''}{decoded_path}"
+        )
         try:
             canonical_endpoint.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
         if _contains_obvious_secret(canonical_endpoint):
             raise ValueError("endpoint URL contains credential-shaped content")
-        if cls._POLICY_VERSION.fullmatch(policy_version) is None:
+        if self._POLICY_VERSION.fullmatch(policy_version) is None:
             raise ValueError("invalid policy version")
 
     def _audit(
@@ -608,15 +632,26 @@ class CapabilityService:
             .with_for_update()
             .execution_options(populate_existing=True)
         )
+        observed = None
+        if connection is not None and connection.current_snapshot_id is not None:
+            observed = await self._session.scalar(
+                select(DiscoverySnapshotCapability.id).where(
+                    DiscoverySnapshotCapability.workspace_id == context.workspace_id,
+                    DiscoverySnapshotCapability.connection_id == capability.connection_id,
+                    DiscoverySnapshotCapability.snapshot_id == connection.current_snapshot_id,
+                    DiscoverySnapshotCapability.capability_version_id == expected_version_id,
+                )
+            )
         if (
             binding is None
             or version is None
             or not version.schema_supported
             or connection is None
+            or observed is None
             or binding.protocol_revision != QUALIFIED_PROTOCOL_REVISION
-            or connection.typed_lifecycle == ConnectionLifecycle.DISABLED
-            or (connection.pending_version_id or connection.verified_version_id)
-            != binding.connection_version_id
+            or connection.typed_lifecycle != ConnectionLifecycle.ACTIVE
+            or connection.pending_version_id is not None
+            or connection.verified_version_id != binding.connection_version_id
         ):
             raise InvalidCapabilityTransition("capability transition rejected")
         capability.enabled_version_id = expected_version_id

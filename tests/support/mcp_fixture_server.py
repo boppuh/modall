@@ -10,12 +10,14 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 
 PROTOCOL_REVISION = "2025-06-18"
 FIXTURE_TOKEN = "fixture-token-not-a-real-secret"
+ESCAPED_FIXTURE_TOKEN = 'opaque"slash\\token123'
 AUTHENTICATED_PROFILES = {
     "authenticated",
     "authenticated-redirect",
     "authenticated-redirect-after-init",
     "authenticated-redirect-on-call",
     "credential-leak",
+    "credential-escaped-leak",
 }
 SUPPORTED_PROFILES = {
     "default",
@@ -32,6 +34,8 @@ SUPPORTED_PROFILES = {
     "redirect-after-init",
     "redirect-on-call",
     "unsafe-schema",
+    "remote-schema-ref",
+    "dynamic-schema-ref",
     "repeated-cursor",
     *AUTHENTICATED_PROFILES,
 }
@@ -40,8 +44,9 @@ SUPPORTED_PROFILES = {
 def _tools(profile: str) -> list[dict[str, Any]]:
     if profile == "metadata-drift-v2":
         description = "Echo bounded text safely"
-    elif profile == "credential-leak":
-        description = f"Leaked credential {FIXTURE_TOKEN}"
+    elif profile in {"credential-leak", "credential-escaped-leak"}:
+        token = ESCAPED_FIXTURE_TOKEN if profile == "credential-escaped-leak" else FIXTURE_TOKEN
+        description = f"Leaked credential {token}"
     else:
         description = "Echo bounded text"
     schema: dict[str, Any] = {
@@ -54,6 +59,11 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         schema["properties"]["uppercase"] = {"type": "boolean", "default": False}
     if profile == "unsafe-schema":
         schema["properties"]["message"] = {"type": "string", "pattern": "(?=a)a"}
+    if profile == "remote-schema-ref":
+        schema["$id"] = "https://attacker.example/schema"
+        schema["properties"]["message"] = {"$ref": "child.json"}
+    if profile == "dynamic-schema-ref":
+        schema["properties"]["message"] = {"$dynamicRef": "https://attacker.example/schema"}
     return [
         {
             "name": "echo",
@@ -122,7 +132,10 @@ def create_mcp_fixture_app() -> FastAPI:
     ) -> Response:
         if profile not in SUPPORTED_PROFILES:
             return JSONResponse({"error": "unknown fixture profile"}, status_code=404)
-        if profile in AUTHENTICATED_PROFILES and authorization != f"Bearer {FIXTURE_TOKEN}":
+        expected_token = (
+            ESCAPED_FIXTURE_TOKEN if profile == "credential-escaped-leak" else FIXTURE_TOKEN
+        )
+        if profile in AUTHENTICATED_PROFILES and authorization != f"Bearer {expected_token}":
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         if profile not in AUTHENTICATED_PROFILES and authorization is not None:
             return JSONResponse({"error": "unexpected authorization"}, status_code=400)

@@ -18,6 +18,9 @@ from modall.persistence.models import (
     Capability,
     CapabilityStatusEvent,
     CapabilityVersion,
+    DiscoveryPayload,
+    DiscoverySnapshot,
+    DiscoverySnapshotCapability,
     McpToolBinding,
     RegistryEntry,
     SecretBinding,
@@ -71,6 +74,56 @@ async def admin_context(
         workspace_id=workspace_id,
         permission=Permission.MANAGE_CONNECTION_CONFIGURATION,
     )
+
+
+async def establish_current_snapshot(
+    session: AsyncSession,
+    *,
+    context: WorkspaceContext,
+    connection: ServerConnection,
+    capability_version: CapabilityVersion,
+) -> None:
+    """Complete direct domain-test setup through the discovery lineage invariants."""
+
+    digest = uuid4().hex * 2
+    payload = DiscoveryPayload(
+        workspace_id=context.workspace_id,
+        canonical_digest=digest,
+        normalized_payload={"tools": []},
+        byte_count=2,
+    )
+    session.add(payload)
+    await session.flush()
+    connection_version_id = connection.pending_version_id
+    assert connection_version_id is not None
+    snapshot = DiscoverySnapshot(
+        workspace_id=context.workspace_id,
+        connection_id=connection.id,
+        connection_version_id=connection_version_id,
+        payload_id=payload.id,
+        generation=connection.refresh_generation,
+        control_epoch=connection.control_epoch,
+        protocol_revision="2025-06-18",
+    )
+    session.add(snapshot)
+    await session.flush()
+    session.add(
+        DiscoverySnapshotCapability(
+            workspace_id=context.workspace_id,
+            connection_id=connection.id,
+            snapshot_id=snapshot.id,
+            capability_version_id=capability_version.id,
+        )
+    )
+    await ConnectionService(session).promote_pending(
+        context=context,
+        connection_id=connection.id,
+        expected_version_id=connection_version_id,
+        expected_control_epoch=connection.control_epoch,
+        expected_refresh_generation=connection.refresh_generation,
+    )
+    connection.current_snapshot_id = snapshot.id
+    await session.flush()
 
 
 def test_connection_versions_and_lifecycle_are_truthful() -> None:
@@ -421,6 +474,33 @@ def test_connection_configuration_rejects_unsafe_endpoints(endpoint: str) -> Non
     asyncio.run(scenario())
 
 
+def test_connection_configuration_allows_explicit_local_loopback_fixture() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="local-fixture-admin")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(
+                    session, environment="test", allow_loopback_http=True
+                ).create(
+                    context=context,
+                    name="Local fixture",
+                    endpoint_url="http://127.0.0.1:8000/mcp",
+                    secret_binding_id=None,
+                    policy_version="v1",
+                )
+                assert connection.pending_version_id is not None
+
+                with pytest.raises(ValueError, match="restricted"):
+                    ConnectionService(
+                        session,
+                        environment="production",
+                        allow_loopback_http=True,
+                    )
+
+    asyncio.run(scenario())
+
+
 def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None:
     async def scenario() -> None:
         async with database() as factory:
@@ -471,6 +551,12 @@ def test_capability_versions_preserve_enabled_history_and_detect_drift() -> None
                     protocol_revision="2025-06-18",
                 )
                 assert duplicate.id == first.id
+                await establish_current_snapshot(
+                    session,
+                    context=context,
+                    connection=connection,
+                    capability_version=first,
+                )
                 capability = await service.enable(
                     context=context,
                     capability_id=first.capability_id,
@@ -906,6 +992,12 @@ def test_capability_disable_enable_uses_monotonic_epoch() -> None:
                     output_schema={},
                     metadata_digest="c" * 64,
                     protocol_revision="2025-06-18",
+                )
+                await establish_current_snapshot(
+                    session,
+                    context=context,
+                    connection=connection,
+                    capability_version=version,
                 )
                 capability = await service.enable(
                     context=context,

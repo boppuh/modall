@@ -48,14 +48,16 @@ class DiscoveryRunner:
             else:
                 with self._secret_provider.retrieve(secret_reference) as credential:
                     result = await adapter.discover(endpoint, bearer_token=credential)
-            async with transaction(self._session_factory) as session:
-                snapshot = await DiscoveryPublicationService(session).publish_success(
-                    context=context,
-                    lease=lease,
-                    result=result,
-                )
-                return snapshot.id
-        except Exception as error:
+        except (AuthorizationDenied, InvalidConnectionTransition):
+            return None
+        except (
+            DiscoveryError,
+            EndpointPolicyError,
+            ResponseLimitExceeded,
+            SecretProviderError,
+            TimeoutError,
+            httpx.HTTPError,
+        ) as error:
             code = classify_discovery_failure(error)
             try:
                 async with transaction(self._session_factory) as session:
@@ -66,6 +68,16 @@ class DiscoveryRunner:
                     )
             except (AuthorizationDenied, InvalidConnectionTransition):
                 return None
+            return None
+        try:
+            async with transaction(self._session_factory) as session:
+                snapshot = await DiscoveryPublicationService(session).publish_success(
+                    context=context,
+                    lease=lease,
+                    result=result,
+                )
+                return snapshot.id
+        except (AuthorizationDenied, InvalidConnectionTransition):
             return None
 
     async def _load_target(
@@ -91,7 +103,7 @@ class DiscoveryRunner:
                 )
             )
             if binding is None:
-                raise AuthorizationDenied("workspace access denied")
+                raise SecretProviderError("secret binding is unavailable")
             return version.endpoint_url, SecretReference(
                 provider=binding.provider,
                 external_reference=binding.external_reference,

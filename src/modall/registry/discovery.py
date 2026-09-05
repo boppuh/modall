@@ -16,6 +16,7 @@ from modall.persistence.models import (
     DiscoveryPayload,
     DiscoveryRefreshJob,
     DiscoverySnapshot,
+    DiscoverySnapshotCapability,
     ServerConnection,
     utc_now,
 )
@@ -305,7 +306,7 @@ class DiscoveryPublicationService:
         capability_service = CapabilityService(self._session)
         for tool in result.tools:
             observed_identities.add(tool.identity)
-            await capability_service.record_version(
+            version = await capability_service.record_version(
                 context=context,
                 connection_id=lease.connection_id,
                 connection_version_id=lease.connection_version_id,
@@ -320,6 +321,14 @@ class DiscoveryPublicationService:
                 metadata_digest=tool.metadata_digest,
                 protocol_revision=result.protocol_revision,
                 schema_supported=tool.schema_supported,
+            )
+            self._session.add(
+                DiscoverySnapshotCapability(
+                    workspace_id=context.workspace_id,
+                    connection_id=lease.connection_id,
+                    snapshot_id=snapshot.id,
+                    capability_version_id=version.id,
+                )
             )
         await self._mark_missing_unavailable(context, lease.connection_id, observed_identities)
 

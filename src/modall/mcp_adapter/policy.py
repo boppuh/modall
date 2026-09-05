@@ -1,13 +1,14 @@
 """Fail-closed endpoint validation and bounded HTTP response streaming."""
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from ipaddress import ip_address
 from socket import AF_UNSPEC, SOCK_STREAM
 from typing import cast
 from urllib.parse import urlsplit
 
+import httpcore
 import httpx
 
 
@@ -43,6 +44,13 @@ class TransportLimits:
             raise ValueError("transport limits must be positive")
 
 
+@dataclass(frozen=True, slots=True)
+class EndpointResolution:
+    host: str
+    port: int
+    addresses: tuple[str, ...]
+
+
 class EndpointPolicy:
     """Validate persisted endpoints before a worker opens a network session."""
 
@@ -57,7 +65,7 @@ class EndpointPolicy:
         self._allow_loopback_http = allow_loopback_http
         self._resolver = resolver
 
-    async def validate(self, endpoint: str) -> None:
+    async def validate(self, endpoint: str) -> EndpointResolution:
         try:
             parsed = urlsplit(endpoint)
             port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -72,7 +80,11 @@ class EndpointPolicy:
             or parsed.scheme not in {"http", "https"}
         ):
             raise EndpointPolicyError("endpoint rejected")
-        addresses = await self._resolver(parsed.hostname, port)
+        try:
+            host = parsed.hostname.encode("idna").decode("ascii").lower()
+        except UnicodeError as exc:
+            raise EndpointPolicyError("endpoint rejected") from exc
+        addresses = await self._resolver(host, port)
         if not addresses:
             raise EndpointPolicyError("endpoint resolution failed")
         parsed_addresses = []
@@ -87,9 +99,77 @@ class EndpointPolicy:
             and all(address.is_loopback for address in parsed_addresses)
         )
         if local_fixture:
-            return
+            return EndpointResolution(host, port, tuple(sorted(addresses)))
         if parsed.scheme != "https" or any(not address.is_global for address in parsed_addresses):
             raise EndpointPolicyError("endpoint rejected")
+        return EndpointResolution(host, port, tuple(sorted(addresses)))
+
+
+class PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Connect only to IP addresses approved by the endpoint policy."""
+
+    def __init__(
+        self,
+        resolution: EndpointResolution,
+        *,
+        inner: httpcore.AsyncNetworkBackend | None = None,
+    ) -> None:
+        self._resolution = resolution
+        self._inner = inner or httpcore.AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        if host.lower().removesuffix(".") != self._resolution.host or port != self._resolution.port:
+            raise EndpointPolicyError("connection target changed after validation")
+        last_error: Exception | None = None
+        for address in self._resolution.addresses:
+            try:
+                return await self._inner.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise EndpointPolicyError("endpoint resolution failed")
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        del path, timeout, socket_options
+        raise EndpointPolicyError("unix sockets are not permitted")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+class PinnedHTTPTransport(httpx.AsyncHTTPTransport):
+    """HTTPX transport whose TCP backend cannot re-resolve the approved host."""
+
+    def __init__(
+        self,
+        resolution: EndpointResolution,
+        *,
+        network_backend: httpcore.AsyncNetworkBackend | None = None,
+    ) -> None:
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=httpcore.default_ssl_context(),
+            retries=0,
+            network_backend=network_backend or PinnedNetworkBackend(resolution),
+        )
 
 
 class LimitedByteStream(httpx.AsyncByteStream):
