@@ -33,6 +33,7 @@ from modall.security.endpoints import normalize_endpoint_host
 from modall.security.metadata import (
     contains_obvious_secret,
     contains_sensitive_hostname,
+    contains_sensitive_url_path,
     validate_capability_scalars,
     validate_schema_payload,
 )
@@ -441,7 +442,11 @@ class ConnectionService:
             canonical_endpoint.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
-        if contains_obvious_secret(canonical_endpoint) or contains_sensitive_hostname(hostname):
+        if (
+            contains_obvious_secret(canonical_endpoint)
+            or contains_sensitive_hostname(hostname)
+            or contains_sensitive_url_path(decoded_path)
+        ):
             raise ValueError("endpoint URL contains credential-shaped content")
         if self._POLICY_VERSION.fullmatch(policy_version) is None:
             raise ValueError("invalid policy version")

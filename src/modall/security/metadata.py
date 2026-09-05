@@ -32,7 +32,7 @@ _SENSITIVE_JSON_FIELD = re.compile(
     re.IGNORECASE,
 )
 _OPAQUE_ANNOTATION_VALUE = re.compile(r"[A-Za-z0-9._~+/=\-]{8,}\Z")
-_SENSITIVE_HOST_LABEL_PREFIX = re.compile(
+_SENSITIVE_MARKER_PREFIX = re.compile(
     r"(?:api[-_]?key|(?:access[-_]?)?token|credential|private[-_]?key|secret|password)"
     r"[-_](?P<value>[A-Za-z0-9_-]{8,})\Z",
     re.IGNORECASE,
@@ -101,11 +101,21 @@ def contains_sensitive_hostname(hostname: str) -> bool:
         for index, label in enumerate(labels[:-1])
     )
     prefixed_value = any(
-        (match := _SENSITIVE_HOST_LABEL_PREFIX.fullmatch(label)) is not None
+        (match := _SENSITIVE_MARKER_PREFIX.fullmatch(label)) is not None
         and _looks_like_opaque_value(match.group("value"))
         for label in labels
     )
     return adjacent_value or prefixed_value
+
+
+def contains_sensitive_url_path(path: str) -> bool:
+    """Detect marker-prefixed opaque values in decoded URL path segments."""
+
+    return any(
+        (match := _SENSITIVE_MARKER_PREFIX.fullmatch(segment)) is not None
+        and _looks_like_opaque_value(match.group("value"))
+        for segment in path.split("/")
+    )
 
 
 def contains_sensitive_json(value: object) -> bool:
