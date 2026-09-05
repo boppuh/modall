@@ -157,7 +157,7 @@ Membership is maintained in Modall for this alpha. Every API request validates t
 - Cross-workspace repository and API tests fail closed.
 - The worker cannot reach loopback, link-local, private-network, cloud-metadata, or other denied destinations in deployed mode.
 - Invocation redirects are never followed.
-- Secrets appear only in the configured secret provider and transient transport memory.
+- Secrets appear only in the configured secret provider and transient transport memory; upstream echoes are rejected by exact bound-credential matching as well as heuristic screening.
 - Arguments, results, remote metadata, and upstream errors are absent from logs, traces, and audit records.
 - Untrusted text/JSON renders as inert content and cannot execute active markup.
 - Obvious credential-shaped arguments are rejected before persistence and send.
@@ -169,6 +169,7 @@ Membership is maintained in Modall for this alpha. Every API request validates t
 - Disabling a connection prevents every queued unfenced call.
 - Concurrent refreshes elect one current snapshot without overwriting history.
 - Backup restoration reproduces registry identity, enabled-state projection, run history, and audit history.
+- Restoring an older execution ledger cannot dispatch until its execution epoch is advanced, restored work is terminalized/reconciled, and no-dispatch quarantine is explicitly cleared.
 
 ### 4.4 Usability
 
@@ -245,10 +246,11 @@ An ADR may change a choice before implementation. Public and domain contracts mu
 | `capabilities`, `capability_versions` | Stable logical tool identity and immutable schema/metadata version |
 | `mcp_tool_bindings` | Exact capability-version to connection-version/tool/protocol binding |
 | `capability_status_events` | Append-only enable/disable/unavailable decisions with a monotonic status epoch |
-| `jobs` | Durable leased work with a monotonically increasing `lease_epoch` on every claim/reclaim |
+| `jobs` | Durable leased work with a monotonically increasing `lease_epoch` on every claim/reclaim and the admitted installation execution epoch |
 | `runs`, `run_attempts`, `run_events` | Public execution identity, exact version/control-epoch lineage, state, timing, and bounded content |
 | `idempotency_records` | Workspace/actor/route-scoped HMAC of caller key, versioned server-HMAC of the canonical request, and original resource reference |
 | `audit_events` | Typed actor/action/resource/outcome/correlation evidence without payload content |
+| `system_execution_state` | Singleton current execution epoch and dispatch-quarantine state used by restore fencing |
 
 ### 6.2 Invariants
 
@@ -265,14 +267,16 @@ An ADR may change a choice before implementation. Public and domain contracts mu
 - A run pins one capability version plus the current connection control epoch and capability status epoch before enqueue and never changes target.
 - Each run has at most one active attempt and one dispatch fence.
 - Every job claim increments `lease_epoch`; only the current unexpired lease owner presenting that exact epoch may create the dispatch fence, so a reclaimed stale worker cannot send.
+- Every execution job pins the current installation execution epoch; workers can claim or contact an upstream only when dispatch quarantine is clear and that epoch still matches.
 - Terminal run states are immutable except for separately appended reconciliation detail.
 - Mutating API idempotency is unique by workspace, actor, method, route, and HMAC-derived key. A separate versioned server-HMAC covers the canonical capability/connection/request body; matching reuse replays the original resource and mismatching reuse returns `idempotency_conflict`, including after argument content expires.
+- Idempotency-key HMAC material lives in the secret provider. Active and historical key versions remain available for lookup for at least the maximum lifetime of every record produced with them; lookup checks the bounded eligible version set, and a key version is retired only after no retained record references it.
 - Audit rows contain typed identifiers/enums, not arguments, results, schemas, secrets, or raw upstream errors.
 - Every audited domain mutation and its audit event commit in the same database transaction; work whose evidence cannot commit has no visible domain effect.
 
 ### 6.3 Retention
 
-- Retained arguments and any retained result/error content for every terminal run state—including succeeded, failed, timed out, cancelled, and indeterminate—expire after 14 days by default.
+- Retained arguments expire no later than 14 days after ingestion, regardless of run state. Before erasure, cleanup atomically terminalizes overdue pre-dispatch work as `timed_out` and overdue dispatch-fenced work as `indeterminate`; retained accepted result content expires no later than 14 days after capture. Raw upstream error content is never retained.
 - Run status, timing, exact version lineage, and safe error code: 90 days.
 - Run-creation idempotency records retain their request HMAC after argument expiry and are retained exactly while the referenced run metadata is retained; they are deleted atomically with that run and never outlive it. Every other mutating route retains its idempotency record for at least 24 hours after the first completed response, unless the referenced resource is deleted sooner, and never beyond that resource's lifetime.
 - Discovery observations, payloads, and capability versions are retained while referenced by the connection's current snapshot projection, a pending-review version, an enabled capability, or a retained run; only unreferenced history is deletion-eligible.
@@ -298,7 +302,7 @@ Deletion is ordinary database/object deletion under managed encryption-at-rest g
 - Store the exact normalized JSON needed for history only after the complete discovery snapshot passes bounds, schema handling, and secret screening; do not log payload bodies.
 - Preserve local JSON Schema references but never fetch an external schema reference.
 - Compile `pattern`, `patternProperties`, and other schema regexes only through the approved linear-time/RE2-compatible subset; unsupported constructs keep the version visible but non-invocable. Run schema compilation and validation under an independent wall-clock deadline and resource limit, with timeout failing closed.
-- Apply obvious-secret screening to remote descriptive fields before any snapshot payload write. A match, timeout, or scanner failure discards raw and normalized payload bytes and persists only safe failure code/timing/connection/generation metadata; no secret-bearing quarantine payload or content digest is retained.
+- Apply obvious-secret screening and exact matching against every credential value retrieved for the session to the complete raw and normalized discovery payload—including descriptions, schemas, defaults, examples, and annotations—before any snapshot payload write. A match, timeout, or scanner failure discards all payload bytes and persists only safe failure code/timing/connection/generation metadata; no secret-bearing quarantine payload or content digest is retained.
 - Apply the same bounds and fail-closed obvious-secret screening to all untrusted Registry response fields, including descriptions and advertised URLs, before search caching or import. A match, timeout, or scanner failure caches/imports no Registry content and retains only safe request correlation, provider, timing, and failure-code metadata without a content digest.
 - Apply that fail-closed screening to the operator's Registry search text before any upstream request or cache lookup/write. A match, timeout, or scanner failure sends nothing upstream, caches no query or response content, and retains no query digest.
 - Render every remote string as text and every schema/result through inert viewers.
@@ -308,8 +312,9 @@ Deletion is ordinary database/object deletion under managed encryption-at-rest g
 - Arguments must validate against the pinned input schema and configured byte/depth limits.
 - Confirmation repeats schema identity and the non-confidential-data restriction.
 - Obvious-secret screening runs before durable argument storage and enqueue. A match, timeout, or scanner failure creates no run, stores no argument payload or content digest, and sends nothing upstream.
-- Text and structured JSON results remain only in bounded worker memory until byte/depth checks and obvious-secret screening finish. When the pinned capability version declares an output schema, structured JSON must also validate against that exact schema before any durable payload write.
+- Text and structured JSON results remain only in bounded worker memory until byte/depth checks, obvious-secret screening, and exact matching against every credential value retrieved for the session finish. When the pinned capability version declares an output schema, structured JSON must also validate against that exact schema before any durable payload write.
 - Only a fully accepted result may be written to `runs`, `run_attempts`, `run_events`, or result storage. Scanner failure, a detected secret, limit failure, or schema mismatch persists only safe quarantine/error metadata and no raw result payload in durable storage or APIs; schema mismatch uses `invalid_upstream_output`.
+- Upstream error bodies remain only in bounded transient memory long enough for typed classification, obvious-secret screening, and exact bound-credential matching; they are then discarded regardless of scan outcome. Durable storage and APIs expose only allowlisted safe error codes, timing, correlation, and transport disposition—never raw or normalized upstream error text/JSON or its digest.
 - Unsupported content blocks, embedded resources, and binary bytes are discarded and reported with `unsupported_result_content`.
 
 The scanner is a guardrail against accidental credentials, not a claim of comprehensive PII or confidential-data classification.
@@ -331,38 +336,40 @@ Fixture coverage includes:
 
 ### 8.2 Discovery
 
-1. Claim one verification/refresh job carrying the connection's allocated monotonic refresh generation, captured control epoch, and exact target version: pending configuration when present, otherwise the verified version for refresh or re-enable verification.
+1. Claim one verification/refresh job, atomically incrementing and recording its `lease_epoch`, carrying the connection's allocated monotonic refresh generation, captured control epoch, and exact target version: pending configuration when present, otherwise the verified version for refresh or re-enable verification.
 2. Load the immutable connection version and secret reference.
 3. Recheck current connection state, unchanged control epoch, exact pending/verified target pointer, and endpoint policy.
 4. Initialize a short-lived MCP session through the constrained worker network.
 5. Read all tool pages within the configured bounds.
 6. Normalize and validate the complete snapshot.
-7. Complete under one of two locked transactions. A successful discovery requires this is still the latest-started generation, its captured control epoch is unchanged, its exact pending/verified target pointer still matches, and lifecycle remains valid (`verifying` for initial, pending, or re-enable verification; `active|degraded` for ordinary verified-version refresh), explicitly rejecting `disabled`. Pending verification atomically promotes that exact version to verified and clears pending; either success appends the observation and any binding-scoped capability versions, marks superseded bindings non-executable, and updates current snapshot and `active` lifecycle projections. A timeout, disconnect, invalid, incomplete, or rejected payload from the latest otherwise-eligible generation with the same control epoch/pointer preserves the prior snapshot but records typed failure health and moves `verifying -> degraded` or `active -> degraded`; `degraded` remains non-invocable until a successful verification/refresh returns it to `active`. Obsolete, disabled, control-epoch-stale, pointer-stale, or superseded-generation jobs update neither snapshot nor health.
+7. Every error from secret-reference loading, secret retrieval, DNS/TLS/authentication, and protocol initialization through pagination/normalization enters the same locked failure-completion path; no pre-payload failure is allowed to strand lifecycle or health.
+8. Complete under one of two locked transactions. Both paths require the job lease is still owned and unexpired and its `lease_epoch` exactly matches this worker, this is still the latest-started generation, its captured control epoch is unchanged, its exact pending/verified target pointer still matches, and lifecycle remains valid (`verifying` for initial, pending, or re-enable verification; `active|degraded` for ordinary verified-version refresh), explicitly rejecting `disabled`. Pending verification success atomically promotes that exact version to verified and clears pending; either success appends the observation and any binding-scoped capability versions, marks superseded bindings non-executable, and updates current snapshot and `active` lifecycle projections. An eligible failure preserves the prior snapshot but records typed failure health and moves `verifying -> degraded` or `active -> degraded`; `degraded` remains non-invocable until a successful verification/refresh returns it to `active`. Lease-owner/epoch-stale, obsolete, disabled, control-epoch-stale, pointer-stale, or superseded-generation jobs update neither snapshot nor health.
 
-An unsuccessful discovery never publishes a snapshot or promotes pending configuration. Only the latest otherwise-eligible failure with an unchanged control epoch and target pointer may update health/degraded lifecycle; obsolete, disabled, epoch-stale, pointer-stale, or superseded-generation work changes nothing. Discovery may retry because it sends no tool invocation.
+An unsuccessful discovery never publishes a snapshot or promotes pending configuration. Only the currently leased, latest otherwise-eligible failure with an unchanged control epoch and target pointer may update health/degraded lifecycle; stale-lease, obsolete, disabled, epoch-stale, pointer-stale, or superseded-generation work changes nothing. Discovery may retry because it sends no tool invocation.
 
 ### 8.3 Invocation and dispatch fence
 
 1. API validates authorization, capability state, input schema, limits, secret scan, confirmation token, and idempotency.
 2. One transaction creates the run and queued job pinned to exact immutable versions and the current connection control/capability status epochs.
-3. Worker claims the job, atomically increments and records its `lease_epoch`, and rechecks current actor membership, connection/capability status, exact pinned control/status epochs, deadline, cancellation, exact current verified connection version, and the binding's presence with identical tool, schema, and complete versioned metadata identity in the current discovery snapshot.
-4. Worker initializes a fresh short-lived MCP session using the pinned connection version.
-5. Immediately before `tools/call`, one transaction repeats every mutable, pinned control/status epoch, and exact-binding/current-snapshot check, requires the job lease is still owned/unexpired and its epoch exactly matches the worker claim, and changes the attempt from `preparing` to `dispatch_fenced` exactly once. A stale lifecycle epoch, binding, or worker fails this transaction and sends nothing.
-6. Worker sends one call. No code path automatically invokes again after the fence.
-7. A definitive response records success or failure. Timeout/disconnect/crash after fencing records `indeterminate` unless transport evidence proves no request bytes were accepted.
-8. Worker closes the session and releases transient credentials and buffers.
+3. Worker claims the job, atomically increments and records its `lease_epoch`, and rechecks the current installation execution epoch/quarantine, actor membership and invoking role, connection/capability status, exact pinned control/status epochs, deadline, cancellation, exact current verified connection version, and the binding's presence with identical tool, schema, and complete versioned metadata identity in the current discovery snapshot.
+4. Immediately before any endpoint contact, a locked pre-session transaction repeats those checks, requires the job lease is still owned/unexpired at the exact claim epoch, and changes the attempt from `preparing` to `session_fenced` exactly once. Disable, cancellation, deadline, authorization revocation, execution-epoch/quarantine change, or lease reclaim that linearizes first makes this transaction fail with zero upstream requests.
+5. Worker initializes a fresh short-lived MCP session using the pinned connection version.
+6. Immediately before `tools/call`, one transaction re-reads and validates the current installation execution epoch/quarantine, actor membership and invoking role, cancellation state, deadline, connection/capability state and pinned control/status epochs, exact binding/current snapshot, session-fenced attempt state, and job lease owner/expiry/exact claim epoch, then changes the attempt to `dispatch_fenced` exactly once. Any failed check closes the session and sends no tool call.
+7. Worker sends one call. No code path automatically invokes again after the dispatch fence.
+8. A definitive response records success or failure. Timeout/disconnect/crash after dispatch fencing records `indeterminate` unless transport evidence proves no request bytes were accepted.
+9. Worker closes the session and releases transient credentials and buffers.
 
 Disabling or re-enabling a connection or capability increments its monotonic epoch under the same row locks. Therefore every pre-change unfenced run remains stale even after an ABA disable/re-enable cycle and cannot send. A control change after the fence does not rewrite history or imply the remote call was stopped.
 
 ### 8.4 Cancellation
 
-- Queued or preparing work cancels without an upstream call.
+- Queued or preparing work cancelled before the session fence produces no upstream request. Session-fenced work cancelled before the dispatch fence closes its session without `tools/call`.
 - After dispatch, cancellation is best effort and never represented as proof of non-execution.
 - If the adapter cannot prove the remote disposition, the terminal state is `indeterminate` with `cancellation_requested=true`.
 
 ## 9. HTTP API
 
-All responses use stable IDs, ISO-8601 timestamps, correlation IDs, and machine-readable error codes. Mutating endpoints require `Idempotency-Key`; only a scoped HMAC and key version are retained. Any response containing arguments or result payload sets `Cache-Control: no-store`; clients purge run-content state on logout or identity/workspace switch.
+All responses use stable IDs, ISO-8601 timestamps, correlation IDs, and machine-readable error codes. Mutating endpoints require `Idempotency-Key`; only a scoped HMAC and key version are retained. Every authenticated workspace-scoped response—including connection, capability, run, and audit metadata—sets `Cache-Control: no-store`. Client query/state keys include identity and workspace defensively, and logout or identity/workspace switch cancels in-flight requests and purges every workspace-scoped query and content record before rendering the new context.
 
 ### 9.1 Registry and connections
 
@@ -373,8 +380,8 @@ All responses use stable IDs, ISO-8601 timestamps, correlation IDs, and machine-
 - `GET /v1/server-connections`
 - `GET /v1/server-connections/{id}`
 - `POST /v1/server-connections/{id}/versions` — Admin-only append of a new immutable endpoint or secret-binding configuration; atomically sets it as pending without changing the last-verified pointer, makes prior bindings non-executable, moves the stable connection back to `verifying`, and blocks invocation until that exact pending version verifies, is promoted, and publishes a current discovery snapshot.
-- `POST /v1/server-connections/{id}/verify`
-- `POST /v1/server-connections/{id}/refresh`
+- `POST /v1/server-connections/{id}/verify` — rejects `disabled`; only the Admin-only enable route may leave that state.
+- `POST /v1/server-connections/{id}/refresh` — rejects `disabled`; only the Admin-only enable route may leave that state.
 - `POST /v1/server-connections/{id}/disable`
 - `POST /v1/server-connections/{id}/enable` — Admin-only recovery action; increments the control epoch, moves the connection to non-invocable `verifying`, and enqueues verification of the pending version when present or the last verified version otherwise, rather than reviving pre-disable work.
 
@@ -449,18 +456,18 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 | E2-T3 | Wrap the pinned SDK and qualify initialization, safe-regex schema handling, bounded validation, and paginated discovery | Recorded protocol and adversarial schema-timing suites pass without SDK leakage into domain types |
 | E2-T4 | Implement bounded normalized payloads, immutable refresh observations, and canonical identity | Every successful refresh appends its generation observation; equivalent payloads deduplicate, while derived versions deduplicate only with an unchanged exact binding, schemas, and versioned metadata |
 | E2-T5 | Implement capabilities, immutable versions, bindings, monotonic control/status epochs, and status events | Drift creates pending versions, enabled history is preserved, and enable/disable ABA changes cannot revive stale work |
-| E2-T6 | Implement explicit/scheduled refresh, monotonic generations, control-epoch fencing, current-snapshot health, and overlapping-job protection | Only the latest-started generation with unchanged control epoch and target pointer publishes; eligible failure preserves snapshot but degrades health, while stale work changes neither |
+| E2-T6 | Implement explicit/scheduled refresh, monotonic generations, lease/control-epoch fencing, current-snapshot health, and overlapping-job protection | Only the currently leased latest-started generation with unchanged epochs and target pointer publishes; eligible failure preserves snapshot but degrades health, while stale work changes neither |
 
 ### E3 — Durable invocation — 4–5 person-weeks
 
 | ID | Task | Acceptance |
 |---|---|---|
-| E3-T1 | Implement PostgreSQL job leasing, monotonically increasing lease epochs, heartbeat, and recovery | Worker-loss tests reclaim only safe jobs and stale epochs cannot fence |
+| E3-T1 | Implement PostgreSQL job leasing, monotonically increasing lease/execution epochs, heartbeat, quarantine, and recovery | Worker-loss and restore tests reclaim only safe jobs; stale lease/execution epochs cannot contact an upstream or fence |
 | E3-T2 | Implement runs, attempts, events, state machine, and exact lineage | Projection replay reproduces every status |
 | E3-T3 | Implement schema validation, limits, fail-closed secret guardrail, and caller/request/version-bound one-time confirmation token | Invalid/sensitive/scanner-failed/stale/transferred/replayed requests retain no arguments and cannot enqueue; fresh replay nonces are consumed against the original run |
-| E3-T4 | Implement scoped key HMAC, versioned canonical-request HMAC, route-specific retention, conflict detection, and concurrent creation handling | Same key/request creates one run; changed capability/arguments conflict after content expiry; non-run records survive at least 24 hours; raw key never persists |
-| E3-T5 | Implement exact-current-binding, control/status-epoch, and lease-epoch-validated fresh-session dispatch fence, send-once policy, deadline, and cancellation | Crash/reclaim/control/configuration/schema/cancel and disable/re-enable ABA races never send through stale lineage or duplicate a call |
-| E3-T6 | Implement pre-storage bounded result/error normalization and retention cleanup | Only clean, output-schema-valid text/JSON reaches durable storage; unsupported/sensitive/invalid payload is absent, and every terminal state's retained content expires |
+| E3-T4 | Implement scoped versioned key HMAC, historical-key lookup, canonical-request HMAC, route-specific retention, conflict detection, and concurrent creation handling | Same key/request creates one run across HMAC rotation; changed requests conflict after content expiry; non-run records survive at least 24 hours; raw key never persists |
+| E3-T5 | Implement pre-session and dispatch fences validated by execution/lease/control/status epochs, exact binding, current authorization, cancellation, and deadline | Crash/reclaim/revoke/control/configuration/schema/cancel/deadline and disable/re-enable ABA races make zero pre-session requests or tool calls after the applicable fence loses and never duplicate a call |
+| E3-T6 | Implement pre-storage bounded result normalization, safe-code-only upstream errors, and absolute content retention cleanup | Only clean, schema-valid result text/JSON reaches storage; raw errors and unsupported/sensitive/invalid payload are absent; nonterminal content cannot outlive its deadline |
 
 ### E4 — Control-plane API — 2–3 person-weeks
 
@@ -469,7 +476,7 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 | E4-T1 | Establish errors, pagination, optimistic concurrency, workspace-scoped audit reads, and OpenAPI conventions | Contract tests cover stable codes, audit role/filter/content boundaries, and unknown future events |
 | E4-T2 | Implement screened Registry search/import and connection endpoints, including append-only pending configuration and Admin-only re-enable | Role, outage, unsafe query/endpoint/metadata, version promotion, reverification, and idempotency paths pass without unsafe send/cache/import/configuration writes |
 | E4-T3 | Implement capability/version/status endpoints | Immutable/history/authorization paths pass |
-| E4-T4 | Implement bound one-time preflight/run/event/cancel endpoints, `no-store` content responses, and generated client | Token transfer/replay, identity-switch cache isolation, API E2E, and generated-client CI pass |
+| E4-T4 | Implement bound one-time preflight/run/event/cancel endpoints, `no-store` workspace responses, and generated client | Token transfer/replay, all-metadata identity/workspace cache isolation, API E2E, and generated-client CI pass |
 
 ### E5 — Operator UI — 4–5 person-weeks
 
@@ -489,7 +496,7 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 | E6-T1 | Add logs, traces, metrics, dashboards, and alerts | One correlation spans API, job, MCP, and terminal run without payload leakage |
 | E6-T2 | Add limits, rate/concurrency controls, retention jobs, and operational health | Abuse and cleanup fixtures pass |
 | E6-T3 | Exercise threat model and independent security review | Current-scope blockers close or explicitly block release |
-| E6-T4 | Exercise deployment, backup/restore, rollback, disable, rotation, and outage runbooks | A second engineer completes each runbook |
+| E6-T4 | Exercise deployment, execution-quarantined backup/restore, rollback, disable, rotation, and outage runbooks | A second engineer completes each runbook; an older restored ledger cannot dispatch before reconciliation |
 | E6-T5 | Run load, failure, accessibility, and clean-install qualification | Stored evidence satisfies every release gate |
 
 Total: **36 tasks, 22–28 person-weeks**.
@@ -555,32 +562,37 @@ Critical path:
 ### Integration
 
 - migration from empty and previous PR schema;
-- job leasing, worker death, and dispatch-fence recovery;
+- job leasing, worker death, and two-stage session/dispatch-fence recovery;
 - stale-worker fencing where an old worker pauses, a new worker reclaims and increments the epoch, and the old epoch cannot fence or send;
+- discovery reclaim where a stale lease owner cannot publish success or failure health for the same refresh generation;
+- disable, cancellation, deadline expiry, lease reclaim, or authorization revocation before the session fence produces zero upstream requests; the same races during session setup produce no `tools/call` at the dispatch fence;
 - disable/refresh/invocation races, including disable/re-enable ABA where every pre-disable unfenced run remains unable to send;
 - configuration-version append/reverification and disable-during-discovery races;
 - pending configuration remains distinct from the last verified version until its successful discovery transaction promotes it, and invocation remains blocked throughout;
+- verify and refresh reject a disabled connection for every role, so only Admin re-enable can leave the incident state;
 - overlapping refresh generation and disable/re-enable control-epoch races where an older completion cannot replace the latest snapshot or health;
 - unchanged refreshes append distinct generation observations while reusing the canonical payload and unchanged capability versions;
 - metadata-only drift creates a pending capability version and prevents the stale metadata binding from fencing;
-- latest eligible discovery timeout/invalid/secret result preserves the snapshot but records degraded health; obsolete or disabled failures cannot mutate health;
+- every latest eligible discovery error from secret retrieval and DNS/TLS/authentication through initialization, pagination, timeout, invalid/secret result preserves the snapshot but records degraded health; obsolete, disabled, or stale-lease failures cannot mutate health;
 - endpoint validation rejects every query string and credential-shaped path before configuration persistence, with scanner timeout/failure also retaining no URL or digest;
 - Registry metadata match/timeout/scanner-failure paths write neither search-cache nor imported content;
 - Registry query match/timeout/scanner-failure paths send nothing upstream and write no query/cache content or digest;
+- exact bound-credential echo and heuristic-secret detection in discovery/results persist no payload, while upstream error bodies are never stored or returned;
 - secret retrieval and telemetry redaction;
 - failure injection at audited mutation boundaries proves domain state and its audit event commit or roll back together;
 - concurrent idempotency and refresh;
+- idempotency HMAC rotation still finds records made by retained historical key versions and cannot repeat a mutation;
 - same-key changed-request conflict after retained arguments expire, followed by atomic idempotency cleanup when its run metadata expires;
 - non-run mutation retries replay for at least 24 hours, and cleanup cannot remove their idempotency records early;
 - two valid preflight nonces submitted against one matching idempotency key both become associated with the original run, and neither can create a second run under another key;
-- pre-storage result rejection, output-schema mismatch suppression, all-terminal-state retention cleanup, and backup restoration.
+- pre-storage result rejection, output-schema mismatch suppression, absolute 14-day argument expiry that terminalizes overdue nonterminal work, all-terminal-state cleanup, and backup restoration.
 
 ### End to end
 
 - all scenarios in Section 3.2;
 - Admin/Operator can page/filter workspace audit history while Viewer and cross-workspace callers cannot read it;
 - confirmation-token alteration, transfer, expiry, and replay create no run, while matching idempotent replay consumes a fresh valid nonce and returns only the original run;
-- content-bearing run responses are `no-store`, and logout or identity/workspace switching exposes no prior cached arguments or results;
+- every authenticated workspace response is `no-store`, and logout or identity/workspace switching exposes no prior cached connection, capability, audit, argument, or result data;
 - Viewer cannot mutate and Operator cannot change secret bindings;
 - Operator can incident-disable but cannot re-enable a connection; Admin re-enable starts fresh verification and cannot revive pre-disable work;
 - hostile endpoint cannot access a denied destination;
@@ -666,6 +678,12 @@ With three focused engineers, plan **8–10 elapsed weeks** including integratio
 4. Snapshot database and audit state.
 5. Roll back only to a binary compatible with the current schema; otherwise use the documented maintenance migration.
 6. Re-enable traffic after smoke, history, and reference-journey checks.
+
+### Restore execution fence
+
+Application workers start in no-dispatch quarantine during every database restore. Before any worker may claim work or contact an MCP endpoint, a restore finalizer transaction increments the singleton installation execution epoch outside the restored job lineage, invalidates all restored leases, cancels restored queued/preparing/session-fenced work, and marks restored dispatch-fenced or otherwise in-flight attempts `indeterminate`. Operators reconcile those attempts and verify audit/run projections before explicitly clearing quarantine. New jobs pin the advanced epoch; no restored job with the prior epoch is made dispatchable.
+
+The restore qualification test snapshots a ledger before a dispatch fence, allows the original environment to execute the non-idempotent `tools/call`, restores the older snapshot into quarantine, and proves that no worker can claim/contact upstream, that reconciliation terminalizes the restored work without retry, and that clearing quarantine cannot issue a duplicate call.
 
 Mixed-version zero-downtime rollback is not promised in this alpha.
 
