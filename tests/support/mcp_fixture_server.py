@@ -10,11 +10,23 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 
 PROTOCOL_REVISION = "2025-06-18"
 FIXTURE_TOKEN = "fixture-token-not-a-real-secret"
+ESCAPED_FIXTURE_TOKEN = 'opaque"slash\\token123'
+NUMERIC_FIXTURE_TOKEN = "12345678"
+COMMON_KEY_FIXTURE_TOKEN = "type"
+KEY_LEAK_FIXTURE_TOKEN = "r4Nd0mBearerValue98765"
 AUTHENTICATED_PROFILES = {
     "authenticated",
     "authenticated-redirect",
     "authenticated-redirect-after-init",
     "authenticated-redirect-on-call",
+    "credential-leak",
+    "credential-escaped-leak",
+    "credential-numeric-leak",
+    "credential-common-key",
+    "credential-key-leak",
+    "credential-session-id-leak",
+    "credential-raw-extension",
+    "credential-raw-unicode-extension",
 }
 SUPPORTED_PROFILES = {
     "default",
@@ -22,6 +34,7 @@ SUPPORTED_PROFILES = {
     "metadata-drift",
     "protocol-mismatch",
     "malformed",
+    "malformed-secret",
     "oversized",
     "timeout",
     "disconnect",
@@ -30,14 +43,48 @@ SUPPORTED_PROFILES = {
     "redirect",
     "redirect-after-init",
     "redirect-on-call",
+    "unsafe-schema",
+    "remote-schema-ref",
+    "dynamic-schema-ref",
+    "storage-oversized-schema",
+    "oversized-scalar",
+    "structured-secret",
+    "nested-structured-secret",
+    "composite-structured-secret",
+    "numeric-sensitive-metadata",
+    "credential-metadata",
+    "generic-token-metadata",
+    "camel-secret-metadata",
+    "private-key-metadata",
+    "raw-obvious-extension",
+    "raw-whitespace-extension",
+    "raw-control-extension",
+    "keyword-property-names",
+    "credential-property-schema",
+    "schema-annotation-secret",
+    "malformed-sensitive-property",
+    "sensitive-property-ref",
+    "sensitive-property-recursive-ref",
+    "sensitive-property-annotation",
+    "unresolved-local-ref",
+    "unresolved-local-anchor",
+    "non-schema-local-ref",
+    "oversized-metadata",
+    "repeated-cursor",
     *AUTHENTICATED_PROFILES,
 }
 
 
 def _tools(profile: str) -> list[dict[str, Any]]:
-    description = (
-        "Echo bounded text safely" if profile == "metadata-drift-v2" else "Echo bounded text"
-    )
+    if profile == "metadata-drift-v2":
+        description = "Echo bounded text safely"
+    elif profile in {"credential-leak", "credential-escaped-leak"}:
+        token = ESCAPED_FIXTURE_TOKEN if profile == "credential-escaped-leak" else FIXTURE_TOKEN
+        description = f"Leaked credential {token}"
+    else:
+        description = "Echo bounded text"
+    if profile == "oversized-scalar":
+        description = "x" * 2049
     schema: dict[str, Any] = {
         "type": "object",
         "properties": {"message": {"type": "string", "maxLength": 256}},
@@ -46,18 +93,104 @@ def _tools(profile: str) -> list[dict[str, Any]]:
     }
     if profile == "schema-drift-v2":
         schema["properties"]["uppercase"] = {"type": "boolean", "default": False}
-    return [
-        {
-            "name": "echo",
-            "title": "Echo",
-            "description": description,
-            "inputSchema": schema,
-            "outputSchema": {
-                "type": "object",
-                "properties": {"message": {"type": "string"}},
-                "required": ["message"],
+    if profile == "unsafe-schema":
+        schema["properties"]["message"] = {"type": "string", "pattern": "(?=a)a"}
+    if profile == "remote-schema-ref":
+        schema["$id"] = "https://attacker.example/schema"
+        schema["properties"]["message"] = {"$ref": "child.json"}
+    if profile == "dynamic-schema-ref":
+        schema["properties"]["message"] = {"$dynamicRef": "https://attacker.example/schema"}
+    if profile == "storage-oversized-schema":
+        schema["properties"] = {
+            f"field{index}": {"type": "string", "description": "x" * 160} for index in range(900)
+        }
+    if profile == "keyword-property-names":
+        schema["properties"] = {
+            "pattern": {"type": "string"},
+            "$id": {"type": "string"},
+            "$ref": {"type": "string"},
+        }
+    if profile == "credential-property-schema":
+        schema = {
+            "type": "object",
+            "properties": {
+                "password": {
+                    "type": "string",
+                    "title": "Password",
+                    "description": "User password",
+                }
             },
+        }
+    if profile == "schema-annotation-secret":
+        schema["_meta"] = {"properties": {"api_key": "abcdefgh12345678"}}
+    if profile == "malformed-sensitive-property":
+        schema = {"properties": {"api_key": "abcdefgh12345678"}}
+    if profile == "sensitive-property-ref":
+        schema = {
+            "type": "object",
+            "properties": {"password": {"$ref": "#/$defs/pass"}},
+            "$defs": {"pass": {"type": "string", "default": "abcdefgh12345678"}},
+        }
+    if profile == "sensitive-property-recursive-ref":
+        schema = {
+            "type": "object",
+            "properties": {"password": {"$recursiveRef": "#/$defs/pass"}},
+            "$defs": {"pass": {"type": "string", "default": "abcdefgh12345678"}},
+        }
+    if profile == "sensitive-property-annotation":
+        schema = {
+            "type": "object",
+            "properties": {"password": {"type": "string", "description": "abcdefgh12345678"}},
+        }
+    if profile == "unresolved-local-ref":
+        schema = {"$ref": "#/$defs/missing"}
+    if profile == "unresolved-local-anchor":
+        schema = {"$dynamicRef": "#missing"}
+    if profile == "non-schema-local-ref":
+        schema = {"description": "text", "$ref": "#/description"}
+    first_tool: dict[str, Any] = {
+        "name": "echo",
+        "title": "Echo",
+        "description": description,
+        "inputSchema": schema,
+        "outputSchema": {
+            "type": "object",
+            "properties": {"message": {"type": "string"}},
+            "required": ["message"],
         },
+    }
+    if profile == "structured-secret":
+        first_tool["_meta"] = {"api_key": "abcdefgh1234"}
+    if profile == "nested-structured-secret":
+        first_tool["_meta"] = {"api_key": {"value": "abcdefgh1234"}}
+    if profile == "composite-structured-secret":
+        first_tool["_meta"] = {"client_secret": "abcdefgh1234"}
+    if profile == "numeric-sensitive-metadata":
+        first_tool["_meta"] = {"api_key": 12345678}
+    if profile == "credential-metadata":
+        first_tool["_meta"] = {"credential": "abcdefgh1234"}
+    if profile == "generic-token-metadata":
+        first_tool["_meta"] = {"token": "abcdefgh12345678"}
+    if profile == "camel-secret-metadata":
+        first_tool["_meta"] = {"clientSecret": "abcdefgh12345678"}
+    if profile == "private-key-metadata":
+        first_tool["_meta"] = {"privateKey": "abcdefgh12345678"}
+    if profile == "raw-obvious-extension":
+        first_tool["unrecognizedExtension"] = "sk_live_abcdefghijkl"
+    if profile == "raw-whitespace-extension":
+        first_tool["unrecognizedExtension"] = "token:\tabcdefgh12345678"
+    if profile == "raw-control-extension":
+        first_tool["unrecognizedExtension"] = "token:\0abcdefgh12345678"
+    if profile == "credential-numeric-leak":
+        first_tool["_meta"] = {"value": 12345678}
+    if profile in {"credential-raw-extension", "credential-raw-unicode-extension"}:
+        first_tool["unrecognizedExtension"] = FIXTURE_TOKEN
+    if profile == "credential-key-leak":
+        first_tool["_meta"] = {KEY_LEAK_FIXTURE_TOKEN: True}
+    if profile == "oversized-metadata":
+        first_tool["_meta"] = {"annotation": "x" * 8193}
+    return [
+        first_tool,
         {
             "name": "status",
             "title": "Status",
@@ -114,7 +247,17 @@ def create_mcp_fixture_app() -> FastAPI:
     ) -> Response:
         if profile not in SUPPORTED_PROFILES:
             return JSONResponse({"error": "unknown fixture profile"}, status_code=404)
-        if profile in AUTHENTICATED_PROFILES and authorization != f"Bearer {FIXTURE_TOKEN}":
+        if profile == "credential-escaped-leak":
+            expected_token = ESCAPED_FIXTURE_TOKEN
+        elif profile == "credential-numeric-leak":
+            expected_token = NUMERIC_FIXTURE_TOKEN
+        elif profile == "credential-common-key":
+            expected_token = COMMON_KEY_FIXTURE_TOKEN
+        elif profile == "credential-key-leak":
+            expected_token = KEY_LEAK_FIXTURE_TOKEN
+        else:
+            expected_token = FIXTURE_TOKEN
+        if profile in AUTHENTICATED_PROFILES and authorization != f"Bearer {expected_token}":
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         if profile not in AUTHENTICATED_PROFILES and authorization is not None:
             return JSONResponse({"error": "unexpected authorization"}, status_code=400)
@@ -143,7 +286,11 @@ def create_mcp_fixture_app() -> FastAPI:
             if requested_revision != PROTOCOL_REVISION:
                 return JSONResponse({"error": "unsupported requested protocol"}, status_code=400)
             revision = "2025-11-25" if profile == "protocol-mismatch" else PROTOCOL_REVISION
-            session_id = f"{profile}-session-{next(next_session)}"
+            session_id = (
+                FIXTURE_TOKEN
+                if profile == "credential-session-id-leak"
+                else f"{profile}-session-{next(next_session)}"
+            )
             tool_profile = profile
             if profile in {"schema-drift", "metadata-drift"}:
                 generation = drift_generations.get(profile, 0) + 1
@@ -180,8 +327,13 @@ def create_mcp_fixture_app() -> FastAPI:
             return RedirectResponse("https://redirect.invalid/mcp", status_code=307)
         if profile == "timeout":
             await asyncio.sleep(0.05)
-        if profile == "malformed":
-            return Response(b'{"jsonrpc":', media_type="application/json")
+        if profile in {"malformed", "malformed-secret"}:
+            body = (
+                b'{"jsonrpc":"2.0","secret":"sk_live_abcdefghijkl"'
+                if profile == "malformed-secret"
+                else b'{"jsonrpc":'
+            )
+            return Response(body, media_type="application/json")
         if profile == "oversized":
             body = json.dumps(
                 {
@@ -209,6 +361,8 @@ def create_mcp_fixture_app() -> FastAPI:
             result: dict[str, Any]
             if cursor is None:
                 result = {"tools": tools[:2], "nextCursor": f"{mcp_session_id}:page-2"}
+            elif profile == "repeated-cursor":
+                result = {"tools": tools[2:], "nextCursor": f"{mcp_session_id}:page-2"}
             elif cursor == f"{mcp_session_id}:page-2":
                 result = {"tools": tools[2:]}
             else:
@@ -219,7 +373,14 @@ def create_mcp_fixture_app() -> FastAPI:
                         "error": {"code": -32602, "message": "invalid cursor"},
                     }
                 )
-            return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": result})
+            response_payload = {"jsonrpc": "2.0", "id": request_id, "result": result}
+            if profile == "credential-raw-unicode-extension":
+                unicode_body = json.dumps(response_payload, separators=(",", ":")).replace(
+                    FIXTURE_TOKEN,
+                    rf"\u{ord(FIXTURE_TOKEN[0]):04x}{FIXTURE_TOKEN[1:]}",
+                )
+                return Response(unicode_body, media_type="application/json")
+            return JSONResponse(response_payload)
         if method == "tools/call":
             params = payload.get("params", {})
             name = params.get("name")

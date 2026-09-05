@@ -1,9 +1,6 @@
 """Workspace-scoped connection versioning and lifecycle operations."""
 
-import json
 import re
-from ipaddress import ip_address
-from socket import inet_aton
 from typing import cast
 from urllib.parse import unquote, urlsplit
 from uuid import UUID, uuid4
@@ -19,12 +16,27 @@ from modall.persistence.models import (
     Capability,
     CapabilityStatusEvent,
     CapabilityVersion,
+    DiscoveryRefreshJob,
+    DiscoverySnapshotCapability,
     McpToolBinding,
     SecretBinding,
     ServerConnection,
     ServerConnectionVersion,
 )
-from modall.registry.types import CapabilityStatus, ConnectionLifecycle, Transport
+from modall.registry.types import (
+    CapabilityStatus,
+    ConnectionLifecycle,
+    RefreshJobStatus,
+    Transport,
+)
+from modall.security.endpoints import normalize_endpoint_host
+from modall.security.metadata import (
+    contains_obvious_secret,
+    contains_sensitive_hostname,
+    contains_sensitive_url_path,
+    validate_capability_scalars,
+    validate_schema_payload,
+)
 
 QUALIFIED_PROTOCOL_REVISION = "2025-06-18"
 
@@ -39,10 +51,19 @@ class InvalidCapabilityTransition(Exception):
 
 class ConnectionService:
     _POLICY_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-    _DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        environment: str = "production",
+        allow_loopback_http: bool = False,
+    ) -> None:
+        if allow_loopback_http and environment not in {"local", "test"}:
+            raise ValueError("loopback HTTP is restricted to local and test environments")
         self._session = session
+        self._environment = environment
+        self._allow_loopback_http = allow_loopback_http
 
     async def create(
         self,
@@ -56,7 +77,9 @@ class ConnectionService:
     ) -> ServerConnection:
         await require_current_role(self._session, context, Role.ADMIN, serialize_workspace=True)
         normalized_name = self._validate_name(name)
-        self._validate_configuration(endpoint_url, policy_version)
+        self._validate_configuration(
+            endpoint_url, policy_version, has_secret=secret_binding_id is not None
+        )
         await self._require_scoped_secret(context, secret_binding_id)
 
         connection_id = uuid4()
@@ -102,7 +125,9 @@ class ConnectionService:
         correlation_id: UUID | None = None,
     ) -> ServerConnectionVersion:
         await require_current_role(self._session, context, Role.ADMIN, serialize_workspace=True)
-        self._validate_configuration(endpoint_url, policy_version)
+        self._validate_configuration(
+            endpoint_url, policy_version, has_secret=secret_binding_id is not None
+        )
         await self._require_scoped_secret(context, secret_binding_id)
         connection = await self._locked_connection(context, connection_id)
         if connection.typed_lifecycle == ConnectionLifecycle.DISABLED:
@@ -129,6 +154,7 @@ class ConnectionService:
         connection.control_epoch += 1
         connection.allocated_control_epoch = None
         connection.allocated_target_version_id = None
+        await self._obsolete_refresh_jobs(context, connection.id)
         self._audit(context, AuditAction.CONNECTION_VERSION_APPENDED, connection.id, correlation_id)
         await self._session.flush()
         return version
@@ -191,9 +217,29 @@ class ConnectionService:
         connection.control_epoch += 1
         connection.allocated_control_epoch = None
         connection.allocated_target_version_id = None
+        await self._obsolete_refresh_jobs(context, connection.id)
         self._audit(context, AuditAction.CONNECTION_DISABLED, connection.id, correlation_id)
         await self._session.flush()
         return connection
+
+    async def _obsolete_refresh_jobs(self, context: WorkspaceContext, connection_id: UUID) -> None:
+        outstanding_jobs = (
+            await self._session.scalars(
+                select(DiscoveryRefreshJob)
+                .where(
+                    DiscoveryRefreshJob.workspace_id == context.workspace_id,
+                    DiscoveryRefreshJob.connection_id == connection_id,
+                    DiscoveryRefreshJob.status.in_(
+                        (RefreshJobStatus.QUEUED.value, RefreshJobStatus.LEASED.value)
+                    ),
+                )
+                .with_for_update()
+            )
+        ).all()
+        for job in outstanding_jobs:
+            job.status = RefreshJobStatus.OBSOLETE.value
+            job.lease_owner = None
+            job.lease_expires_at = None
 
     async def enable(
         self,
@@ -230,6 +276,11 @@ class ConnectionService:
         target = connection.pending_version_id or connection.verified_version_id
         if target is None:
             raise InvalidConnectionTransition("connection transition rejected")
+        if (
+            connection.pending_version_id is not None
+            and connection.typed_lifecycle == ConnectionLifecycle.DEGRADED
+        ):
+            connection.lifecycle = ConnectionLifecycle.VERIFYING.value
         connection.refresh_generation += 1
         connection.allocated_control_epoch = connection.control_epoch
         connection.allocated_target_version_id = target
@@ -257,7 +308,11 @@ class ConnectionService:
         connection = await self._locked_connection(context, connection_id)
         if (
             connection.typed_lifecycle
-            not in {ConnectionLifecycle.ACTIVE, ConnectionLifecycle.DEGRADED}
+            not in {
+                ConnectionLifecycle.VERIFYING,
+                ConnectionLifecycle.ACTIVE,
+                ConnectionLifecycle.DEGRADED,
+            }
             or connection.pending_version_id is not None
             or connection.verified_version_id != expected_version_id
             or connection.control_epoch != expected_control_epoch
@@ -321,70 +376,79 @@ class ConnectionService:
             raise ValueError("connection name is not valid UTF-8") from exc
         return normalized
 
-    @classmethod
-    def _validate_configuration(cls, endpoint_url: str, policy_version: str) -> None:
-        if not endpoint_url or len(endpoint_url) > 2048 or "\x00" in endpoint_url:
+    def _validate_configuration(
+        self, endpoint_url: str, policy_version: str, *, has_secret: bool
+    ) -> None:
+        if (
+            not endpoint_url
+            or len(endpoint_url) > 2048
+            or any(ord(character) <= 32 or ord(character) == 127 for character in endpoint_url)
+        ):
             raise ValueError("invalid endpoint URL")
         try:
             parsed = urlsplit(endpoint_url)
             port = parsed.port
         except ValueError as exc:
             raise ValueError("invalid endpoint URL") from exc
-        unicode_hostname = parsed.hostname.lower() if parsed.hostname else ""
-        if unicode_hostname.endswith(".."):
-            raise ValueError("invalid endpoint URL")
-        unicode_hostname = unicode_hostname.removesuffix(".")
-        if "%" in unicode_hostname:
-            raise ValueError("invalid endpoint URL")
         try:
-            encoded_hostname = unicode_hostname.encode("idna").decode("ascii")
-        except UnicodeError as exc:
+            normalized_host = normalize_endpoint_host(parsed.hostname)
+        except ValueError as exc:
             raise ValueError("invalid endpoint URL") from exc
-        if encoded_hostname.endswith(".."):
-            raise ValueError("invalid endpoint URL")
-        hostname = encoded_hostname.removesuffix(".")
-        if len(hostname) > 253 or any(
-            cls._DNS_LABEL.fullmatch(label) is None for label in hostname.split(".")
-        ):
-            raise ValueError("invalid endpoint URL")
-        try:
-            ip_address(hostname)
-        except ValueError:
-            try:
-                inet_aton(hostname)
-            except OSError:
-                is_ip_literal = False
-            else:
-                is_ip_literal = True
-        else:
-            is_ip_literal = True
+        hostname = normalized_host.value
+        parsed_ip = normalized_host.parsed_ip
+        is_ip_literal = normalized_host.is_ip_literal
+        local_fixture = (
+            self._environment in {"local", "test"}
+            and self._allow_loopback_http
+            and parsed.scheme == "http"
+            and (
+                hostname == "localhost"
+                or hostname.endswith(".localhost")
+                or (parsed_ip is not None and parsed_ip.is_loopback)
+            )
+        )
         if (
-            parsed.scheme != "https"
+            (parsed.scheme != "https" and not local_fixture)
+            or port == 0
             or not hostname
-            or hostname == "localhost"
-            or hostname.endswith(".localhost")
-            or is_ip_literal
+            or (
+                not local_fixture
+                and (hostname == "localhost" or hostname.endswith(".localhost") or is_ip_literal)
+            )
             or parsed.username is not None
             or parsed.password is not None
             or parsed.query
             or parsed.fragment
-            or port not in {None, 443}
+            or (not local_fixture and port not in {None, 443})
         ):
             raise ValueError("invalid endpoint URL")
+        if local_fixture and has_secret:
+            raise ValueError("credentials require an HTTPS endpoint")
         if re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path):
             raise ValueError("invalid endpoint URL")
         try:
             decoded_path = unquote(parsed.path, errors="strict")
         except UnicodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
-        canonical_endpoint = f"https://{hostname}{':443' if port == 443 else ''}{decoded_path}"
+        if re.search(r"%[0-9A-Fa-f]{2}", decoded_path) or any(
+            character.isspace() or ord(character) < 32 or 127 <= ord(character) <= 159
+            for character in decoded_path
+        ):
+            raise ValueError("invalid endpoint URL")
+        canonical_endpoint = (
+            f"{parsed.scheme}://{hostname}{f':{port}' if port is not None else ''}{decoded_path}"
+        )
         try:
             canonical_endpoint.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise ValueError("invalid endpoint URL") from exc
-        if _contains_obvious_secret(canonical_endpoint):
+        if (
+            contains_obvious_secret(canonical_endpoint)
+            or contains_sensitive_hostname(hostname)
+            or contains_sensitive_url_path(decoded_path)
+        ):
             raise ValueError("endpoint URL contains credential-shaped content")
-        if cls._POLICY_VERSION.fullmatch(policy_version) is None:
+        if self._POLICY_VERSION.fullmatch(policy_version) is None:
             raise ValueError("invalid policy version")
 
     def _audit(
@@ -431,6 +495,7 @@ class CapabilityService:
         output_schema: dict[str, object] | None,
         metadata_digest: str,
         protocol_revision: str,
+        schema_supported: bool = True,
         correlation_id: UUID | None = None,
     ) -> CapabilityVersion:
         await require_current_role(
@@ -493,8 +558,40 @@ class CapabilityService:
                 output_schema=output_schema,
                 metadata_digest=metadata_digest,
                 protocol_revision=protocol_revision,
+                schema_supported=schema_supported,
             )
             if existing is not None:
+                if existing.id == capability.enabled_version_id and (
+                    capability.pending_version_id is not None
+                ):
+                    capability.pending_version_id = None
+                    if capability.typed_status != CapabilityStatus.DISABLED:
+                        capability.status = CapabilityStatus.ENABLED.value
+                    capability.status_epoch += 1
+                    self._append_status_event(context, capability, existing.id)
+                elif (
+                    existing.id == capability.enabled_version_id
+                    and capability.typed_status == CapabilityStatus.UNAVAILABLE
+                ):
+                    capability.status = CapabilityStatus.ENABLED.value
+                    capability.status_epoch += 1
+                    self._append_status_event(context, capability, existing.id)
+                elif (
+                    capability.typed_status == CapabilityStatus.UNAVAILABLE
+                    and capability.pending_version_id == existing.id
+                ):
+                    capability.status = CapabilityStatus.PENDING_REVIEW.value
+                    capability.status_epoch += 1
+                    self._append_status_event(context, capability, existing.id)
+                elif (
+                    existing.id != capability.enabled_version_id
+                    and existing.id != capability.pending_version_id
+                ):
+                    capability.pending_version_id = existing.id
+                    if capability.typed_status != CapabilityStatus.DISABLED:
+                        capability.status = CapabilityStatus.PENDING_REVIEW.value
+                    capability.status_epoch += 1
+                    self._append_status_event(context, capability, existing.id)
                 return existing
             sequence = (
                 await self._session.scalar(
@@ -530,6 +627,7 @@ class CapabilityService:
             input_schema=input_schema,
             output_schema=output_schema,
             metadata_digest=metadata_digest,
+            schema_supported=schema_supported,
         )
         binding = McpToolBinding(
             capability_version_id=version_id,
@@ -542,7 +640,8 @@ class CapabilityService:
         )
         self._session.add_all((version, binding))
         capability.pending_version_id = version_id
-        capability.status = CapabilityStatus.PENDING_REVIEW.value
+        if capability.typed_status != CapabilityStatus.DISABLED:
+            capability.status = CapabilityStatus.PENDING_REVIEW.value
         capability.status_epoch += 1
         await self._session.flush()
         self._append_status_event(context, capability, version_id)
@@ -584,6 +683,13 @@ class CapabilityService:
                 McpToolBinding.workspace_id == context.workspace_id,
             )
         )
+        version = await self._session.scalar(
+            select(CapabilityVersion).where(
+                CapabilityVersion.id == expected_version_id,
+                CapabilityVersion.capability_id == capability.id,
+                CapabilityVersion.workspace_id == context.workspace_id,
+            )
+        )
         connection = await self._session.scalar(
             select(ServerConnection)
             .where(
@@ -593,13 +699,32 @@ class CapabilityService:
             .with_for_update()
             .execution_options(populate_existing=True)
         )
+        observed = None
+        if (
+            connection is not None
+            and connection.current_snapshot_id is not None
+            and binding is not None
+        ):
+            observed = await self._session.scalar(
+                select(DiscoverySnapshotCapability.id).where(
+                    DiscoverySnapshotCapability.workspace_id == context.workspace_id,
+                    DiscoverySnapshotCapability.connection_id == capability.connection_id,
+                    DiscoverySnapshotCapability.connection_version_id
+                    == binding.connection_version_id,
+                    DiscoverySnapshotCapability.snapshot_id == connection.current_snapshot_id,
+                    DiscoverySnapshotCapability.capability_version_id == expected_version_id,
+                )
+            )
         if (
             binding is None
+            or version is None
+            or not version.schema_supported
             or connection is None
+            or observed is None
             or binding.protocol_revision != QUALIFIED_PROTOCOL_REVISION
-            or connection.typed_lifecycle == ConnectionLifecycle.DISABLED
-            or (connection.pending_version_id or connection.verified_version_id)
-            != binding.connection_version_id
+            or connection.typed_lifecycle != ConnectionLifecycle.ACTIVE
+            or connection.pending_version_id is not None
+            or connection.verified_version_id != binding.connection_version_id
         ):
             raise InvalidCapabilityTransition("capability transition rejected")
         capability.enabled_version_id = expected_version_id
@@ -653,37 +778,51 @@ class CapabilityService:
         output_schema: dict[str, object] | None,
         metadata_digest: str,
         protocol_revision: str,
+        schema_supported: bool,
     ) -> CapabilityVersion | None:
-        current_id = capability.pending_version_id or capability.enabled_version_id
-        if current_id is None:
-            return None
-        row = await self._session.execute(
+        current_ids = [
+            version_id
+            for version_id in (capability.enabled_version_id, capability.pending_version_id)
+            if version_id is not None
+        ]
+        rows = await self._session.execute(
             select(CapabilityVersion, McpToolBinding)
             .join(
                 McpToolBinding,
                 McpToolBinding.capability_version_id == CapabilityVersion.id,
             )
             .where(
-                CapabilityVersion.id == current_id,
                 CapabilityVersion.capability_id == capability.id,
                 CapabilityVersion.workspace_id == capability.workspace_id,
+                CapabilityVersion.metadata_digest == metadata_digest,
+                McpToolBinding.connection_version_id == connection_version_id,
+                McpToolBinding.tool_name == tool_name,
+                McpToolBinding.protocol_revision == protocol_revision,
             )
         )
-        found = row.one_or_none()
-        if found is None:
-            return None
-        version, binding = found
-        if (
-            version.display_name == display_name
-            and version.description == description
-            and version.input_schema == input_schema
-            and version.output_schema == output_schema
-            and version.metadata_digest == metadata_digest
-            and binding.connection_version_id == connection_version_id
-            and binding.tool_name == tool_name
-            and binding.protocol_revision == protocol_revision
-        ):
-            return cast(CapabilityVersion, version)
+        found_rows = rows.all()
+        by_id = {version.id: (version, binding) for version, binding in found_rows}
+        historical_ids = [
+            version.id
+            for version, _binding in sorted(
+                found_rows, key=lambda row: row[0].sequence, reverse=True
+            )
+            if version.id not in current_ids
+        ]
+        for current_id in [*current_ids, *historical_ids]:
+            found = by_id.get(current_id)
+            if found is None:
+                continue
+            version, _binding = found
+            if (
+                version.display_name == display_name
+                and version.description == description
+                and version.input_schema == input_schema
+                and version.output_schema == output_schema
+                and version.metadata_digest == metadata_digest
+                and version.schema_supported == schema_supported
+            ):
+                return cast(CapabilityVersion, version)
         return None
 
     async def _locked_capability(
@@ -750,121 +889,15 @@ class CapabilityService:
         metadata_digest: str,
         protocol_revision: str,
     ) -> None:
-        if not tool_identity or len(tool_identity) > 256 or "\x00" in tool_identity:
-            raise ValueError("invalid tool identity")
-        if not tool_name or len(tool_name) > 256 or "\x00" in tool_name:
-            raise ValueError("invalid tool name")
-        if not display_name or len(display_name) > 256 or "\x00" in display_name:
-            raise ValueError("invalid display name")
-        if description is not None and (len(description) > 2048 or "\x00" in description):
-            raise ValueError("invalid description")
         if cls._DIGEST.fullmatch(metadata_digest) is None:
             raise ValueError("invalid metadata digest")
         if cls._PROTOCOL_REVISION.fullmatch(protocol_revision) is None:
             raise ValueError("invalid protocol revision")
-        try:
-            for value in (tool_identity, tool_name, display_name, description, protocol_revision):
-                if value is not None:
-                    value.encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise ValueError("capability metadata is not valid UTF-8") from exc
-        scalar_metadata = "\n".join(
-            value
-            for value in (tool_identity, tool_name, display_name, description, protocol_revision)
-            if value is not None
+        validate_capability_scalars(
+            tool_identity=tool_identity,
+            tool_name=tool_name,
+            display_name=display_name,
+            description=description,
+            protocol_revision=protocol_revision,
         )
-        if _contains_obvious_secret(scalar_metadata):
-            raise ValueError("capability metadata contains credential-shaped content")
-        _validate_schema_payload(input_schema, output_schema)
-
-
-_OBVIOUS_SECRET = re.compile(
-    r"(?:sk_live_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{16,}|"
-    r"gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|"
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
-    r"(?:api[_-]?key|access[_-]?token|secret|password)[=:/_-][A-Za-z0-9._~+/=\-]{8,})",
-    re.IGNORECASE,
-)
-
-
-def _contains_obvious_secret(value: str) -> bool:
-    return _OBVIOUS_SECRET.search(value) is not None
-
-
-def _validate_schema_payload(
-    input_schema: dict[str, object], output_schema: dict[str, object] | None
-) -> None:
-    """Reject discovery schemas outside conservative storage bounds."""
-
-    roots: tuple[object, ...] = (
-        (input_schema,)
-        if output_schema is None
-        else (
-            input_schema,
-            output_schema,
-        )
-    )
-    stack = [(root, 1) for root in roots]
-    node_count = 0
-    while stack:
-        value, depth = stack.pop()
-        node_count += 1
-        if depth > 32 or node_count > 4096:
-            raise ValueError("schema exceeds structural limits")
-        if isinstance(value, dict):
-            if len(value) > 1024:
-                raise ValueError("schema exceeds property limits")
-            for key, child in value.items():
-                if not isinstance(key, str) or len(key) > 8192:
-                    raise ValueError("schema contains an invalid key")
-                stack.append((child, depth + 1))
-        elif isinstance(value, list):
-            if len(value) > 1024:
-                raise ValueError("schema exceeds item limits")
-            stack.extend((child, depth + 1) for child in value)
-        elif isinstance(value, str):
-            if len(value) > 8192:
-                raise ValueError("schema string exceeds limits")
-        elif value is not None and not isinstance(value, (bool, int, float)):
-            raise ValueError("schema contains a non-JSON value")
-    try:
-        serialized = json.dumps(roots, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        encoded = serialized.encode("utf-8")
-    except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError) as exc:
-        raise ValueError("schema is not bounded JSON") from exc
-    if len(encoded) > 131_072:
-        raise ValueError("schema exceeds serialized size limit")
-    if _contains_obvious_secret(serialized) or any(
-        _contains_obvious_secret_in_json(root) for root in roots
-    ):
-        raise ValueError("schema contains credential-shaped content")
-
-
-_SENSITIVE_JSON_FIELD = re.compile(
-    r"(?:api[_-]?key|access[_-]?token|secret|password)", re.IGNORECASE
-)
-
-
-def _contains_obvious_secret_in_json(value: object) -> bool:
-    stack = [(value, False)]
-    while stack:
-        current, sensitive_context = stack.pop()
-        if isinstance(current, dict):
-            for key, child in current.items():
-                key_is_sensitive = _SENSITIVE_JSON_FIELD.fullmatch(key) is not None
-                if key_is_sensitive and isinstance(child, str) and len(child) >= 8:
-                    return True
-                if sensitive_context and key in {"const", "default", "enum", "example", "examples"}:
-                    literals = [child]
-                    while literals:
-                        literal = literals.pop()
-                        if isinstance(literal, str) and len(literal) >= 8:
-                            return True
-                        if isinstance(literal, list):
-                            literals.extend(literal)
-                stack.append((child, sensitive_context or key_is_sensitive))
-        elif isinstance(current, list):
-            stack.extend((child, sensitive_context) for child in current)
-        elif isinstance(current, str) and _contains_obvious_secret(current):
-            return True
-    return False
+        validate_schema_payload(input_schema, output_schema)

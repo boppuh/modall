@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -253,6 +254,14 @@ class ServerConnection(Base):
             deferrable=True,
             initially="DEFERRED",
         ),
+        ForeignKeyConstraint(
+            ["id", "current_snapshot_id"],
+            ["discovery_snapshots.connection_id", "discovery_snapshots.id"],
+            name="fk_connection_current_snapshot",
+            use_alter=True,
+            deferrable=True,
+            initially="DEFERRED",
+        ),
     )
 
     id: Mapped[UuidPrimaryKey]
@@ -265,6 +274,9 @@ class ServerConnection(Base):
     refresh_generation: Mapped[int] = mapped_column(Integer, default=0)
     allocated_control_epoch: Mapped[int | None] = mapped_column(Integer)
     allocated_target_version_id: Mapped[UUID | None]
+    current_snapshot_id: Mapped[UUID | None]
+    last_refresh_error_code: Mapped[str | None] = mapped_column(String(64))
+    last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     created_at: Mapped[CreatedAt]
 
@@ -396,12 +408,14 @@ class CapabilityVersion(Base):
     input_schema: Mapped[dict[str, object]] = mapped_column(JSON)
     output_schema: Mapped[dict[str, object] | None] = mapped_column(JSON)
     metadata_digest: Mapped[str] = mapped_column(String(64))
+    schema_supported: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[CreatedAt]
 
 
 class McpToolBinding(Base):
     __tablename__ = "mcp_tool_bindings"
     __table_args__ = (
+        UniqueConstraint("connection_id", "connection_version_id", "capability_version_id"),
         ForeignKeyConstraint(
             ["workspace_id", "capability_version_id"],
             ["capability_versions.workspace_id", "capability_versions.id"],
@@ -475,6 +489,145 @@ class CapabilityStatusEvent(Base):
     created_at: Mapped[CreatedAt]
 
 
+class DiscoveryPayload(Base):
+    __tablename__ = "discovery_payloads"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "id"),
+        UniqueConstraint("workspace_id", "canonical_digest"),
+        CheckConstraint("byte_count > 0", name="ck_discovery_payload_byte_count"),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    canonical_digest: Mapped[str] = mapped_column(String(64))
+    normalized_payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    byte_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[CreatedAt]
+
+
+class DiscoverySnapshot(Base):
+    __tablename__ = "discovery_snapshots"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "connection_id"],
+            ["server_connections.workspace_id", "server_connections.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["connection_id", "connection_version_id"],
+            ["server_connection_versions.connection_id", "server_connection_versions.id"],
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "payload_id"],
+            ["discovery_payloads.workspace_id", "discovery_payloads.id"],
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("workspace_id", "id"),
+        UniqueConstraint("connection_id", "id"),
+        UniqueConstraint("connection_id", "connection_version_id", "id"),
+        UniqueConstraint("connection_id", "generation"),
+        CheckConstraint("generation > 0", name="ck_discovery_snapshot_generation"),
+        CheckConstraint("control_epoch >= 0", name="ck_discovery_snapshot_control_epoch"),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    connection_id: Mapped[UUID]
+    connection_version_id: Mapped[UUID]
+    payload_id: Mapped[UUID]
+    generation: Mapped[int] = mapped_column(Integer)
+    control_epoch: Mapped[int] = mapped_column(Integer)
+    protocol_revision: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[CreatedAt]
+
+
+class DiscoverySnapshotCapability(Base):
+    __tablename__ = "discovery_snapshot_capabilities"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "snapshot_id"],
+            ["discovery_snapshots.workspace_id", "discovery_snapshots.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["connection_id", "connection_version_id", "snapshot_id"],
+            [
+                "discovery_snapshots.connection_id",
+                "discovery_snapshots.connection_version_id",
+                "discovery_snapshots.id",
+            ],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "capability_version_id"],
+            ["capability_versions.workspace_id", "capability_versions.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["connection_id", "connection_version_id", "capability_version_id"],
+            [
+                "mcp_tool_bindings.connection_id",
+                "mcp_tool_bindings.connection_version_id",
+                "mcp_tool_bindings.capability_version_id",
+            ],
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("snapshot_id", "capability_version_id"),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    connection_id: Mapped[UUID]
+    connection_version_id: Mapped[UUID]
+    snapshot_id: Mapped[UUID]
+    capability_version_id: Mapped[UUID]
+    created_at: Mapped[CreatedAt]
+
+
+class DiscoveryRefreshJob(Base):
+    __tablename__ = "discovery_refresh_jobs"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "connection_id"],
+            ["server_connections.workspace_id", "server_connections.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["connection_id", "connection_version_id"],
+            ["server_connection_versions.connection_id", "server_connection_versions.id"],
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("connection_id", "generation"),
+        CheckConstraint("generation > 0", name="ck_discovery_job_generation"),
+        CheckConstraint("control_epoch >= 0", name="ck_discovery_job_control_epoch"),
+        CheckConstraint("lease_epoch >= 0", name="ck_discovery_job_lease_epoch"),
+        CheckConstraint(
+            "status IN ('queued', 'leased', 'succeeded', 'failed', 'obsolete')",
+            name="ck_discovery_job_status",
+        ),
+        CheckConstraint(
+            "(status = 'leased' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (status <> 'leased' AND lease_owner IS NULL AND lease_expires_at IS NULL)",
+            name="ck_discovery_job_active_lease",
+        ),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    connection_id: Mapped[UUID]
+    connection_version_id: Mapped[UUID]
+    generation: Mapped[int] = mapped_column(Integer)
+    control_epoch: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_epoch: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[CreatedAt]
+
+
 def _reject_immutable_update(mapper: Mapper[object], connection: object, target: object) -> None:
     del connection
     if any(get_history(target, attribute.key).has_changes() for attribute in mapper.column_attrs):
@@ -528,6 +681,9 @@ for immutable_model in (
     CapabilityVersion,
     McpToolBinding,
     CapabilityStatusEvent,
+    DiscoveryPayload,
+    DiscoverySnapshot,
+    DiscoverySnapshotCapability,
 ):
     event.listen(immutable_model, "before_update", _reject_immutable_update)
 
