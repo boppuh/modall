@@ -85,12 +85,17 @@ def test_structured_secret_screen_recognizes_common_field_spellings(
     assert contains_sensitive_json({field_name: "abcdefgh12345678"})
 
 
+def test_structured_secret_screen_inspects_keys_beneath_sensitive_fields() -> None:
+    assert contains_sensitive_json({"token": {"abcdefgh12345678": True}})
+
+
 @pytest.mark.parametrize(
     "value",
     (
         "metadata token: abcdefgh12345678",
         "https://mcp.example/token/abcdefgh12345678",
         "credential=abcdefgh12345678",
+        "Authorization: Bearer abcdefgh12345678",
     ),
 )
 def test_unstructured_secret_screen_recognizes_generic_markers(value: str) -> None:
@@ -185,11 +190,14 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
         with pytest.raises(DiscoveryError, match="tool limit"):
             await tool_limited.discover(endpoint)
 
-        leaking, endpoint = adapter_for("credential-leak")
+        fast_failure_limits = TransportLimits(read_seconds=0.02, total_seconds=0.2)
+        leaking, endpoint = adapter_for("credential-leak", limits=fast_failure_limits)
         with pytest.raises(DiscoveryError):
             await leaking.discover(endpoint, bearer_token=FIXTURE_TOKEN.encode())
 
-        escaped_leaking, endpoint = adapter_for("credential-escaped-leak")
+        escaped_leaking, endpoint = adapter_for(
+            "credential-escaped-leak", limits=fast_failure_limits
+        )
         with pytest.raises(DiscoveryError):
             await escaped_leaking.discover(endpoint, bearer_token=ESCAPED_FIXTURE_TOKEN.encode())
 
@@ -201,13 +209,19 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
         with pytest.raises(CredentialError, match="credential encoding"):
             await common_key.discover(endpoint, bearer_token=COMMON_KEY_FIXTURE_TOKEN.encode())
 
-        key_leaking, endpoint = adapter_for("credential-key-leak")
+        key_leaking, endpoint = adapter_for("credential-key-leak", limits=fast_failure_limits)
         with pytest.raises(DiscoveryError, match="secret screening"):
             await key_leaking.discover(endpoint, bearer_token=KEY_LEAK_FIXTURE_TOKEN.encode())
 
-        session_leaking, endpoint = adapter_for("credential-session-id-leak")
+        session_leaking, endpoint = adapter_for(
+            "credential-session-id-leak", limits=fast_failure_limits
+        )
         with pytest.raises(DiscoveryError):
             await session_leaking.discover(endpoint, bearer_token=FIXTURE_TOKEN.encode())
+
+        raw_leaking, endpoint = adapter_for("credential-raw-extension", limits=fast_failure_limits)
+        with pytest.raises(DiscoveryError):
+            await raw_leaking.discover(endpoint, bearer_token=FIXTURE_TOKEN.encode())
 
         for profile in (
             "structured-secret",

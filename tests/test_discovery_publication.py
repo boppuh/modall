@@ -32,6 +32,7 @@ from modall.persistence.models import (
     DiscoveryPayload,
     DiscoveryRefreshJob,
     DiscoverySnapshot,
+    SecretBinding,
     ServerConnection,
     utc_now,
 )
@@ -945,6 +946,78 @@ def test_discovery_runner_does_not_report_publication_errors_as_endpoint_health(
                 loaded = await session.get(ServerConnection, connection_id)
                 assert loaded is not None
                 assert loaded.last_refresh_error_code is None
+
+    asyncio.run(scenario())
+
+
+def test_discovery_runner_revalidates_after_secret_retrieval_before_contact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubAdapter:
+        contacted = False
+
+        async def discover(
+            self, endpoint: str, *, bearer_token: bytes | bytearray | None = None
+        ) -> DiscoveryResult:
+            del endpoint, bearer_token
+            self.contacted = True
+            return result_for()
+
+    original_validate = RefreshJobService.validate_for_contact
+    validations = 0
+
+    async def reject_second_validation(
+        service: RefreshJobService,
+        *,
+        context: WorkspaceContext,
+        lease: RefreshLease,
+    ) -> None:
+        nonlocal validations
+        validations += 1
+        if validations == 2:
+            raise InvalidConnectionTransition("refresh lease rejected")
+        await original_validate(service, context=context, lease=lease)
+
+    monkeypatch.setattr(
+        RefreshJobService,
+        "validate_for_contact",
+        reject_second_validation,
+    )
+
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="runner-fence-admin")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                binding = SecretBinding(
+                    workspace_id=workspace_id,
+                    provider="fixture",
+                    external_reference="runner-fence-secret",
+                    version="v1",
+                    created_by_user_id=admin_id,
+                )
+                session.add(binding)
+                await session.flush()
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Runner contact fence",
+                    endpoint_url="https://mcp.example/runner-fence",
+                    secret_binding_id=binding.id,
+                    policy_version="policy-v1",
+                )
+                lease = await lease_for(session, context, connection.id, "runner-fence")
+
+            adapter = StubAdapter()
+            runner = DiscoveryRunner(
+                session_factory=factory,
+                secret_provider=FixtureSecretProvider(
+                    {("runner-fence-secret", "v1"): b"abcdefghijklmnop"}
+                ),
+                adapter_factory=lambda _policy_version: cast(McpClientAdapter, adapter),
+            )
+            assert await runner.run(context=context, lease=lease) is None
+            assert validations == 2
+            assert adapter.contacted is False
 
     asyncio.run(scenario())
 

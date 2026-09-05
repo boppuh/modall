@@ -25,6 +25,7 @@ AUTHENTICATED_PROFILES = {
     "credential-common-key",
     "credential-key-leak",
     "credential-session-id-leak",
+    "credential-raw-extension",
 }
 SUPPORTED_PROFILES = {
     "default",
@@ -165,6 +166,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         first_tool["_meta"] = {"privateKey": "abcdefgh12345678"}
     if profile == "credential-numeric-leak":
         first_tool["_meta"] = {"value": 12345678}
+    if profile == "credential-raw-extension":
+        first_tool["unrecognizedExtension"] = FIXTURE_TOKEN
     if profile == "credential-key-leak":
         first_tool["_meta"] = {KEY_LEAK_FIXTURE_TOKEN: True}
     if profile == "oversized-metadata":

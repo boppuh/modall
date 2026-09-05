@@ -14,7 +14,9 @@ _OBVIOUS_SECRET = re.compile(
     r"gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|"
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
     r"(?:api[_-]?key|(?:access[_-]?)?token|credential|private[_-]?key|secret|password)"
-    r"[=:/_-]\s*[A-Za-z0-9._~+/=\-]{8,})",
+    r"[=:/_-]\s*[A-Za-z0-9._~+/=\-]{8,}|"
+    r"(?:authorization|authentication)\s*[:=]\s*(?:bearer\s+)?"
+    r"[A-Za-z0-9._~+/=\-]{8,}|bearer\s+[A-Za-z0-9._~+/=\-]{8,})",
     re.IGNORECASE,
 )
 _SENSITIVE_JSON_FIELD = re.compile(
@@ -277,6 +279,8 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
         current, sensitive_context = stack.pop()
         if isinstance(current, dict):
             for key, child in current.items():
+                if sensitive_context and len(key) >= 8:
+                    return True
                 key_is_sensitive = _is_sensitive_field(key)
                 if key_is_sensitive and isinstance(child, str) and len(child) >= 8:
                     return True

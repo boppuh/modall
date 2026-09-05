@@ -56,9 +56,11 @@ class DiscoveryRunner:
             except (KeyError, ValueError) as exc:
                 raise EndpointPolicyError("pinned policy version is unavailable") from exc
             if secret_reference is None:
+                await self._validate_for_contact(context, lease)
                 result = await adapter.discover(endpoint)
             else:
                 with self._secret_provider.retrieve(secret_reference) as credential:
+                    await self._validate_for_contact(context, lease)
                     result = await adapter.discover(endpoint, bearer_token=credential)
         except (AuthorizationDenied, InvalidConnectionTransition):
             return None
@@ -92,6 +94,10 @@ class DiscoveryRunner:
                 return snapshot.id
         except (AuthorizationDenied, InvalidConnectionTransition):
             return None
+
+    async def _validate_for_contact(self, context: WorkspaceContext, lease: RefreshLease) -> None:
+        async with transaction(self._session_factory) as session:
+            await RefreshJobService(session).validate_for_contact(context=context, lease=lease)
 
     async def _load_target(
         self, context: WorkspaceContext, lease: RefreshLease

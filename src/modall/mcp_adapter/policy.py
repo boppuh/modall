@@ -204,13 +204,28 @@ class PinnedHTTPTransport(httpx.AsyncHTTPTransport):
 
 
 class LimitedByteStream(httpx.AsyncByteStream):
-    def __init__(self, stream: httpx.AsyncByteStream, budget: "RawByteBudget") -> None:
+    def __init__(
+        self,
+        stream: httpx.AsyncByteStream,
+        budget: "RawByteBudget",
+        forbidden_values: tuple[bytes, ...],
+        mark_sensitive_response: Callable[[], None],
+    ) -> None:
         self._stream = stream
         self._budget = budget
+        self._forbidden_values = forbidden_values
+        self._mark_sensitive_response = mark_sensitive_response
+        self._tail = b""
+        self._tail_limit = max((len(value) for value in forbidden_values), default=0) + 256
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         async for chunk in self._stream:
             self._budget.consume(len(chunk))
+            window = self._tail + chunk
+            if any(value in window for value in self._forbidden_values):
+                self._mark_sensitive_response()
+                raise EndpointPolicyError("sensitive upstream response body")
+            self._tail = window[-self._tail_limit :]
             yield chunk
 
     async def aclose(self) -> None:
@@ -240,6 +255,17 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         self._inner = inner
         self._budget = RawByteBudget(response_bytes)
         self._forbidden_response_values = forbidden_response_values
+        self._forbidden_response_bytes = tuple(
+            value.encode("utf-8") for value in forbidden_response_values
+        )
+        self._sensitive_response_detected = False
+
+    @property
+    def sensitive_response_detected(self) -> bool:
+        return self._sensitive_response_detected
+
+    def _mark_sensitive_response(self) -> None:
+        self._sensitive_response_detected = True
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         response = await self._inner.handle_async_request(request)
@@ -273,7 +299,12 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         return httpx.Response(
             response.status_code,
             headers=response.headers,
-            stream=LimitedByteStream(cast(httpx.AsyncByteStream, response.stream), self._budget),
+            stream=LimitedByteStream(
+                cast(httpx.AsyncByteStream, response.stream),
+                self._budget,
+                self._forbidden_response_bytes,
+                self._mark_sensitive_response,
+            ),
             extensions=response.extensions,
             request=request,
         )

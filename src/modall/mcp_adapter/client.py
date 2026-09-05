@@ -132,6 +132,7 @@ class McpClientAdapter:
     ) -> DiscoveryResult:
         headers: dict[str, str] = {"Accept-Encoding": "identity"}
         credential_text: str | None = None
+        transport: LimitedTransport | None = None
         if bearer_token is not None:
             if not endpoint.lower().startswith("https://"):
                 raise CredentialError("credentials require HTTPS")
@@ -161,7 +162,12 @@ class McpClientAdapter:
                     inner,
                     self._limits.response_bytes,
                     forbidden_response_values=(
-                        (credential_text,) if credential_text is not None else ()
+                        (
+                            credential_text,
+                            json.dumps(credential_text, ensure_ascii=True)[1:-1],
+                        )
+                        if credential_text is not None
+                        else ()
                     ),
                 )
                 timeout = httpx.Timeout(
@@ -179,6 +185,8 @@ class McpClientAdapter:
         except (ProtocolMismatch, DiscoveryError):
             raise
         except Exception as exc:
+            if transport is not None and transport.sensitive_response_detected:
+                raise DiscoveryError("secret screening rejected metadata") from exc
             mismatch = _find_exception(exc, ProtocolMismatch)
             if mismatch is not None:
                 raise mismatch from exc
