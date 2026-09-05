@@ -122,6 +122,7 @@ These assumptions are enforced in product copy, API validation, operator trainin
 | Action | Admin | Operator | Viewer |
 |---|---:|---:|---:|
 | View registry, connections, capabilities, and runs | Yes | Yes | Yes |
+| View workspace audit history | Yes | Yes | No |
 | Search/import registry metadata | Yes | Yes | No |
 | Create or change endpoint/secret binding | Yes | No | No |
 | Verify or refresh a connection | Yes | Yes | No |
@@ -289,17 +290,17 @@ Deletion is ordinary database/object deletion under managed encryption-at-rest g
 ### 7.2 Untrusted metadata and schemas
 
 - Bound decoded and raw bytes, nesting, string length, property count, tool count, page count, and total discovery time.
-- Store the exact normalized JSON needed for history; do not log payload bodies.
+- Store the exact normalized JSON needed for history only after the complete discovery snapshot passes bounds, schema handling, and secret screening; do not log payload bodies.
 - Preserve local JSON Schema references but never fetch an external schema reference.
 - Compile `pattern`, `patternProperties`, and other schema regexes only through the approved linear-time/RE2-compatible subset; unsupported constructs keep the version visible but non-invocable. Run schema compilation and validation under an independent wall-clock deadline and resource limit, with timeout failing closed.
-- Apply obvious-secret screening to remote descriptive fields; quarantine the affected snapshot on a match or scanner failure.
+- Apply obvious-secret screening to remote descriptive fields before any snapshot payload write. A match, timeout, or scanner failure discards raw and normalized payload bytes and persists only safe failure code/timing/connection/generation metadata; no secret-bearing quarantine payload or content digest is retained.
 - Render every remote string as text and every schema/result through inert viewers.
 
 ### 7.3 Arguments and results
 
 - Arguments must validate against the pinned input schema and configured byte/depth limits.
 - Confirmation repeats schema identity and the non-confidential-data restriction.
-- Obvious-secret screening runs before durable argument storage and enqueue.
+- Obvious-secret screening runs before durable argument storage and enqueue. A match, timeout, or scanner failure creates no run, stores no argument payload or content digest, and sends nothing upstream.
 - Text and structured JSON results remain only in bounded worker memory until byte/depth checks and obvious-secret screening finish. When the pinned capability version declares an output schema, structured JSON must also validate against that exact schema before any durable payload write.
 - Only a fully accepted result may be written to `runs`, `run_attempts`, `run_events`, or result storage. Scanner failure, a detected secret, limit failure, or schema mismatch persists only safe quarantine/error metadata and no raw result payload in durable storage or APIs; schema mismatch uses `invalid_upstream_output`.
 - Unsupported content blocks, embedded resources, and binary bytes are discarded and reported with `unsupported_result_content`.
@@ -329,9 +330,9 @@ Fixture coverage includes:
 4. Initialize a short-lived MCP session through the constrained worker network.
 5. Read all tool pages within the configured bounds.
 6. Normalize and validate the complete snapshot.
-7. In one transaction, lock the connection and require that this is still its latest-started refresh generation, its version is still current, and its lifecycle remains valid for this operation (`verifying` for initial verification or `active|degraded` for refresh), explicitly rejecting `disabled`. Then append the snapshot and changed capability versions, atomically mark superseded tool/schema bindings non-executable, and update the current snapshot and health projections.
+7. Complete under one of two locked transactions. A successful discovery requires this is still the latest-started generation, its version is current, and lifecycle remains valid (`verifying` for initial verification or `active|degraded` for refresh), explicitly rejecting `disabled`; it appends the snapshot/capability versions, marks superseded bindings non-executable, and updates current snapshot and healthy lifecycle projections. A timeout, disconnect, invalid, incomplete, or rejected payload from the latest otherwise-eligible generation preserves the prior snapshot but records typed failure health and moves `verifying -> degraded` or `active -> degraded`. Obsolete, disabled, or superseded-generation jobs update neither snapshot nor health.
 
-An obsolete, incomplete, disabled, or superseded-generation refresh does not publish. Discovery may retry because it sends no tool invocation.
+An unsuccessful discovery never publishes a snapshot. Only the latest otherwise-eligible failure may update health/degraded lifecycle; obsolete, disabled, or superseded-generation work changes nothing. Discovery may retry because it sends no tool invocation.
 
 ### 8.3 Invocation and dispatch fence
 
@@ -389,6 +390,10 @@ All responses use stable IDs, ISO-8601 timestamps, correlation IDs, and machine-
 
 Run content is returned only while retained and authorized and always uses `Cache-Control: no-store`. After content expiry, the API returns safe status and version/timing lineage without arguments or result payload.
 
+### 9.4 Audit
+
+- `GET /v1/audit-events` — Admin/Operator-only, cursor-paginated, workspace-scoped typed audit history. Supports bounded filters for resource type/ID, actor ID, action enum, outcome enum, and time range; it never returns request, schema, remote-metadata, result, secret, or raw upstream-error payloads.
+
 ## 10. Operator UI
 
 | Route | Primary content |
@@ -437,7 +442,7 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 | E2-T3 | Wrap the pinned SDK and qualify initialization, safe-regex schema handling, bounded validation, and paginated discovery | Recorded protocol and adversarial schema-timing suites pass without SDK leakage into domain types |
 | E2-T4 | Implement bounded normalized snapshots and canonical identity | Equivalent snapshots deduplicate; changed snapshots append |
 | E2-T5 | Implement capabilities, immutable versions, bindings, and status events | Drift creates pending versions and preserves enabled history |
-| E2-T6 | Implement explicit/scheduled refresh, monotonic generations, current-snapshot health, and overlapping-job protection | Only the latest-started eligible generation publishes; obsolete/incomplete/disabled refresh cannot change snapshot or health |
+| E2-T6 | Implement explicit/scheduled refresh, monotonic generations, current-snapshot health, and overlapping-job protection | Only the latest-started eligible generation publishes; its failure preserves snapshot but degrades health, while obsolete/disabled/superseded work changes neither |
 
 ### E3 — Durable invocation — 4–5 person-weeks
 
@@ -445,7 +450,7 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 |---|---|---|
 | E3-T1 | Implement PostgreSQL job leasing, monotonically increasing lease epochs, heartbeat, and recovery | Worker-loss tests reclaim only safe jobs and stale epochs cannot fence |
 | E3-T2 | Implement runs, attempts, events, state machine, and exact lineage | Projection replay reproduces every status |
-| E3-T3 | Implement schema validation, limits, secret guardrail, and caller/request/version-bound one-time confirmation token | Invalid/sensitive/stale/transferred/replayed requests cannot enqueue |
+| E3-T3 | Implement schema validation, limits, fail-closed secret guardrail, and caller/request/version-bound one-time confirmation token | Invalid/sensitive/scanner-failed/stale/transferred/replayed requests retain no arguments and cannot enqueue |
 | E3-T4 | Implement scoped key HMAC, versioned canonical-request HMAC, conflict detection, and concurrent creation handling | Same key/request creates one run; changed capability/arguments conflict after content expiry; raw key never persists |
 | E3-T5 | Implement exact-current-binding and lease-epoch-validated fresh-session dispatch fence, send-once policy, deadline, and cancellation | Crash/reclaim/control/configuration/schema/cancel races never send through stale lineage or duplicate a call |
 | E3-T6 | Implement pre-storage bounded result/error normalization and retention cleanup | Only clean, output-schema-valid text/JSON reaches durable storage; unsupported/sensitive/invalid payload is absent, and every terminal state's retained content expires |
@@ -454,7 +459,7 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 
 | ID | Task | Acceptance |
 |---|---|---|
-| E4-T1 | Establish errors, pagination, optimistic concurrency, and OpenAPI conventions | Contract tests cover stable codes and unknown future events |
+| E4-T1 | Establish errors, pagination, optimistic concurrency, workspace-scoped audit reads, and OpenAPI conventions | Contract tests cover stable codes, audit role/filter/content boundaries, and unknown future events |
 | E4-T2 | Implement Registry search/import and connection endpoints, including append-only configuration versions | Role, outage, unsafe endpoint, version-history, reverification, and idempotency paths pass |
 | E4-T3 | Implement capability/version/status endpoints | Immutable/history/authorization paths pass |
 | E4-T4 | Implement bound one-time preflight/run/event/cancel endpoints, `no-store` content responses, and generated client | Token transfer/replay, identity-switch cache isolation, API E2E, and generated-client CI pass |
@@ -548,6 +553,7 @@ Critical path:
 - disable/refresh/invocation races;
 - configuration-version append/reverification and disable-during-discovery races;
 - overlapping refresh generation races where an older completion cannot replace the latest snapshot or health;
+- latest eligible discovery timeout/invalid/secret result preserves the snapshot but records degraded health; obsolete or disabled failures cannot mutate health;
 - secret retrieval and telemetry redaction;
 - concurrent idempotency and refresh;
 - same-key changed-request conflict after retained arguments expire;
@@ -556,6 +562,7 @@ Critical path:
 ### End to end
 
 - all scenarios in Section 3.2;
+- Admin/Operator can page/filter workspace audit history while Viewer and cross-workspace callers cannot read it;
 - confirmation-token alteration, transfer, expiry, and replay create no run, while matching idempotent replay returns only the original run;
 - content-bearing run responses are `no-store`, and logout or identity/workspace switching exposes no prior cached arguments or results;
 - Viewer cannot mutate and Operator cannot change secret bindings;
@@ -565,6 +572,7 @@ Critical path:
 - connection rotation or schema drift makes superseded bindings non-executable before admission and every fence;
 - adversarial schema regexes cannot monopolize API or worker validation;
 - unsupported or secret-shaped results expose no payload;
+- argument or discovery scanner failure persists no submitted/remote payload and sends no invocation;
 - upstream Registry outage does not impair existing capabilities or invocation.
 
 ### Manual qualification
