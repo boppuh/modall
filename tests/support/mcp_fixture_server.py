@@ -59,6 +59,7 @@ SUPPORTED_PROFILES = {
     "raw-obvious-extension",
     "raw-whitespace-extension",
     "raw-control-extension",
+    "raw-structured-extension",
     "keyword-property-names",
     "credential-property-schema",
     "schema-annotation-secret",
@@ -181,6 +182,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         first_tool["unrecognizedExtension"] = "token:\tabcdefgh12345678"
     if profile == "raw-control-extension":
         first_tool["unrecognizedExtension"] = "token:\0abcdefgh12345678"
+    if profile == "raw-structured-extension":
+        first_tool["unrecognizedExtension"] = {"token": "AbCdEfGhIjKlMnOpQrStUvWx"}
     if profile == "credential-numeric-leak":
         first_tool["_meta"] = {"value": int(NUMERIC_FIXTURE_TOKEN)}
     if profile in {"credential-raw-extension", "credential-raw-unicode-extension"}:
@@ -245,6 +248,7 @@ def create_mcp_fixture_app() -> FastAPI:
         mcp_protocol_version: str | None = Header(default=None),
         mcp_session_id: str | None = Header(default=None),
     ) -> Response:
+        profile = profile.removeprefix("case-")
         if profile not in SUPPORTED_PROFILES:
             return JSONResponse({"error": "unknown fixture profile"}, status_code=404)
         if profile == "credential-escaped-leak":

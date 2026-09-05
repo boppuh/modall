@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from modall.identity.types import WorkspaceContext
+from modall.identity.types import Role, WorkspaceContext
 from modall.mcp_adapter.client import (
     CredentialError,
     DiscoveryError,
@@ -106,6 +106,41 @@ def result_for(*, description: str = "Echo text", include_tool: bool = True) -> 
         canonical_bytes=canonical,
         canonical_digest=hashlib.sha256(canonical).hexdigest(),
     )
+
+
+def test_durable_refresh_reconstructs_and_attributes_initiating_actor() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="durable-job-admin")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Durable actor",
+                    endpoint_url="https://mcp.example/durable",
+                    secret_binding_id=None,
+                    policy_version="policy-v1",
+                )
+                job = await RefreshJobService(session).enqueue(
+                    context=context, connection_id=connection.id
+                )
+                job_id = job.id
+                assert job.actor_user_id == admin_id
+
+            async with transaction(factory) as session:
+                restored_context, lease = await RefreshJobService(session).claim_durable(
+                    job_id=job_id,
+                    worker_id="restart-worker",
+                    lease_duration=timedelta(minutes=1),
+                )
+                assert restored_context == WorkspaceContext(
+                    workspace_id=workspace_id,
+                    actor_user_id=admin_id,
+                    role=Role.ADMIN,
+                )
+                assert lease.actor_user_id == admin_id
+
+    asyncio.run(scenario())
 
 
 def test_successful_refreshes_append_observations_deduplicate_and_detect_drift() -> None:

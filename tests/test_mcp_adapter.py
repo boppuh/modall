@@ -1,5 +1,6 @@
 import asyncio
 import gzip
+import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from socket import gaierror
@@ -14,6 +15,7 @@ from modall.mcp_adapter.client import (
     McpClientAdapter,
     ProtocolMismatch,
     _schema_is_supported,
+    _suppress_untrusted_sdk_logs,
 )
 from modall.mcp_adapter.policy import (
     EndpointPolicy,
@@ -25,6 +27,7 @@ from modall.mcp_adapter.policy import (
     PinnedNetworkBackend,
     ResponseLimitExceeded,
     TransportLimits,
+    _contains_sensitive_structured_response,
 )
 from modall.security.metadata import contains_obvious_secret, contains_sensitive_json
 from tests.support.mcp_fixture_server import (
@@ -62,7 +65,7 @@ def adapter_for(
             max_tools=max_tools,
             transport=httpx.ASGITransport(app=fixture_app),  # type: ignore[arg-type]
         ),
-        f"https://fixture/mcp/{profile}",
+        f"https://fixture/mcp/case-{profile}",
     )
 
 
@@ -96,6 +99,7 @@ def test_structured_secret_screen_inspects_keys_beneath_sensitive_fields() -> No
         {"authentication": "oauth2_required"},
         {"authentication": {"required": False}},
         {"authentication": {"type": "oauth2_required"}},
+        {"tokenExpiration": 1700000000},
     ),
 )
 def test_structured_secret_screen_allows_authentication_status_metadata(
@@ -277,6 +281,12 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
         with pytest.raises(DiscoveryError, match="secret screening rejected metadata"):
             await raw_control.discover(endpoint)
 
+        raw_structured, endpoint = adapter_for(
+            "raw-structured-extension", limits=fast_failure_limits
+        )
+        with pytest.raises(DiscoveryError, match="secret screening rejected metadata"):
+            await raw_structured.discover(endpoint)
+
         for profile in (
             "structured-secret",
             "nested-structured-secret",
@@ -298,8 +308,10 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
             "sensitive-property-recursive-ref",
             "sensitive-property-annotation",
         ):
-            unsafe_schema, endpoint = adapter_for(profile)
-            with pytest.raises(DiscoveryError, match="invalid discovery metadata"):
+            unsafe_schema, endpoint = adapter_for(profile, limits=fast_failure_limits)
+            with pytest.raises(
+                DiscoveryError, match=r"secret screening|invalid discovery metadata"
+            ):
                 await unsafe_schema.discover(endpoint)
 
         oversized_scalar, endpoint = adapter_for("oversized-scalar")
@@ -327,6 +339,23 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo(
     asyncio.run(scenario())
     assert FIXTURE_TOKEN not in caplog.text
     assert "sk_live_abcdefghijkl" not in caplog.text
+
+
+def test_adapter_suppresses_untrusted_transport_debug_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    with _suppress_untrusted_sdk_logs():
+        for logger_name in ("httpcore.connection", "httpcore.http11", "httpx"):
+            logging.getLogger(logger_name).debug("remote header %s", FIXTURE_TOKEN)
+    assert FIXTURE_TOKEN not in caplog.text
+
+
+def test_raw_structured_screen_handles_sse_and_invalid_utf8() -> None:
+    sensitive_event = b'data: {"extension":{"token":"AbCdEfGhIjKlMnOpQrStUvWx"}}\n\n'
+    assert _contains_sensitive_structured_response(sensitive_event)
+    assert not _contains_sensitive_structured_response(b'data: {"status":"ready"}\n\n')
+    assert not _contains_sensitive_structured_response(b"\xff")
 
 
 def test_endpoint_policy_rejects_unsafe_resolution_and_scheme_combinations() -> None:

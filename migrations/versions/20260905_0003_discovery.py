@@ -133,6 +133,7 @@ def upgrade() -> None:
         "discovery_refresh_jobs",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("workspace_id", sa.Uuid(), nullable=False),
+        sa.Column("actor_user_id", sa.Uuid(), nullable=False),
         sa.Column("connection_id", sa.Uuid(), nullable=False),
         sa.Column("connection_version_id", sa.Uuid(), nullable=False),
         sa.Column("generation", sa.Integer(), nullable=False),
@@ -159,6 +160,7 @@ def upgrade() -> None:
             ["server_connections.workspace_id", "server_connections.id"],
             ondelete="CASCADE",
         ),
+        sa.ForeignKeyConstraint(["actor_user_id"], ["users.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(
             ["connection_id", "connection_version_id"],
             ["server_connection_versions.connection_id", "server_connection_versions.id"],

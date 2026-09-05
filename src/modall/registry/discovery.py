@@ -19,6 +19,7 @@ from modall.persistence.models import (
     DiscoverySnapshot,
     DiscoverySnapshotCapability,
     ServerConnection,
+    WorkspaceMembership,
 )
 from modall.registry.service import (
     CapabilityService,
@@ -36,6 +37,7 @@ from modall.registry.types import (
 @dataclass(frozen=True, slots=True)
 class RefreshLease:
     job_id: UUID
+    actor_user_id: UUID
     worker_id: str
     lease_epoch: int
     connection_id: UUID
@@ -73,6 +75,7 @@ class RefreshJobService:
             older.lease_expires_at = None
         job = DiscoveryRefreshJob(
             workspace_id=context.workspace_id,
+            actor_user_id=context.actor_user_id,
             connection_id=connection_id,
             connection_version_id=version_id,
             generation=generation,
@@ -85,6 +88,43 @@ class RefreshJobService:
         self._session.add(job)
         await self._session.flush()
         return job
+
+    async def context_for_job(self, *, job_id: UUID) -> WorkspaceContext:
+        """Reconstruct the persisted initiating principal for a durable worker."""
+
+        row = (
+            await self._session.execute(
+                select(DiscoveryRefreshJob, WorkspaceMembership)
+                .join(
+                    WorkspaceMembership,
+                    (WorkspaceMembership.workspace_id == DiscoveryRefreshJob.workspace_id)
+                    & (WorkspaceMembership.user_id == DiscoveryRefreshJob.actor_user_id),
+                )
+                .where(DiscoveryRefreshJob.id == job_id)
+            )
+        ).one_or_none()
+        if row is None:
+            raise AuthorizationDenied("workspace access denied")
+        job, membership = row
+        return WorkspaceContext(
+            workspace_id=job.workspace_id,
+            actor_user_id=job.actor_user_id,
+            role=membership.typed_role,
+        )
+
+    async def claim_durable(
+        self, *, job_id: UUID, worker_id: str, lease_duration: timedelta
+    ) -> tuple[WorkspaceContext, RefreshLease]:
+        """Claim queued work using its persisted, currently valid actor context."""
+
+        context = await self.context_for_job(job_id=job_id)
+        lease = await self.claim(
+            context=context,
+            job_id=job_id,
+            worker_id=worker_id,
+            lease_duration=lease_duration,
+        )
+        return context, lease
 
     async def claim(
         self,
@@ -108,6 +148,7 @@ class RefreshJobService:
             .where(
                 DiscoveryRefreshJob.id == job_id,
                 DiscoveryRefreshJob.workspace_id == context.workspace_id,
+                DiscoveryRefreshJob.actor_user_id == context.actor_user_id,
             )
             .with_for_update()
             .execution_options(populate_existing=True)
@@ -140,6 +181,7 @@ class RefreshJobService:
         await self._session.flush()
         return RefreshLease(
             job_id=job.id,
+            actor_user_id=job.actor_user_id,
             worker_id=worker_id,
             lease_epoch=job.lease_epoch,
             connection_id=job.connection_id,
@@ -217,6 +259,8 @@ class RefreshJobService:
         conditions = [
             DiscoveryRefreshJob.id == lease.job_id,
             DiscoveryRefreshJob.workspace_id == context.workspace_id,
+            DiscoveryRefreshJob.actor_user_id == context.actor_user_id,
+            DiscoveryRefreshJob.actor_user_id == lease.actor_user_id,
             DiscoveryRefreshJob.status == RefreshJobStatus.LEASED.value,
             DiscoveryRefreshJob.lease_owner == lease.worker_id,
             DiscoveryRefreshJob.lease_epoch == lease.lease_epoch,
@@ -398,6 +442,8 @@ class DiscoveryPublicationService:
             .where(
                 DiscoveryRefreshJob.id == lease.job_id,
                 DiscoveryRefreshJob.workspace_id == context.workspace_id,
+                DiscoveryRefreshJob.actor_user_id == context.actor_user_id,
+                DiscoveryRefreshJob.actor_user_id == lease.actor_user_id,
                 DiscoveryRefreshJob.status == RefreshJobStatus.LEASED.value,
                 DiscoveryRefreshJob.lease_owner == lease.worker_id,
                 DiscoveryRefreshJob.lease_epoch == lease.lease_epoch,

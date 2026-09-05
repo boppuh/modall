@@ -1,7 +1,9 @@
 """Fail-closed endpoint validation and bounded HTTP response streaming."""
 
 import asyncio
+import json
 import math
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -16,6 +18,7 @@ from modall.security.endpoints import normalize_endpoint_host
 from modall.security.metadata import (
     contains_obvious_secret,
     contains_sensitive_hostname,
+    contains_sensitive_json,
     contains_sensitive_url_path,
     decode_safe_url_path,
 )
@@ -232,16 +235,20 @@ class LimitedByteStream(httpx.AsyncByteStream):
         self._forbidden_values = forbidden_values
         self._mark_sensitive_response = mark_sensitive_response
         self._tail = b""
+        self._raw_body = bytearray()
         self._tail_limit = max((len(value) for value in forbidden_values), default=0) * 6 + 256
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         async for chunk in self._stream:
             self._budget.consume(len(chunk))
+            self._raw_body.extend(chunk)
             window = self._tail + chunk
             decoded_window = _decode_visible_json_escapes(window)
-            if any(
-                value in decoded_window for value in self._forbidden_values
-            ) or contains_obvious_secret(decoded_window.decode("utf-8", errors="ignore")):
+            if (
+                any(value in decoded_window for value in self._forbidden_values)
+                or contains_obvious_secret(decoded_window.decode("utf-8", errors="ignore"))
+                or _contains_sensitive_structured_response(bytes(self._raw_body))
+            ):
                 self._mark_sensitive_response()
                 raise EndpointPolicyError("sensitive upstream response body")
             self._tail = window[-self._tail_limit :]
@@ -290,6 +297,35 @@ def _decode_visible_json_escapes(value: bytes) -> bytes:
         decoded.append(value[index])
         index += 1
     return bytes(decoded)
+
+
+def _contains_sensitive_structured_response(value: bytes) -> bool:
+    """Screen complete JSON documents and completed SSE JSON events."""
+
+    try:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    candidates = [text]
+    completed_events = re.split(r"\r?\n\r?\n", text)
+    if not re.search(r"\r?\n\r?\n\Z", text):
+        completed_events.pop()
+    for event in completed_events:
+        data_lines = [
+            line.partition(":")[2].lstrip()
+            for line in event.splitlines()
+            if line.startswith("data:")
+        ]
+        if data_lines:
+            candidates.append("\n".join(data_lines))
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, RecursionError):
+            continue
+        if contains_sensitive_json(parsed):
+            return True
+    return False
 
 
 class RawByteBudget:

@@ -617,6 +617,7 @@ class DiscoveryRefreshJob(Base):
 
     id: Mapped[UuidPrimaryKey]
     workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     connection_id: Mapped[UUID]
     connection_version_id: Mapped[UUID]
     generation: Mapped[int] = mapped_column(Integer)

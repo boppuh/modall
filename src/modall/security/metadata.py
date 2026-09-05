@@ -101,7 +101,7 @@ def _is_auth_mode(value: str) -> bool:
 
 
 def _looks_like_marker_suffix(value: str) -> bool:
-    return any(character.isdigit() for character in value) and _looks_like_opaque_value(value)
+    return _looks_like_opaque_value(value)
 
 
 def contains_sensitive_hostname(hostname: str) -> bool:
@@ -407,6 +407,12 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
                     and _is_auth_mode(child)
                     and (sensitive_context or (key_is_sensitive and "auth" in key.lower()))
                 )
+                child_is_expiration_metadata = (
+                    key_is_sensitive
+                    and isinstance(child, (int, float))
+                    and not isinstance(child, bool)
+                    and _is_expiration_field(key)
+                )
                 if (
                     key_is_sensitive
                     and isinstance(child, str)
@@ -423,7 +429,9 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
                         if isinstance(literal, list):
                             literals.extend(literal)
                 next_sensitive_context = (
-                    False if child_is_auth_mode else sensitive_context or key_is_sensitive
+                    False
+                    if child_is_auth_mode or child_is_expiration_metadata
+                    else sensitive_context or key_is_sensitive
                 )
                 stack.append((child, next_sensitive_context))
         elif isinstance(current, list):
@@ -442,3 +450,9 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
         ):
             return True
     return False
+
+
+def _is_expiration_field(key: str) -> bool:
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key).lower()
+    words = {word for word in re.split(r"[^a-z0-9]+", normalized) if word}
+    return bool(words & {"expiration", "expires", "expiry", "lifetime", "ttl"})

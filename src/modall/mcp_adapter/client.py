@@ -52,7 +52,16 @@ class _SuppressUntrustedSdkLogs(logging.Filter):
 
 
 _SDK_LOG_FILTER = _SuppressUntrustedSdkLogs()
-_SDK_LOGGER_NAMES = ("mcp.client.session", "mcp.client.streamable_http")
+_SDK_LOGGER_NAMES = (
+    "mcp.client.session",
+    "mcp.client.streamable_http",
+    "httpcore",
+    "httpcore.connection",
+    "httpcore.http11",
+    "httpcore.http2",
+    "httpcore.proxy",
+    "httpx",
+)
 _SDK_LOG_LOCK = Lock()
 _SDK_LOG_USERS = 0
 
