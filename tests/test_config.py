@@ -6,7 +6,8 @@ from pydantic import ValidationError
 from modall.config import Settings
 
 
-def test_settings_use_safe_local_defaults() -> None:
+def test_settings_use_safe_local_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MODALL_DATABASE_URL", raising=False)
     settings = Settings(_env_file=None)
 
     assert settings.environment == "local"
