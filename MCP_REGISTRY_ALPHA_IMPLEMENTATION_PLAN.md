@@ -240,7 +240,7 @@ An ADR may change a choice before implementation. Public and domain contracts mu
 | `secret_bindings` | Opaque provider/reference/version metadata; never secret material |
 | `registry_entries`, `registry_entry_versions` | Imported or manual catalog metadata and provenance |
 | `server_connections`, `server_connection_versions` | Stable connection identity, current verified version, and monotonic refresh generation plus immutable endpoint/credential configuration |
-| `discovery_snapshots` | Immutable bounded normalized discovery payload, canonical digest, and publishing refresh generation |
+| `discovery_payloads`, `discovery_snapshots` | Content-addressed bounded normalized discovery payloads plus immutable per-refresh observations that reference a payload, canonical digest, and publishing generation |
 | `capabilities`, `capability_versions` | Stable logical tool identity and immutable schema/metadata version |
 | `mcp_tool_bindings` | Exact capability-version to connection-version/tool/protocol binding |
 | `capability_status_events` | Append-only enable/disable/unavailable decisions |
@@ -256,7 +256,7 @@ An ADR may change a choice before implementation. Public and domain contracts mu
 - A connection version is immutable and pins endpoint, secret-binding version, transport, and policy.
 - A capability version is immutable and pins schemas plus exactly one MCP tool binding.
 - An MCP tool binding is executable only while its connection version is the connection's exact current verified version and its observed tool identity/schema remains present in the current published discovery snapshot. Connection-version replacement or schema/tool drift transitions every superseded binding out of executable state before new admission or fencing.
-- Refresh appends a discovery snapshot and any changed capability versions.
+- Every successful refresh appends an immutable discovery observation, including when its canonical payload is unchanged; normalized payload blobs and derived capability versions may deduplicate by canonical digest.
 - Every verification/refresh job receives a monotonically increasing connection-scoped generation; only the latest-started generation may publish a snapshot or health projection.
 - A capability status projection changes through append-only events.
 - A run pins one capability version before enqueue and never changes target.
@@ -265,12 +265,14 @@ An ADR may change a choice before implementation. Public and domain contracts mu
 - Terminal run states are immutable except for separately appended reconciliation detail.
 - Mutating API idempotency is unique by workspace, actor, method, route, and HMAC-derived key. A separate versioned server-HMAC covers the canonical capability/connection/request body; matching reuse replays the original resource and mismatching reuse returns `idempotency_conflict`, including after argument content expires.
 - Audit rows contain typed identifiers/enums, not arguments, results, schemas, secrets, or raw upstream errors.
+- Every audited domain mutation and its audit event commit in the same database transaction; work whose evidence cannot commit has no visible domain effect.
 
 ### 6.3 Retention
 
 - Retained arguments and any retained result/error content for every terminal run state—including succeeded, failed, timed out, cancelled, and indeterminate—expire after 14 days by default.
 - Run status, timing, exact version lineage, and safe error code: 90 days.
-- Discovery snapshots and capability versions: retained while referenced by an enabled capability or retained run, then eligible for deletion.
+- Run idempotency records retain their request HMAC after argument expiry and are retained exactly while the referenced run metadata is retained; they are deleted atomically with that run and never outlive it. Other mutation idempotency records never outlive their referenced resource or that resource's defined replay window.
+- Discovery observations, payloads, and capability versions are retained while referenced by the connection's current snapshot projection, a pending-review version, an enabled capability, or a retained run; only unreferenced history is deletion-eligible.
 - Audit events: 180 days for the alpha.
 - Registry search cache: at most one hour.
 
@@ -281,7 +283,7 @@ Deletion is ordinary database/object deletion under managed encryption-at-rest g
 ### 7.1 Endpoint policy
 
 - Deployed connections require HTTPS and an explicit host.
-- Userinfo, fragments, non-default schemes, malformed hosts, and overlong URLs are rejected.
+- Userinfo, query strings, fragments, non-default schemes, malformed hosts, and overlong URLs are rejected in `v0.1.0`; credentials are supplied only through opaque secret bindings and never encoded in a persisted endpoint.
 - DNS resolution and connection traffic pass through deployment network controls that deny loopback, link-local, private, multicast, reserved, and cloud-metadata destinations.
 - Redirects are disabled for verification, discovery, and invocation in `v0.1.0`.
 - The worker has no ambient access to the database admin interface, secret-provider control plane, or internal service network beyond required destinations.
@@ -431,7 +433,7 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 | E1-T2 | Integrate OIDC and explicit local-development principal | Deployed/local modes cannot be confused |
 | E1-T3 | Implement workspace-scoped repository boundary and database constraints | Cross-workspace ID probes fail closed |
 | E1-T4 | Implement secret-binding abstraction and deployment provider | Secret values never persist or appear in API/telemetry fixtures |
-| E1-T5 | Implement typed audit events and correlation propagation | Required mutations emit payload-free audit evidence |
+| E1-T5 | Implement typed audit events and correlation propagation | Required mutations and payload-free audit evidence commit atomically; failure injection proves neither can commit alone |
 
 ### E2 — Registry and MCP discovery — 4–5 person-weeks
 
@@ -440,7 +442,7 @@ Effort ranges include implementation, tests, review, and documentation. Work wit
 | E2-T1 | Implement registry entries, connections, immutable connection versions, and lifecycle | Invalid transitions and mutable-version writes fail |
 | E2-T2 | Implement constrained MCP transport and endpoint policy | SSRF, DNS, scheme, TLS, redirect, timeout, and size fixtures pass |
 | E2-T3 | Wrap the pinned SDK and qualify initialization, safe-regex schema handling, bounded validation, and paginated discovery | Recorded protocol and adversarial schema-timing suites pass without SDK leakage into domain types |
-| E2-T4 | Implement bounded normalized snapshots and canonical identity | Equivalent snapshots deduplicate; changed snapshots append |
+| E2-T4 | Implement bounded normalized payloads, immutable refresh observations, and canonical identity | Every successful refresh appends its generation observation; equivalent payloads and unchanged derived versions deduplicate without losing lineage |
 | E2-T5 | Implement capabilities, immutable versions, bindings, and status events | Drift creates pending versions and preserves enabled history |
 | E2-T6 | Implement explicit/scheduled refresh, monotonic generations, current-snapshot health, and overlapping-job protection | Only the latest-started eligible generation publishes; its failure preserves snapshot but degrades health, while obsolete/disabled/superseded work changes neither |
 
@@ -553,10 +555,13 @@ Critical path:
 - disable/refresh/invocation races;
 - configuration-version append/reverification and disable-during-discovery races;
 - overlapping refresh generation races where an older completion cannot replace the latest snapshot or health;
+- unchanged refreshes append distinct generation observations while reusing the canonical payload and unchanged capability versions;
 - latest eligible discovery timeout/invalid/secret result preserves the snapshot but records degraded health; obsolete or disabled failures cannot mutate health;
+- endpoint validation rejects credential-like and otherwise present query strings before configuration persistence;
 - secret retrieval and telemetry redaction;
+- failure injection at audited mutation boundaries proves domain state and its audit event commit or roll back together;
 - concurrent idempotency and refresh;
-- same-key changed-request conflict after retained arguments expire;
+- same-key changed-request conflict after retained arguments expire, followed by atomic idempotency cleanup when its run metadata expires;
 - pre-storage result rejection, output-schema mismatch suppression, all-terminal-state retention cleanup, and backup restoration.
 
 ### End to end
