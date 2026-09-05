@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 PROTOCOL_REVISION = "2025-06-18"
 FIXTURE_TOKEN = "fixture-token-not-a-real-secret"
 ESCAPED_FIXTURE_TOKEN = 'opaque"slash\\token123'
+NUMERIC_FIXTURE_TOKEN = "12345678"
 AUTHENTICATED_PROFILES = {
     "authenticated",
     "authenticated-redirect",
@@ -18,6 +19,7 @@ AUTHENTICATED_PROFILES = {
     "authenticated-redirect-on-call",
     "credential-leak",
     "credential-escaped-leak",
+    "credential-numeric-leak",
 }
 SUPPORTED_PROFILES = {
     "default",
@@ -109,6 +111,8 @@ def _tools(profile: str) -> list[dict[str, Any]]:
         first_tool["_meta"] = {"api_key": {"value": "abcdefgh1234"}}
     if profile == "composite-structured-secret":
         first_tool["_meta"] = {"client_secret": "abcdefgh1234"}
+    if profile == "credential-numeric-leak":
+        first_tool["_meta"] = {"value": 12345678}
     if profile == "oversized-metadata":
         first_tool["_meta"] = {"annotation": "x" * 8193}
     return [
@@ -169,9 +173,12 @@ def create_mcp_fixture_app() -> FastAPI:
     ) -> Response:
         if profile not in SUPPORTED_PROFILES:
             return JSONResponse({"error": "unknown fixture profile"}, status_code=404)
-        expected_token = (
-            ESCAPED_FIXTURE_TOKEN if profile == "credential-escaped-leak" else FIXTURE_TOKEN
-        )
+        if profile == "credential-escaped-leak":
+            expected_token = ESCAPED_FIXTURE_TOKEN
+        elif profile == "credential-numeric-leak":
+            expected_token = NUMERIC_FIXTURE_TOKEN
+        else:
+            expected_token = FIXTURE_TOKEN
         if profile in AUTHENTICATED_PROFILES and authorization != f"Bearer {expected_token}":
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         if profile not in AUTHENTICATED_PROFILES and authorization is not None:

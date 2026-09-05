@@ -16,13 +16,19 @@ from modall.persistence.models import (
     Capability,
     CapabilityStatusEvent,
     CapabilityVersion,
+    DiscoveryRefreshJob,
     DiscoverySnapshotCapability,
     McpToolBinding,
     SecretBinding,
     ServerConnection,
     ServerConnectionVersion,
 )
-from modall.registry.types import CapabilityStatus, ConnectionLifecycle, Transport
+from modall.registry.types import (
+    CapabilityStatus,
+    ConnectionLifecycle,
+    RefreshJobStatus,
+    Transport,
+)
 from modall.security.endpoints import normalize_endpoint_host
 from modall.security.metadata import (
     contains_obvious_secret,
@@ -208,6 +214,23 @@ class ConnectionService:
         connection.control_epoch += 1
         connection.allocated_control_epoch = None
         connection.allocated_target_version_id = None
+        outstanding_jobs = (
+            await self._session.scalars(
+                select(DiscoveryRefreshJob)
+                .where(
+                    DiscoveryRefreshJob.workspace_id == context.workspace_id,
+                    DiscoveryRefreshJob.connection_id == connection_id,
+                    DiscoveryRefreshJob.status.in_(
+                        (RefreshJobStatus.QUEUED.value, RefreshJobStatus.LEASED.value)
+                    ),
+                )
+                .with_for_update()
+            )
+        ).all()
+        for job in outstanding_jobs:
+            job.status = RefreshJobStatus.OBSOLETE.value
+            job.lease_owner = None
+            job.lease_expires_at = None
         self._audit(context, AuditAction.CONNECTION_DISABLED, connection.id, correlation_id)
         await self._session.flush()
         return connection
@@ -528,6 +551,13 @@ class CapabilityService:
                     capability.pending_version_id = None
                     if capability.typed_status != CapabilityStatus.DISABLED:
                         capability.status = CapabilityStatus.ENABLED.value
+                    capability.status_epoch += 1
+                    self._append_status_event(context, capability, existing.id)
+                elif (
+                    existing.id == capability.enabled_version_id
+                    and capability.typed_status == CapabilityStatus.UNAVAILABLE
+                ):
+                    capability.status = CapabilityStatus.ENABLED.value
                     capability.status_epoch += 1
                     self._append_status_event(context, capability, existing.id)
                 elif (

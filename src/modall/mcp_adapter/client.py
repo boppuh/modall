@@ -239,7 +239,10 @@ class McpClientAdapter:
             or contains_sensitive_json(payload)
             or (
                 credential_text is not None
-                and _contains_decoded_credential(payload, credential_text)
+                and (
+                    credential_text.encode("ascii") in canonical
+                    or _contains_decoded_credential(payload, credential_text)
+                )
             )
         ):
             raise DiscoveryError("discovery metadata failed secret screening")

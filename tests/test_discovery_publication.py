@@ -30,6 +30,7 @@ from modall.persistence.models import (
     CapabilityStatusEvent,
     CapabilityVersion,
     DiscoveryPayload,
+    DiscoveryRefreshJob,
     DiscoverySnapshot,
     ServerConnection,
     utc_now,
@@ -46,7 +47,12 @@ from modall.registry.service import (
     InvalidCapabilityTransition,
     InvalidConnectionTransition,
 )
-from modall.registry.types import CapabilityStatus, ConnectionLifecycle, DiscoveryFailureCode
+from modall.registry.types import (
+    CapabilityStatus,
+    ConnectionLifecycle,
+    DiscoveryFailureCode,
+    RefreshJobStatus,
+)
 from modall.secrets.provider import FixtureSecretProvider, SecretProviderError
 from tests.test_registry import admin_context, bootstrap, database
 
@@ -268,6 +274,113 @@ def test_manual_disable_survives_drift_disappearance_and_reversion() -> None:
                 assert (
                     await session.scalar(select(func.count()).select_from(CapabilityVersion)) == 2
                 )
+
+    asyncio.run(scenario())
+
+
+def test_enabled_capability_reappears_without_reapproval() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="enabled-reappearance-admin")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Enabled reappearance",
+                    endpoint_url="https://mcp.example/enabled-reappearance",
+                    secret_binding_id=None,
+                    policy_version="policy-v1",
+                )
+                connection_id = connection.id
+                first_lease = await lease_for(session, context, connection_id, "worker-1")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context, lease=first_lease, result=result_for()
+                )
+                capability = await session.scalar(
+                    select(Capability).where(Capability.connection_id == connection_id)
+                )
+                assert capability is not None and capability.pending_version_id is not None
+                approved_version_id = capability.pending_version_id
+                await CapabilityService(session).enable(
+                    context=context,
+                    capability_id=capability.id,
+                    expected_version_id=approved_version_id,
+                )
+
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                missing_lease = await lease_for(session, context, connection_id, "worker-2")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context,
+                    lease=missing_lease,
+                    result=result_for(include_tool=False),
+                )
+
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                return_lease = await lease_for(session, context, connection_id, "worker-3")
+                await DiscoveryPublicationService(session).publish_success(
+                    context=context, lease=return_lease, result=result_for()
+                )
+                capability = await session.scalar(
+                    select(Capability).where(Capability.connection_id == connection_id)
+                )
+                assert capability is not None
+                assert capability.typed_status == CapabilityStatus.ENABLED
+                assert capability.enabled_version_id == approved_version_id
+                assert capability.pending_version_id is None
+                assert (
+                    await session.scalar(select(func.count()).select_from(CapabilityVersion)) == 1
+                )
+
+    asyncio.run(scenario())
+
+
+def test_connection_disable_obsoletes_queued_and_leased_refresh_jobs() -> None:
+    async def scenario() -> None:
+        async with database() as factory:
+            admin_id, workspace_id = await bootstrap(factory, subject="disable-jobs-admin")
+            async with transaction(factory) as session:
+                context = await admin_context(session, user_id=admin_id, workspace_id=workspace_id)
+                queued_connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Queued refresh",
+                    endpoint_url="https://mcp.example/queued",
+                    secret_binding_id=None,
+                    policy_version="policy-v1",
+                )
+                leased_connection = await ConnectionService(session).create(
+                    context=context,
+                    name="Leased refresh",
+                    endpoint_url="https://mcp.example/leased",
+                    secret_binding_id=None,
+                    policy_version="policy-v1",
+                )
+                queued_job = await RefreshJobService(session).enqueue(
+                    context=context, connection_id=queued_connection.id
+                )
+                leased_job = await RefreshJobService(session).enqueue(
+                    context=context, connection_id=leased_connection.id
+                )
+                await RefreshJobService(session).claim(
+                    context=context,
+                    job_id=leased_job.id,
+                    worker_id="worker",
+                    lease_duration=timedelta(minutes=1),
+                )
+
+                await ConnectionService(session).disable(
+                    context=context, connection_id=queued_connection.id
+                )
+                await ConnectionService(session).disable(
+                    context=context, connection_id=leased_connection.id
+                )
+                for job_id in (queued_job.id, leased_job.id):
+                    job = await session.get(DiscoveryRefreshJob, job_id)
+                    assert job is not None
+                    assert job.status == RefreshJobStatus.OBSOLETE.value
+                    assert job.lease_owner is None
+                    assert job.lease_expires_at is None
 
     asyncio.run(scenario())
 

@@ -27,6 +27,7 @@ from modall.mcp_adapter.policy import (
 from tests.support.mcp_fixture_server import (
     ESCAPED_FIXTURE_TOKEN,
     FIXTURE_TOKEN,
+    NUMERIC_FIXTURE_TOKEN,
     create_mcp_fixture_app,
 )
 
@@ -137,6 +138,10 @@ def test_adapter_fails_closed_on_protocol_limits_faults_and_secret_echo() -> Non
         escaped_leaking, endpoint = adapter_for("credential-escaped-leak")
         with pytest.raises(DiscoveryError, match="secret screening"):
             await escaped_leaking.discover(endpoint, bearer_token=ESCAPED_FIXTURE_TOKEN.encode())
+
+        numeric_leaking, endpoint = adapter_for("credential-numeric-leak")
+        with pytest.raises(DiscoveryError, match="secret screening"):
+            await numeric_leaking.discover(endpoint, bearer_token=NUMERIC_FIXTURE_TOKEN.encode())
 
         for profile in (
             "structured-secret",
