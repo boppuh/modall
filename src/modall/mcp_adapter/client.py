@@ -428,6 +428,9 @@ class McpClientAdapter:
                 )
                 await before_dispatch()
                 received = await session.call_tool(tool_name, arguments=arguments)
+        except asyncio.CancelledError:
+            if received is None:
+                raise
         except Exception:
             if received is None:
                 raise

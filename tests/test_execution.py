@@ -703,7 +703,11 @@ def test_claim_terminalizes_work_with_stale_pinned_authority() -> None:
 def test_restore_quarantine_fences_old_jobs_and_retention_erases_content() -> None:
     async def scenario() -> None:
         current = datetime(2026, 9, 6, tzinfo=UTC)
-        limits = ExecutionLimits(argument_retention_days=1, run_retention_days=2)
+        limits = ExecutionLimits(
+            argument_retention_days=1,
+            result_retention_days=1,
+            run_retention_days=2,
+        )
         async with database() as factory:
             user_id, workspace_id = await bootstrap(factory, subject="restore")
             async with transaction(factory) as session:
@@ -1652,6 +1656,12 @@ def test_confirmation_limits_expiry_and_key_configuration_fail_closed(
                 ExecutionLimits(schema_validation_memory_bytes=32 * 1024 * 1024)
             with pytest.raises(ValueError, match="invalid execution limits"):
                 ExecutionLimits(schema_validation_memory_bytes=512 * 1024 * 1024)
+            with pytest.raises(ValueError, match="invalid execution limits"):
+                ExecutionLimits(
+                    argument_retention_days=1,
+                    result_retention_days=14,
+                    run_retention_days=1,
+                )
             with pytest.raises(ValueError, match="run event history is empty"):
                 ExecutionService.replay_projection([])
             with pytest.raises(ValueError, match="invalid cleanup batch"):

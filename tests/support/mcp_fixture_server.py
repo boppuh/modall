@@ -38,6 +38,7 @@ SUPPORTED_PROFILES = {
     "oversized",
     "timeout",
     "timeout-on-call",
+    "teardown-timeout",
     "disconnect",
     "disconnect-on-call",
     "invalid-call-result",
@@ -241,6 +242,14 @@ def create_mcp_fixture_app() -> FastAPI:
     next_session = count(1)
     drift_generations: dict[str, int] = {}
     sessions: dict[str, tuple[str, str, bool, str]] = {}
+
+    @app.delete("/mcp/{profile}")
+    async def terminate(profile: str) -> Response:
+        """Exercise bounded client-session teardown without exposing payloads."""
+
+        if profile.removeprefix("case-") == "teardown-timeout":
+            await asyncio.sleep(0.1)
+        return Response(status_code=204)
 
     @app.post("/mcp/{profile}")
     async def mcp(

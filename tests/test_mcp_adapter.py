@@ -347,6 +347,19 @@ def test_adapter_invokes_once_between_fences_and_normalizes_safe_results() -> No
                 before_dispatch=dispatch_fence,
             )
 
+        teardown, teardown_endpoint = adapter_for(
+            "teardown-timeout", limits=TransportLimits(read_seconds=0.2, total_seconds=0.05)
+        )
+        teardown_result = await teardown.invoke(
+            teardown_endpoint,
+            tool_name="status",
+            arguments={},
+            output_schema=None,
+            before_session=session_fence,
+            before_dispatch=dispatch_fence,
+        )
+        assert teardown_result.payload["content"] == [{"type": "text", "text": "fixture healthy"}]
+
         initializing, initializing_endpoint = adapter_for("protocol-mismatch")
         with pytest.raises(InvocationError) as initialization_failure:
             await initializing.invoke(

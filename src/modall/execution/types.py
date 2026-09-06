@@ -126,6 +126,7 @@ class ExecutionLimits:
             or not 1 <= self.argument_retention_days <= 14
             or not 1 <= self.result_retention_days <= 14
             or self.run_retention_days < self.argument_retention_days
+            or self.run_retention_days < self.result_retention_days
             or self.max_idempotency_key_characters <= 0
             or not 1 <= self.max_historical_hmac_keys <= 16
             or not 0 < self.schema_validation_timeout_seconds <= 5
