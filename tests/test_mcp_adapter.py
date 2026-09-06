@@ -9,6 +9,7 @@ import httpcore
 import httpx
 import pytest
 
+from modall.execution import validation as schema_validation
 from modall.mcp_adapter.client import (
     CredentialError,
     DiscoveryError,
@@ -63,6 +64,8 @@ def adapter_for(
     max_pages: int = 16,
     max_tools: int = 512,
     limits: TransportLimits | None = None,
+    schema_validation_timeout_seconds: float = 2.0,
+    schema_validation_memory_bytes: int = 256 * 1024 * 1024,
 ) -> tuple[McpClientAdapter, str]:
     fixture_app = app or create_mcp_fixture_app()
     return (
@@ -74,6 +77,8 @@ def adapter_for(
             limits=limits,
             max_pages=max_pages,
             max_tools=max_tools,
+            schema_validation_timeout_seconds=schema_validation_timeout_seconds,
+            schema_validation_memory_bytes=schema_validation_memory_bytes,
             transport=httpx.ASGITransport(app=fixture_app),  # type: ignore[arg-type]
         ),
         f"https://fixture/mcp/case-{profile}",
@@ -300,12 +305,13 @@ def test_adapter_invokes_once_between_fences_and_normalizes_safe_results() -> No
                     before_session=session_fence,
                     before_dispatch=dispatch_fence,
                 )
-            assert invalid.value.code == InvocationFailureCode.SESSION_INITIALIZATION_FAILED
+            assert invalid.value.code == InvocationFailureCode.PREPARATION_FAILED
 
         for tool, expected in (
             ("unsupported-content", InvocationFailureCode.UNSUPPORTED_RESULT_CONTENT),
             ("invalid-output", InvocationFailureCode.INVALID_UPSTREAM_OUTPUT),
             ("fail", InvocationFailureCode.TOOL_CALL_FAILED),
+            ("rpc-error", InvocationFailureCode.TOOL_CALL_FAILED),
         ):
             rejected, rejected_endpoint = adapter_for("default")
             with pytest.raises(InvocationError) as failure:
@@ -354,6 +360,80 @@ def test_adapter_invokes_once_between_fences_and_normalizes_safe_results() -> No
         assert (
             initialization_failure.value.code == InvocationFailureCode.SESSION_INITIALIZATION_FAILED
         )
+
+    asyncio.run(scenario())
+
+
+def test_invocation_uses_configured_output_validation_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[float, int]] = []
+
+    async def validate(
+        arguments: object,
+        schema: object,
+        *,
+        timeout_seconds: float,
+        memory_limit_bytes: int,
+    ) -> schema_validation.SchemaValidationResult:
+        del arguments, schema
+        observed.append((timeout_seconds, memory_limit_bytes))
+        return schema_validation.SchemaValidationResult.VALID
+
+    monkeypatch.setattr(schema_validation, "validate_schema_arguments", validate)
+
+    async def scenario() -> None:
+        client, endpoint = adapter_for(
+            "default",
+            schema_validation_timeout_seconds=0.25,
+            schema_validation_memory_bytes=64 * 1024 * 1024,
+        )
+
+        async def fence() -> None:
+            return None
+
+        await client.invoke(
+            endpoint,
+            tool_name="echo",
+            arguments={"message": "bounded"},
+            output_schema={"type": "object"},
+            before_session=fence,
+            before_dispatch=fence,
+        )
+
+    asyncio.run(scenario())
+    assert observed == [(0.25, 64 * 1024 * 1024)]
+
+
+def test_post_response_validation_timeout_is_a_definitive_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def validate(*args: object, **kwargs: object) -> schema_validation.SchemaValidationResult:
+        del args, kwargs
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(schema_validation, "validate_schema_arguments", validate)
+
+    async def scenario() -> None:
+        client, endpoint = adapter_for(
+            "default", limits=TransportLimits(read_seconds=0.1, total_seconds=0.05)
+        )
+
+        async def fence() -> None:
+            return None
+
+        with pytest.raises(InvocationError) as failure:
+            await client.invoke(
+                endpoint,
+                tool_name="echo",
+                arguments={"message": "bounded"},
+                output_schema={"type": "object"},
+                before_session=fence,
+                before_dispatch=fence,
+            )
+        assert type(failure.value) is InvocationError
+        assert failure.value.code == InvocationFailureCode.INVALID_UPSTREAM_OUTPUT
 
     asyncio.run(scenario())
 

@@ -646,6 +646,8 @@ class ExecutionService:
         except Exception as exc:
             raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS) from exc
         run = await self.complete_lease(lease, status=RunStatus.SUCCEEDED)
+        if run.status != RunStatus.SUCCEEDED.value:
+            return run
         captured_at = (
             _utc(run.terminal_at) if run.terminal_at is not None else await self._durable_now()
         )
@@ -1677,6 +1679,8 @@ class ExecutionService:
                 RunStatus.DISPATCH_FENCED: {
                     RunFailureCode.TOOL_CALL_FAILED,
                     RunFailureCode.INVALID_TOOL_RESULT,
+                    RunFailureCode.UNSUPPORTED_TOOL_RESULT,
+                    RunFailureCode.SENSITIVE_TOOL_RESULT,
                 },
             }
             return safe_error_code in allowed_codes.get(source, set())

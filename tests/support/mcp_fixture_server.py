@@ -391,6 +391,14 @@ def create_mcp_fixture_app() -> FastAPI:
             params = payload.get("params", {})
             name = params.get("name")
             arguments = params.get("arguments", {})
+            if name == "rpc-error":
+                return JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {"code": -32601, "message": "fixture method unavailable"},
+                    }
+                )
             if name == "echo":
                 message = arguments.get("message", "")
                 return JSONResponse(

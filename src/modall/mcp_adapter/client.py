@@ -22,6 +22,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import McpError
 from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012
@@ -105,6 +106,7 @@ class SensitiveResponseError(DiscoveryError):
 
 
 class InvocationFailureCode(StrEnum):
+    PREPARATION_FAILED = "preparation_failed"
     SESSION_INITIALIZATION_FAILED = "session_initialization_failed"
     TOOL_CALL_FAILED = "tool_call_failed"
     UNSUPPORTED_RESULT_CONTENT = "unsupported_result_content"
@@ -164,14 +166,24 @@ class McpClientAdapter:
         limits: TransportLimits | None = None,
         max_pages: int = 16,
         max_tools: int = 512,
+        schema_validation_timeout_seconds: float = 2.0,
+        schema_validation_memory_bytes: int = 256 * 1024 * 1024,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        if max_pages < 1 or max_tools < 1:
-            raise ValueError("discovery limits must be positive")
+        if (
+            max_pages < 1
+            or max_tools < 1
+            or not 0 < schema_validation_timeout_seconds <= 5
+            or not math.isfinite(schema_validation_timeout_seconds)
+            or not 64 * 1024 * 1024 <= schema_validation_memory_bytes <= 256 * 1024 * 1024
+        ):
+            raise ValueError("invalid adapter limits")
         self._endpoint_policy = endpoint_policy
         self._limits = limits or TransportLimits()
         self._max_pages = max_pages
         self._max_tools = max_tools
+        self._schema_validation_timeout_seconds = schema_validation_timeout_seconds
+        self._schema_validation_memory_bytes = schema_validation_memory_bytes
         self._transport = transport
 
     async def discover(
@@ -259,20 +271,21 @@ class McpClientAdapter:
         credential_text: str | None = None
         if bearer_token is not None:
             if not endpoint.lower().startswith("https://"):
-                raise InvocationError(InvocationFailureCode.SESSION_INITIALIZATION_FAILED)
+                raise InvocationError(InvocationFailureCode.PREPARATION_FAILED)
             try:
                 credential_text = bytes(bearer_token).decode("ascii")
             except UnicodeDecodeError as exc:
-                raise InvocationError(InvocationFailureCode.SESSION_INITIALIZATION_FAILED) from exc
+                raise InvocationError(InvocationFailureCode.PREPARATION_FAILED) from exc
             if (
                 len(credential_text) < 16
                 or len(credential_text) > 4096
                 or any(not 33 <= ord(character) <= 126 for character in credential_text)
                 or _credential_entropy_bits(credential_text) < 64
             ):
-                raise InvocationError(InvocationFailureCode.SESSION_INITIALIZATION_FAILED)
+                raise InvocationError(InvocationFailureCode.PREPARATION_FAILED)
             headers["Authorization"] = f"Bearer {credential_text}"
         dispatched = False
+        response_received = False
         transport: LimitedTransport | None = None
         try:
             await before_session()
@@ -311,6 +324,7 @@ class McpClientAdapter:
                         arguments,
                         dispatch,
                     )
+                response_received = True
                 if transport.sensitive_response_detected:
                     raise InvocationError(
                         InvocationFailureCode.SENSITIVE_RESULT, dispatched=dispatched
@@ -336,6 +350,11 @@ class McpClientAdapter:
                     InvocationFailureCode.SENSITIVE_RESULT, dispatched=dispatched
                 ) from exc
             if dispatched:
+                if response_received:
+                    raise InvocationError(
+                        InvocationFailureCode.INVALID_UPSTREAM_OUTPUT,
+                        dispatched=True,
+                    ) from exc
                 raise InvocationIndeterminate(
                     InvocationFailureCode.TOOL_CALL_FAILED, dispatched=True
                 ) from exc
@@ -382,7 +401,12 @@ class McpClientAdapter:
                     types.ClientNotification(types.InitializedNotification())
                 )
                 await before_dispatch()
-                received = await session.call_tool(tool_name, arguments=arguments)
+                try:
+                    received = await session.call_tool(tool_name, arguments=arguments)
+                except McpError as exc:
+                    raise InvocationError(
+                        InvocationFailureCode.TOOL_CALL_FAILED, dispatched=True
+                    ) from exc
         except Exception:
             if received is None:
                 raise
@@ -440,8 +464,8 @@ class McpClientAdapter:
             validation = await validate_schema_arguments(
                 structured,
                 output_schema,
-                timeout_seconds=min(self._limits.total_seconds, 5.0),
-                memory_limit_bytes=256 * 1024 * 1024,
+                timeout_seconds=self._schema_validation_timeout_seconds,
+                memory_limit_bytes=self._schema_validation_memory_bytes,
             )
             if validation is not SchemaValidationResult.VALID:
                 raise InvocationError(

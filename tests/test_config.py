@@ -69,6 +69,15 @@ def test_deployed_security_mode_requires_oidc_and_mounted_secrets() -> None:
 
 
 @pytest.mark.parametrize(
+    "versions",
+    [(), ("duplicate", "duplicate"), ("contains space",), tuple(str(i) for i in range(9))],
+)
+def test_hmac_key_versions_are_bounded_and_unique(versions: tuple[str, ...]) -> None:
+    with pytest.raises(ValidationError, match="invalid HMAC key versions"):
+        Settings(_env_file=None, confirmation_hmac_key_versions=versions)
+
+
+@pytest.mark.parametrize(
     "issuer",
     [
         "https://user@issuer.example",

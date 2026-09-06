@@ -44,6 +44,12 @@ encoding of the version (for example, `api-token`/`v2` maps to `YXBpLXRva2Vu.djI
 stores only the opaque reference and version. Bindings whose encoded filename exceeds the portable
 255-byte component limit are rejected before persistence.
 
-The API and worker are intentionally thin in this foundation PR. Persistence, identity,
-registry, discovery, execution, and operator workflows land in the independently reviewed
-slices listed in the implementation plan.
+The worker loads confirmation and idempotency HMAC key versions from the same provider using the
+fixed references `system-confirmation-hmac` and `system-idempotency-hmac`. Configure active-first
+version lists with `MODALL_CONFIRMATION_HMAC_KEY_VERSIONS` and
+`MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS`; deployed mounted-file environments must project the
+corresponding encoded files before the worker starts.
+
+The API remains intentionally thin while the independently reviewed control-plane and operator
+workflow slices land. The worker already claims durable invocation jobs and performs bounded
+maintenance.

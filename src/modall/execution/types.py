@@ -74,6 +74,8 @@ class RunFailureCode(StrEnum):
     SESSION_INITIALIZATION_FAILED = "session_initialization_failed"
     TOOL_CALL_FAILED = "tool_call_failed"
     INVALID_TOOL_RESULT = "invalid_tool_result"
+    UNSUPPORTED_TOOL_RESULT = "unsupported_tool_result"
+    SENSITIVE_TOOL_RESULT = "sensitive_tool_result"
     UPSTREAM_OUTCOME_UNKNOWN = "upstream_outcome_unknown"
 
 

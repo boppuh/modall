@@ -4,7 +4,9 @@ import logging
 import pytest
 
 from modall.config import Settings
-from modall.persistence.database import create_engine
+from modall.execution.runner import InvocationRunner
+from modall.execution.service import ExecutionService
+from modall.persistence.database import create_engine, create_session_factory
 from modall.worker import main
 from modall.worker.main import configure_logging, run_once
 
@@ -46,7 +48,22 @@ def test_worker_runs_global_registry_cache_cleanup(
         )
         engine = create_engine("sqlite+aiosqlite:///:memory:")
         cleanups = 0
+        result_cleanups = 0
+        invocation_polls = 0
         sleeps: list[float] = []
+
+        class FakeRunner:
+            async def claim_and_run(self, **kwargs: object) -> bool:
+                nonlocal invocation_polls
+                del kwargs
+                invocation_polls += 1
+                return False
+
+        class FakeExecutionService:
+            async def expire_retained_results(self) -> int:
+                nonlocal result_cleanups
+                result_cleanups += 1
+                return 0
 
         async def cleanup(session: object) -> None:
             nonlocal cleanups
@@ -62,11 +79,21 @@ def test_worker_runs_global_registry_cache_cleanup(
             raise asyncio.CancelledError
 
         monkeypatch.setattr(main, "create_engine", lambda database_url: engine)
+        monkeypatch.setattr(
+            main,
+            "build_execution_runtime",
+            lambda settings, session_factory: (
+                FakeRunner(),
+                lambda session: FakeExecutionService(),
+            ),
+        )
         monkeypatch.setattr(main, "purge_expired_registry_cache", cleanup)
         monkeypatch.setattr(asyncio, "sleep", stop)
         with pytest.raises(asyncio.CancelledError):
             await main.run_worker(settings)
         assert cleanups == 1
+        assert invocation_polls == 1
+        assert result_cleanups == 1
         assert sleeps == [0.25]
 
     asyncio.run(scenario(cleanup_outcome="succeeds"))
@@ -79,3 +106,20 @@ def test_worker_runs_global_registry_cache_cleanup(
         asyncio.run(scenario(cleanup_outcome="hangs"))
     assert "registry_cache_cleanup_failed" in caplog.text
     assert "database detail" not in caplog.text
+
+
+def test_worker_builds_secret_backed_invocation_runtime() -> None:
+    async def scenario() -> None:
+        engine = create_engine("sqlite+aiosqlite:///:memory:")
+        try:
+            session_factory = create_session_factory(engine)
+            runner, service_factory = main.build_execution_runtime(
+                Settings(environment="test", _env_file=None), session_factory
+            )
+            assert isinstance(runner, InvocationRunner)
+            async with session_factory() as session:
+                assert isinstance(service_factory(session), ExecutionService)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

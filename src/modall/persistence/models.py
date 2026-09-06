@@ -710,6 +710,7 @@ class Run(Base):
             "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
             "'content_retention_deadline', 'preparation_failed', "
             "'session_initialization_failed', 'tool_call_failed', 'invalid_tool_result', "
+            "'unsupported_tool_result', 'sensitive_tool_result', "
             "'upstream_outcome_unknown')",
             name="ck_run_safe_error_code",
         ),
@@ -903,6 +904,7 @@ class RunAttempt(Base):
             "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
             "'content_retention_deadline', 'preparation_failed', "
             "'session_initialization_failed', 'tool_call_failed', 'invalid_tool_result', "
+            "'unsupported_tool_result', 'sensitive_tool_result', "
             "'upstream_outcome_unknown')",
             name="ck_run_attempt_safe_error_code",
         ),
@@ -970,6 +972,7 @@ class RunEvent(Base):
             "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
             "'content_retention_deadline', 'preparation_failed', "
             "'session_initialization_failed', 'tool_call_failed', 'invalid_tool_result', "
+            "'unsupported_tool_result', 'sensitive_tool_result', "
             "'upstream_outcome_unknown')",
             name="ck_run_event_safe_error_code",
         ),

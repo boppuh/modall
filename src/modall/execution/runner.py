@@ -11,6 +11,7 @@ from modall.execution.service import ExecutionService
 from modall.execution.types import (
     AcceptedToolResult,
     ExecutionError,
+    ExecutionFailureCode,
     JobLease,
     RunFailureCode,
     RunStatus,
@@ -108,16 +109,24 @@ class InvocationRunner:
                 lease, RunStatus.INDETERMINATE, RunFailureCode.UPSTREAM_OUTCOME_UNKNOWN
             )
         except InvocationError as error:
-            if error.code == InvocationFailureCode.SESSION_INITIALIZATION_FAILED:
+            if error.code == InvocationFailureCode.PREPARATION_FAILED:
+                code = RunFailureCode.PREPARATION_FAILED
+            elif error.code == InvocationFailureCode.SESSION_INITIALIZATION_FAILED:
                 code = RunFailureCode.SESSION_INITIALIZATION_FAILED
             elif error.code == InvocationFailureCode.TOOL_CALL_FAILED:
                 code = RunFailureCode.TOOL_CALL_FAILED
+            elif error.code == InvocationFailureCode.UNSUPPORTED_RESULT_CONTENT:
+                code = RunFailureCode.UNSUPPORTED_TOOL_RESULT
+            elif error.code == InvocationFailureCode.SENSITIVE_RESULT:
+                code = RunFailureCode.SENSITIVE_TOOL_RESULT
             else:
                 code = RunFailureCode.INVALID_TOOL_RESULT
             return await self._complete_failure(lease, RunStatus.FAILED, code)
         try:
             async with transaction(self._session_factory) as session:
-                await self._execution_service_factory(session).complete_invocation_success(
+                completed = await self._execution_service_factory(
+                    session
+                ).complete_invocation_success(
                     lease,
                     result=AcceptedToolResult(
                         payload=result.payload,
@@ -125,9 +134,13 @@ class InvocationRunner:
                         byte_count=result.byte_count,
                     ),
                 )
-        except ExecutionError:
+        except ExecutionError as error:
+            if error.code == ExecutionFailureCode.INVALID_ARGUMENTS:
+                return await self._complete_failure(
+                    lease, RunStatus.FAILED, RunFailureCode.INVALID_TOOL_RESULT
+                )
             return None
-        return RunStatus.SUCCEEDED
+        return RunStatus(completed.status)
 
     async def _fence_session(self, lease: JobLease) -> None:
         try:

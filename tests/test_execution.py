@@ -1129,6 +1129,54 @@ def test_success_persists_only_canonical_result_and_expires_it_absolutely() -> N
     asyncio.run(scenario())
 
 
+def test_late_definitive_result_terminalizes_without_storing_content() -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="late-result")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=now)
+                token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "late"},
+                )
+                run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "late"},
+                    confirmation_token=token.confirmation_token,
+                    idempotency_key="late-result",
+                    deadline=now + timedelta(seconds=5),
+                )
+                lease = await execution.claim_job(
+                    worker_id="worker", lease_duration=timedelta(seconds=30)
+                )
+                assert lease is not None
+                await execution.fence_session(lease)
+                await execution.fence_dispatch(lease)
+
+            payload: dict[str, object] = {"content": [{"type": "text", "text": "late"}]}
+            canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            async with transaction(factory) as session:
+                completed = await service(
+                    session, now=now + timedelta(seconds=6)
+                ).complete_invocation_success(
+                    lease,
+                    result=AcceptedToolResult(
+                        payload=payload,
+                        canonical_digest=hashlib.sha256(canonical).hexdigest(),
+                        byte_count=len(canonical),
+                    ),
+                )
+                assert completed.status == RunStatus.INDETERMINATE.value
+                assert await session.get(RunResult, run.id) is None
+
+    asyncio.run(scenario())
+
+
 def test_invocation_runner_commits_both_fences_and_one_safe_result() -> None:
     class FakeAdapter:
         calls = 0
@@ -1216,8 +1264,13 @@ def test_invocation_runner_commits_both_fences_and_one_safe_result() -> None:
     ("mode", "expected_status", "expected_code"),
     (
         ("factory", RunStatus.FAILED, RunFailureCode.PREPARATION_FAILED),
+        ("preparation", RunStatus.FAILED, RunFailureCode.PREPARATION_FAILED),
         ("session", RunStatus.FAILED, RunFailureCode.SESSION_INITIALIZATION_FAILED),
         ("invalid", RunStatus.FAILED, RunFailureCode.INVALID_TOOL_RESULT),
+        ("unsupported", RunStatus.FAILED, RunFailureCode.UNSUPPORTED_TOOL_RESULT),
+        ("sensitive", RunStatus.FAILED, RunFailureCode.SENSITIVE_TOOL_RESULT),
+        ("tool", RunStatus.FAILED, RunFailureCode.TOOL_CALL_FAILED),
+        ("persistence", RunStatus.FAILED, RunFailureCode.INVALID_TOOL_RESULT),
         ("indeterminate", RunStatus.INDETERMINATE, RunFailureCode.UPSTREAM_OUTCOME_UNKNOWN),
     ),
 )
@@ -1237,6 +1290,8 @@ def test_invocation_runner_maps_only_safe_failures(
             before_dispatch: Callable[[], Awaitable[None]],
         ) -> InvocationResult:
             del endpoint, tool_name, arguments, output_schema, bearer_token
+            if mode == "preparation":
+                raise InvocationError(InvocationFailureCode.PREPARATION_FAILED)
             await before_session()
             if mode == "session":
                 raise InvocationError(InvocationFailureCode.SESSION_INITIALIZATION_FAILED)
@@ -1245,7 +1300,23 @@ def test_invocation_runner_maps_only_safe_failures(
                 raise InvocationIndeterminate(
                     InvocationFailureCode.TOOL_CALL_FAILED, dispatched=True
                 )
-            raise InvocationError(InvocationFailureCode.SENSITIVE_RESULT, dispatched=True)
+            if mode == "unsupported":
+                raise InvocationError(
+                    InvocationFailureCode.UNSUPPORTED_RESULT_CONTENT, dispatched=True
+                )
+            if mode == "sensitive":
+                raise InvocationError(InvocationFailureCode.SENSITIVE_RESULT, dispatched=True)
+            if mode == "tool":
+                raise InvocationError(InvocationFailureCode.TOOL_CALL_FAILED, dispatched=True)
+            if mode == "persistence":
+                payload: dict[str, object] = {"content": [{"type": "text", "text": "long"}]}
+                canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+                return InvocationResult(
+                    payload=payload,
+                    canonical_digest=hashlib.sha256(canonical).hexdigest(),
+                    byte_count=len(canonical),
+                )
+            raise InvocationError(InvocationFailureCode.INVALID_UPSTREAM_OUTPUT, dispatched=True)
 
     async def scenario() -> None:
         now = datetime(2026, 9, 6, tzinfo=UTC)
@@ -1280,7 +1351,13 @@ def test_invocation_runner_maps_only_safe_failures(
 
             runner = InvocationRunner(
                 session_factory=factory,
-                execution_service_factory=lambda session: service(session, now=now),
+                execution_service_factory=lambda session: service(
+                    session,
+                    now=now,
+                    limits=(
+                        ExecutionLimits(max_result_bytes=10) if mode == "persistence" else None
+                    ),
+                ),
                 secret_provider=FixtureSecretProvider({}),
                 adapter_factory=adapter_factory,
             )

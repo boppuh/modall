@@ -12,6 +12,22 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    expanded_failure_codes = (
+        "safe_error_code IS NULL OR safe_error_code IN "
+        "('worker_lost_before_dispatch', 'worker_lost_after_dispatch', "
+        "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
+        "'content_retention_deadline', 'preparation_failed', "
+        "'session_initialization_failed', 'tool_call_failed', 'invalid_tool_result', "
+        "'unsupported_tool_result', 'sensitive_tool_result', "
+        "'upstream_outcome_unknown')"
+    )
+    for table, constraint in (
+        ("runs", "ck_run_safe_error_code"),
+        ("run_attempts", "ck_run_attempt_safe_error_code"),
+        ("run_events", "ck_run_event_safe_error_code"),
+    ):
+        op.drop_constraint(constraint, table, type_="check")
+        op.create_check_constraint(constraint, table, expanded_failure_codes)
     op.create_table(
         "run_results",
         sa.Column("run_id", sa.Uuid(), nullable=False),
@@ -42,3 +58,18 @@ def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS run_results_immutable ON run_results")
     op.drop_index("ix_run_results_expiry", table_name="run_results")
     op.drop_table("run_results")
+    original_failure_codes = (
+        "safe_error_code IS NULL OR safe_error_code IN "
+        "('worker_lost_before_dispatch', 'worker_lost_after_dispatch', "
+        "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
+        "'content_retention_deadline', 'preparation_failed', "
+        "'session_initialization_failed', 'tool_call_failed', 'invalid_tool_result', "
+        "'upstream_outcome_unknown')"
+    )
+    for table, constraint in (
+        ("runs", "ck_run_safe_error_code"),
+        ("run_attempts", "ck_run_attempt_safe_error_code"),
+        ("run_events", "ck_run_event_safe_error_code"),
+    ):
+        op.drop_constraint(constraint, table, type_="check")
+        op.create_check_constraint(constraint, table, original_failure_codes)
