@@ -291,7 +291,11 @@ class LimitedByteStream(httpx.AsyncByteStream):
         # invocation outcome is definitive; a closed response-less stream is
         # still indeterminate.
         if self._buffer_json_document:
-            self._mark_complete_once()
+            response = _jsonrpc_response(body, self._expected_response_id)
+            if response is None or response[0]:
+                self._mark_complete_once()
+                if response is not None and response[1]:
+                    self._mark_jsonrpc_error()
 
     def _screen_completed_sse_events(self) -> None:
         consumed = 0
@@ -632,8 +636,6 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         if media_type != "text/event-stream" or response.status_code != 200:
             try:
                 await screened_response.aread()
-                if is_tool_call and _is_jsonrpc_error(screened_response.content):
-                    self._tool_call_jsonrpc_error_completed = True
             except Exception:
                 await screened_response.aclose()
                 raise
@@ -663,17 +665,22 @@ def _noop() -> None:
     return None
 
 
-def _is_jsonrpc_error(value: bytes) -> bool:
+def _jsonrpc_response(value: bytes, expected_id: object) -> tuple[bool, bool] | None:
+    """Classify one complete envelope, preserving malformed-body certainty."""
+
     try:
         payload = json.loads(value)
     except (json.JSONDecodeError, UnicodeError):
-        return False
-    return (
-        isinstance(payload, dict)
-        and payload.get("jsonrpc") == "2.0"
-        and "id" in payload
-        and isinstance(payload.get("error"), dict)
-    )
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("jsonrpc") != "2.0"
+        or "id" not in payload
+        or ("result" not in payload and "error" not in payload)
+    ):
+        return None
+    matching = type(payload["id"]) is type(expected_id) and payload["id"] == expected_id
+    return matching, matching and isinstance(payload.get("error"), dict)
 
 
 def _sse_jsonrpc_response(event: bytes, expected_id: object) -> tuple[bool, bool]:
@@ -681,14 +688,4 @@ def _sse_jsonrpc_response(event: bytes, expected_id: object) -> tuple[bool, bool
     data = "\n".join(
         line.partition(":")[2].lstrip() for line in text.splitlines() if line.startswith("data:")
     )
-    try:
-        payload = json.loads(data)
-    except json.JSONDecodeError:
-        return False, False
-    is_response = (
-        isinstance(payload, dict)
-        and payload.get("jsonrpc") == "2.0"
-        and payload.get("id") == expected_id
-        and ("result" in payload or "error" in payload)
-    )
-    return is_response, is_response and isinstance(payload.get("error"), dict)
+    return _jsonrpc_response(data.encode(), expected_id) or (False, False)

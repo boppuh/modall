@@ -677,6 +677,42 @@ def test_limited_transport_revalidates_before_every_request() -> None:
     assert contacts == 1
 
 
+@pytest.mark.parametrize(
+    ("body", "completed", "failed"),
+    (
+        (b'{"jsonrpc":"2.0","id":1,"result":{}}', True, False),
+        (b'{"jsonrpc":"2.0","id":1,"error":{"code":-1}}', True, True),
+        (b'{"jsonrpc":"2.0","id":2,"result":{}}', False, False),
+        (b'{"jsonrpc":"2.0","id":2,"error":{"code":-1}}', False, False),
+        (b'{"jsonrpc":"2.0","id":true,"result":{}}', False, False),
+        (b'{"jsonrpc":', True, False),
+        (b"", True, False),
+    ),
+)
+def test_tool_call_response_completion_requires_an_exact_response_id(
+    body: bytes, completed: bool, failed: bool
+) -> None:
+    async def scenario() -> None:
+        async def respond(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                content=body,
+                request=request,
+            )
+
+        transport = LimitedTransport(httpx.MockTransport(respond), 1024)
+        async with httpx.AsyncClient(transport=transport) as client:
+            await client.post(
+                "https://example.test",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
+            )
+        assert transport.tool_call_response_completed is completed
+        assert transport.tool_call_jsonrpc_error_completed is failed
+
+    asyncio.run(scenario())
+
+
 def test_decoded_credential_screen_handles_percent_encoded_metadata() -> None:
     assert _contains_decoded_credential(
         {"description": "https://cdn.example/redirect?next=%41bCdEfGhIjKlMnOpQrStUvWx"},
