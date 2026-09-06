@@ -49,6 +49,16 @@ const run = {
 
 async function mockControlPlane(route: Route) {
   const request = route.request();
+  const origin = request.headers().origin ?? "http://127.0.0.1:5173";
+  const corsHeaders = {
+    "access-control-allow-origin": origin,
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-headers": "content-type, idempotency-key, x-actor-user-id, x-workspace-id",
+  };
+  if (request.method() === "OPTIONS") {
+    await route.fulfill({ status: 204, headers: corsHeaders });
+    return;
+  }
   const path = new URL(request.url()).pathname;
   const key = `${request.method()} ${path}`;
   let body: unknown;
@@ -75,13 +85,13 @@ async function mockControlPlane(route: Route) {
   } else if (key === `GET /v1/runs/${runId}/events`) {
     body = { items: [{ id: connectionId, sequence: 1, event_type: "completed", status: "succeeded", safe_error_code: null, occurred_at: timestamp }], page: { next_cursor: null } };
   } else if (key === "POST /v1/run-preflights") {
-    body = { capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "token", expires_at: "2026-09-06T12:03:00Z" };
+    body = { capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "token", expires_at: new Date(Date.now() + 60_000).toISOString() };
   } else if (key === "GET /v1/audit-events") {
     body = { items: [], page: { next_cursor: null } };
   } else {
     throw new Error(`Unexpected control-plane request: ${key}`);
   }
-  await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  await route.fulfill({ status: 200, contentType: "application/json", headers: corsHeaders, body: JSON.stringify(body) });
 }
 
 test("operator can traverse the exact-version journey without accessibility violations", async ({ page }) => {

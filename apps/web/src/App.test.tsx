@@ -73,7 +73,7 @@ function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
     listRuns: vi.fn().mockResolvedValue([run]),
     getRun: vi.fn().mockResolvedValue(run),
     listRunEvents: vi.fn().mockResolvedValue([{ id: connectionId, sequence: 1, event_type: "admitted", status: "queued", safe_error_code: null, occurred_at: timestamp }]),
-    preflight: vi.fn().mockResolvedValue({ capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "confirmation", expires_at: "2026-09-06T12:03:00Z" }),
+    preflight: vi.fn().mockImplementation(() => Promise.resolve({ capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "confirmation", expires_at: new Date(Date.now() + 60_000).toISOString() })),
     createRun: vi.fn().mockResolvedValue(run),
     cancelRun: vi.fn().mockResolvedValue({ ...run, status: "cancelled" }),
     listAuditEvents: vi.fn().mockResolvedValue({ items: [] }),
@@ -168,6 +168,7 @@ describe("App", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
     expect((await screen.findAllByText("https://mcp.example/tools")).length).toBeGreaterThan(0);
+    expect(screen.getByText(/policy v1 · binding none/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Verify pending" }));
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     fireEvent.click(screen.getByRole("button", { name: "Disable" }));
@@ -184,6 +185,20 @@ describe("App", () => {
     expect(screen.getByText(/"type": "object"/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Disable version" }));
     await waitFor(() => expect(api.capabilityAction).toHaveBeenCalledWith(versionId, "disable", expect.any(String)));
+  });
+
+  it("identifies capability sources and re-enables the retained version", async () => {
+    const disabled = { ...capability, pending_version_id: null, status: "disabled" as const };
+    const api = fakeApi({
+      listCapabilities: vi.fn().mockResolvedValue([disabled]),
+      getCapability: vi.fn().mockResolvedValue({ ...disabled, versions: [{ id: versionId, capability_id: capabilityId, sequence: 1, display_name: "Search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false }),
+    });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
+    expect(await screen.findByText(/Source connection: Internal developer tools/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Re-enable version" }));
+    await waitFor(() => expect(api.capabilityAction).toHaveBeenCalledWith(versionId, "enable", expect.any(String)));
   });
 
   it("preflights, confirms, follows, and cancels a run", async () => {
@@ -210,6 +225,26 @@ describe("App", () => {
     expect(screen.getByText("admitted")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Request cancellation" }));
     await waitFor(() => expect(api.cancelRun).toHaveBeenCalledWith(runId, expect.any(String)));
+  });
+
+  it("expires stale confirmations and fetches a terminal run's final event", async () => {
+    const terminalRun = { ...run, status: "succeeded" as const, terminal_at: timestamp };
+    const listRunEvents = vi.fn().mockResolvedValue([{ id: connectionId, sequence: 1, event_type: "completed", status: "succeeded", safe_error_code: null, occurred_at: timestamp }]);
+    const api = fakeApi({
+      getRun: vi.fn().mockResolvedValue(terminalRun),
+      listRunEvents,
+      preflight: vi.fn().mockImplementation(() => Promise.resolve({ capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "expired", expires_at: new Date(Date.now() + 20).toISOString() })),
+    });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /55555555/ }));
+    await waitFor(() => expect(listRunEvents.mock.calls.length).toBeGreaterThanOrEqual(2));
+
+    fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
+    fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
+    const expired = await screen.findByRole("button", { name: "Confirmation expired" });
+    expect(expired).toHaveProperty("disabled", true);
+    expect(screen.getByRole("alert").textContent).toContain("confirmation expired");
   });
 
   it("renders useful empty and failure states", async () => {

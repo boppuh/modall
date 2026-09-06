@@ -369,7 +369,7 @@ function Registry({ api, scope, role, selectedId, select }: { api: ControlPlane;
   const importEntry = useMutation({
     mutationFn: ({ cacheId, digest, key }: { cacheId: string; digest: string; key: string }) =>
       api.importRegistry(cacheId, digest, key),
-    onSuccess: async (_data, variables) => { mutationKeys.current.delete(`import:${variables.digest}`); await refreshLists(); },
+    onSuccess: async (_data, variables) => { mutationKeys.current.delete(`import:${variables.cacheId}:${variables.digest}`); await refreshLists(); },
   });
   const append = useMutation({
     mutationFn: ({ endpointUrl, secretBindingId, key }: { endpointUrl: string; secretBindingId?: string; key: string; operation: string }) =>
@@ -447,7 +447,7 @@ function Registry({ api, scope, role, selectedId, select }: { api: ControlPlane;
                         className="text-action"
                         type="button"
                         disabled={!canOperate(role) || searchExpired || importEntry.isPending}
-                        onClick={() => importEntry.mutate({ cacheId: searchResult.cache_id, digest: item.provenance_digest, key: keyFor(`import:${item.provenance_digest}`) })}
+                        onClick={() => importEntry.mutate({ cacheId: searchResult.cache_id, digest: item.provenance_digest, key: keyFor(`import:${searchResult.cache_id}:${item.provenance_digest}`) })}
                       >
                         Import
                       </button>
@@ -525,7 +525,7 @@ function Registry({ api, scope, role, selectedId, select }: { api: ControlPlane;
                 <button className="secondary-action" disabled={append.isPending} type="submit">{append.isPending ? "Appending…" : "Append version"}</button>
               </form>}
               <ol className="version-list">
-                {detail.data.versions.map((version) => <li key={version.id}><span>v{version.sequence}</span><code>{version.endpoint_url}</code><small>{version.transport}</small></li>)}
+                {detail.data.versions.map((version) => <li key={version.id}><span>v{version.sequence}</span><code>{version.endpoint_url}</code><small>{version.transport} · policy {version.policy_version} · binding {version.secret_binding_id ? shortId(version.secret_binding_id) : "none"}</small></li>)}
               </ol>
               {detail.data.versions_truncated && <p className="field-help">Showing the 100 most recent versions.</p>}
             </>
@@ -541,6 +541,7 @@ function Capabilities({ api, scope, role, selectedId, select }: { api: ControlPl
   const mutationKeys = useRef(new Map<string, string>());
   const keyFor = (operation: string) => mutationKeys.current.get(operation) ?? (() => { const key = mutationId(); mutationKeys.current.set(operation, key); return key; })();
   const capabilities = useQuery({ queryKey: queryKey(scope, "capabilities"), queryFn: () => api.listCapabilities() });
+  const connections = useQuery({ queryKey: queryKey(scope, "connections"), queryFn: () => api.listConnections() });
   const detail = useQuery({
     queryKey: queryKey(scope, "capability", selectedId),
     queryFn: () => api.getCapability(selectedId as string),
@@ -555,6 +556,7 @@ function Capabilities({ api, scope, role, selectedId, select }: { api: ControlPl
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "overview") });
     },
   });
+  const connectionNames = new Map((connections.data ?? []).map((item) => [item.id, item.name]));
   return (
     <div className="page-flow">
       <header className="page-heading"><div><p className="kicker">Review and approval</p><h1>Capabilities</h1><p>Approve exact immutable versions. New schema never inherits old trust.</p></div></header>
@@ -568,10 +570,11 @@ function Capabilities({ api, scope, role, selectedId, select }: { api: ControlPl
           ) : (
             <ul className="select-list">
               {capabilities.data.map((capability) => (
-                <li key={capability.id}><button className={selectedId === capability.id ? "selected" : ""} type="button" onClick={() => select(capability.id)}><span><strong>{capability.tool_identity}</strong><small>epoch {capability.status_epoch}</small></span><StatusMark value={capability.status} /></button></li>
+                <li key={capability.id}><button className={selectedId === capability.id ? "selected" : ""} type="button" onClick={() => select(capability.id)}><span><strong>{capability.tool_identity}</strong><small>{connectionNames.get(capability.connection_id) ?? shortId(capability.connection_id)} · epoch {capability.status_epoch}</small></span><StatusMark value={capability.status} /></button></li>
               ))}
             </ul>
           )}
+          {connections.isError && <QueryFailure error={connections.error} retry={() => void connections.refetch()} />}
         </div>
         <aside className="detail-panel capability-detail">
           {selectedId === null ? <EmptyState title="Select a capability" copy="Compare metadata, schema, and version history." /> : detail.isPending ? (
@@ -580,10 +583,13 @@ function Capabilities({ api, scope, role, selectedId, select }: { api: ControlPl
             <>
               <span className="index">Immutable capability</span>
               <div className="detail-title"><h2>{detail.data.tool_identity}</h2><StatusMark value={detail.data.status} /></div>
+              <p className="field-help">Source connection: {connectionNames.get(detail.data.connection_id) ?? detail.data.connection_id}</p>
               {action.isError && <p className="field-error" role="alert">{failureMessage(action.error)}</p>}
               {detail.data.versions.map((version, index) => {
-                const enabled = detail.data.enabled_version_id === version.id;
-                const actionable = enabled || detail.data.pending_version_id === version.id;
+                const retained = detail.data.enabled_version_id === version.id;
+                const enabled = detail.data.status === "enabled" && retained;
+                const reenable = detail.data.status === "disabled" && retained;
+                const actionable = enabled || reenable || detail.data.pending_version_id === version.id;
                 const verb = enabled ? "disable" : "enable";
                 return (
                 <article className="schema-version" key={version.id}>
@@ -598,7 +604,7 @@ function Capabilities({ api, scope, role, selectedId, select }: { api: ControlPl
                     disabled={!canOperate(role) || !actionable || !version.schema_supported || action.isPending}
                     onClick={() => action.mutate({ versionId: version.id, verb, key: keyFor(`capability:${version.id}:${verb}`) })}
                   >
-                    {!actionable ? "Historical version" : enabled ? "Disable version" : "Enable exact version"}
+                    {!actionable ? "Historical version" : enabled ? "Disable version" : reenable ? "Re-enable version" : "Enable exact version"}
                   </button>
                 </article>
               );})}
@@ -616,7 +622,9 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const runKey = useRef(mutationId());
   const cancelKeys = useRef(new Map<string, string>());
+  const finalEventFetchRun = useRef<string | null>(null);
   const runsKey = useMemo(() => queryKey(scope, "runs"), [scope]);
+  const eventsKey = useMemo(() => queryKey(scope, "run-events", selectedId), [scope, selectedId]);
   const runs = useQuery({ queryKey: runsKey, queryFn: () => api.listRuns() });
   const capabilities = useQuery({ queryKey: queryKey(scope, "capabilities"), queryFn: () => api.listCapabilities() });
   const connections = useQuery({ queryKey: queryKey(scope, "connections"), queryFn: () => api.listConnections() });
@@ -624,6 +632,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
   const [argumentsError, setArgumentsError] = useState("");
   const [pendingArguments, setPendingArguments] = useState<Record<string, unknown> | null>(null);
   const [preflight, setPreflight] = useState<RunPreflight | null>(null);
+  const [confirmationClock, setConfirmationClock] = useState(() => Date.now());
   const runDetail = useQuery({
     queryKey: queryKey(scope, "run", selectedId),
     queryFn: () => api.getRun(selectedId as string),
@@ -631,7 +640,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
     refetchInterval: (query) => query.state.status === "error" || (query.state.data && terminal(query.state.data.status)) ? false : 1500,
   });
   const events = useQuery({
-    queryKey: queryKey(scope, "run-events", selectedId),
+    queryKey: eventsKey,
     queryFn: () => api.listRunEvents(selectedId as string),
     enabled: selectedId !== null,
     refetchInterval: (query) => query.state.status === "error" || (runDetail.data && terminal(runDetail.data.status)) ? false : 1500,
@@ -643,9 +652,21 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
       previous?.map((item) => item.id === current.id ? current : item),
     );
   }, [queryClient, runDetail.data, runsKey]);
+  useEffect(() => {
+    const current = runDetail.data;
+    if (!current || !terminal(current.status) || finalEventFetchRun.current === current.id) return;
+    finalEventFetchRun.current = current.id;
+    void queryClient.refetchQueries({ queryKey: eventsKey, exact: true });
+  }, [eventsKey, queryClient, runDetail.data]);
+  useEffect(() => {
+    if (!preflight) return;
+    const delay = Math.max(0, Date.parse(preflight.expires_at) - Date.now());
+    const timer = window.setTimeout(() => setConfirmationClock(Date.now()), delay + 1);
+    return () => window.clearTimeout(timer);
+  }, [preflight]);
   const prepare = useMutation({
     mutationFn: ({ versionId, args }: { versionId: string; args: Record<string, unknown> }) => api.preflight(versionId, args),
-    onSuccess: setPreflight,
+    onSuccess: (prepared) => { setConfirmationClock(Date.now()); setPreflight(prepared); },
   });
   const invoke = useMutation({
     mutationFn: ({ prepared, args }: { prepared: RunPreflight; args: Record<string, unknown> }) => api.createRun(prepared, args, runKey.current),
@@ -680,6 +701,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
     enabled: Boolean(preflight && selectedCapability),
   });
   const confirmedEndpoint = confirmationConnection.data?.versions.find((version) => version.id === preflight?.connection_version_id)?.endpoint_url;
+  const confirmationExpired = preflight ? Date.parse(preflight.expires_at) <= confirmationClock : false;
 
   function invalidatePreparedRun() {
     setPreflight(null); setPendingArguments(null); prepare.reset(); invoke.reset(); runKey.current = mutationId();
@@ -735,9 +757,10 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
           <dl><div><dt>Capability version</dt><dd><code>{shortId(preflight.capability_version_id)}</code></dd></div><div><dt>Pinned endpoint</dt><dd><code>{confirmedEndpoint ?? (confirmationConnection.isPending ? "Resolving…" : "Unavailable")}</code></dd></div><div><dt>Argument digest</dt><dd><code>{shortId(preflight.argument_digest)}</code></dd></div></dl>
           {confirmationConnection.isError && <p className="field-error" role="alert">{failureMessage(confirmationConnection.error)}</p>}
           {!confirmationConnection.isPending && !confirmationConnection.isError && !confirmedEndpoint && <p className="field-error" role="alert">The pinned connection version is unavailable. Run preflight again.</p>}
+          {confirmationExpired && <p className="field-error" role="alert">This confirmation expired. Go back and run preflight again.</p>}
           <details open><summary>Exact prepared arguments</summary><pre>{JSON.stringify(pendingArguments, null, 2)}</pre></details>
           {invoke.isError && <p className="field-error" role="alert">{failureMessage(invoke.error)}{invoke.error instanceof ApiFailure && ["invalid_confirmation", "confirmation_expired", "confirmation_replayed"].includes(invoke.error.code) ? " Run preflight again." : " Retry to safely reuse this request."}</p>}
-          <div className="action-strip"><button type="button" onClick={invalidatePreparedRun}>Back</button><button className="primary-action" type="button" disabled={invoke.isPending || !confirmedEndpoint} onClick={() => invoke.mutate({ prepared: preflight, args: pendingArguments })}>{invoke.isPending ? "Submitting…" : "Confirm and run"}</button></div>
+          <div className="action-strip"><button type="button" onClick={invalidatePreparedRun}>Back</button><button className="primary-action" type="button" disabled={invoke.isPending || !confirmedEndpoint || confirmationExpired} onClick={() => invoke.mutate({ prepared: preflight, args: pendingArguments })}>{invoke.isPending ? "Submitting…" : confirmationExpired ? "Confirmation expired" : "Confirm and run"}</button></div>
         </section>
       )}
       {invoke.isError && !preflight && <p className="field-error" role="alert">{failureMessage(invoke.error)} Run preflight again.</p>}
