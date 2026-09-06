@@ -910,6 +910,7 @@ class RunAttempt(Base):
             postgresql_where=text("status IN ('preparing', 'session_fenced', 'dispatch_fenced')"),
             sqlite_where=text("status IN ('preparing', 'session_fenced', 'dispatch_fenced')"),
         ),
+        Index("ix_run_attempts_job", "workspace_id", "job_id"),
     )
 
     id: Mapped[UuidPrimaryKey]
@@ -1104,6 +1105,8 @@ for immutable_model in (
 
 event.listen(McpToolBinding, "before_delete", _reject_immutable_delete)
 event.listen(CapabilityStatusEvent, "before_delete", _reject_immutable_delete)
+event.listen(ConfirmationNonce, "before_delete", _reject_immutable_delete)
+event.listen(IdempotencyRecord, "before_delete", _reject_immutable_delete)
 event.listen(Capability, "before_update", _reject_capability_identity_update)
 event.listen(RegistryEntry, "before_update", _reject_registry_entry_identity_update)
 event.listen(RegistryEntry, "before_insert", _validate_registry_entry_insert)

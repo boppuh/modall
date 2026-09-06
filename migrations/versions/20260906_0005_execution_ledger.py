@@ -277,6 +277,7 @@ def upgrade() -> None:
         postgresql_where=sa.text("status IN ('preparing', 'session_fenced', 'dispatch_fenced')"),
         sqlite_where=sa.text("status IN ('preparing', 'session_fenced', 'dispatch_fenced')"),
     )
+    op.create_index("ix_run_attempts_job", "run_attempts", ["workspace_id", "job_id"])
 
     op.create_table(
         "run_events",
@@ -393,6 +394,18 @@ def upgrade() -> None:
             "FOR EACH ROW EXECUTE FUNCTION modall_reject_immutable_update()"
         )
     op.execute(
+        "CREATE FUNCTION modall_reject_independent_execution_delete() RETURNS trigger "
+        "LANGUAGE plpgsql AS $$ BEGIN "
+        "IF pg_trigger_depth() = 1 THEN "
+        "RAISE EXCEPTION 'replay-protection rows cannot be deleted independently'; "
+        "END IF; RETURN OLD; END; $$"
+    )
+    for table in ("confirmation_nonces", "idempotency_records"):
+        op.execute(
+            f"CREATE TRIGGER {table}_delete_guard BEFORE DELETE ON {table} "
+            "FOR EACH ROW EXECUTE FUNCTION modall_reject_independent_execution_delete()"
+        )
+    op.execute(
         "CREATE FUNCTION modall_reject_terminal_execution_update() RETURNS trigger "
         "LANGUAGE plpgsql AS $$ BEGIN "
         f"IF OLD.status IN ({TERMINAL_JOB_STATES}) AND NEW.status IS DISTINCT FROM OLD.status "
@@ -410,6 +423,9 @@ def downgrade() -> None:
     for table in ("run_attempts", "jobs", "runs"):
         op.execute(f"DROP TRIGGER IF EXISTS {table}_terminal_status_immutable ON {table}")
     op.execute("DROP FUNCTION IF EXISTS modall_reject_terminal_execution_update()")
+    for table in ("idempotency_records", "confirmation_nonces"):
+        op.execute(f"DROP TRIGGER IF EXISTS {table}_delete_guard ON {table}")
+    op.execute("DROP FUNCTION IF EXISTS modall_reject_independent_execution_delete()")
     for table in ("idempotency_records", "confirmation_nonces", "run_events"):
         op.execute(f"DROP TRIGGER IF EXISTS {table}_immutable ON {table}")
     op.drop_index("ix_idempotency_resource", table_name="idempotency_records")
@@ -422,6 +438,7 @@ def downgrade() -> None:
     op.drop_index("ix_run_events_run_sequence", table_name="run_events")
     op.drop_table("run_events")
     op.drop_index("uq_run_attempts_active", table_name="run_attempts")
+    op.drop_index("ix_run_attempts_job", table_name="run_attempts")
     op.drop_table("run_attempts")
     op.drop_index("ix_jobs_lease_reconciliation", table_name="jobs")
     op.drop_index("ix_jobs_deadline_reconciliation", table_name="jobs")

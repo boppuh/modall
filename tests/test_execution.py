@@ -850,6 +850,40 @@ def test_cancellation_authorizes_before_revealing_run_existence() -> None:
     asyncio.run(scenario())
 
 
+def test_replay_protection_rows_reject_independent_orm_deletion() -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="immutable-replay")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=now)
+                token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "immutable"},
+                )
+                await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "immutable"},
+                    confirmation_token=token.confirmation_token,
+                    idempotency_key="immutable-replay",
+                )
+
+            for model in (ConfirmationNonce, IdempotencyRecord):
+                async with factory() as session:
+                    row = await session.scalar(select(model))
+                    assert row is not None
+                    await session.delete(row)
+                    with pytest.raises(ValueError, match="immutable version rows"):
+                        await session.flush()
+                    await session.rollback()
+
+    asyncio.run(scenario())
+
+
 def test_heartbeat_and_worker_boundary_validation() -> None:
     async def scenario() -> None:
         now = datetime(2026, 9, 6, tzinfo=UTC)
