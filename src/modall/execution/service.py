@@ -15,6 +15,7 @@ import jwt
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 from modall.audit.types import AuditAction, ResourceType
 from modall.execution.types import (
@@ -379,6 +380,10 @@ class ExecutionService:
         if state.dispatch_quarantined:
             raise ExecutionError(ExecutionFailureCode.DISPATCH_QUARANTINED)
         await self._terminalize_expired_jobs(now)
+        # The session disables autoflush. Persist terminal projections before
+        # the next reconciliation query so one dispatch-fenced deadline cannot
+        # be selected and terminalized twice with the same event sequence.
+        await self._session.flush()
         await self._terminalize_abandoned_dispatches(now)
         run = await self._session.scalar(
             select(Run)
@@ -638,7 +643,18 @@ class ExecutionService:
             return run
         now = await self._durable_now()
         run.cancellation_requested = True
-        if status in {RunStatus.QUEUED, RunStatus.PREPARING, RunStatus.SESSION_FENCED}:
+        if _utc(run.deadline) <= now:
+            await self._terminalize_run(
+                run,
+                (
+                    RunStatus.INDETERMINATE
+                    if status == RunStatus.DISPATCH_FENCED
+                    else RunStatus.TIMED_OUT
+                ),
+                now,
+                RunFailureCode.DEADLINE_EXCEEDED,
+            )
+        elif status in {RunStatus.QUEUED, RunStatus.PREPARING, RunStatus.SESSION_FENCED}:
             await self._terminalize_run(
                 run,
                 RunStatus.CANCELLED,
@@ -1070,33 +1086,49 @@ class ExecutionService:
         return run
 
     async def _require_idempotency_key_history(self) -> None:
-        configured_versions = [key.version for key in self._idempotency_keys]
-        missing_version = await self._session.scalar(
-            select(IdempotencyRecord.key_version)
-            .where(
-                IdempotencyRecord.key_version.not_in(configured_versions),
-            )
-            .limit(1)
+        missing_version = await self._find_unconfigured_key_version(
+            IdempotencyRecord.key_version,
+            {key.version for key in self._idempotency_keys},
         )
         if missing_version is not None:
             raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_KEY_HISTORY_INCOMPLETE)
 
     async def _require_confirmation_key_history(self) -> None:
-        configured_versions = [key.version for key in self._confirmation_keys]
-        missing_version = await self._session.scalar(
-            select(IdempotencyRecord.confirmation_key_version)
-            .where(IdempotencyRecord.confirmation_key_version.not_in(configured_versions))
-            .limit(1)
+        configured_versions = {key.version for key in self._confirmation_keys}
+        missing_version = await self._find_unconfigured_key_version(
+            IdempotencyRecord.confirmation_key_version,
+            configured_versions,
         )
         if missing_version is not None:
             raise ExecutionError(ExecutionFailureCode.CONFIRMATION_KEY_HISTORY_INCOMPLETE)
-        missing_nonce_version = await self._session.scalar(
-            select(ConfirmationNonce.key_version)
-            .where(ConfirmationNonce.key_version.not_in(configured_versions))
-            .limit(1)
+        missing_nonce_version = await self._find_unconfigured_key_version(
+            ConfirmationNonce.key_version,
+            configured_versions,
         )
         if missing_nonce_version is not None:
             raise ExecutionError(ExecutionFailureCode.CONFIRMATION_KEY_HISTORY_INCOMPLETE)
+
+    async def _find_unconfigured_key_version(
+        self,
+        column: InstrumentedAttribute[str],
+        configured_versions: set[str],
+    ) -> str | None:
+        """Traverse distinct indexed versions with bounded successor probes."""
+
+        previous: str | None = None
+        for _ in range(self._limits.max_historical_hmac_keys + 1):
+            statement = select(column)
+            if previous is not None:
+                statement = statement.where(column > previous)
+            observed = await self._session.scalar(statement.order_by(column).limit(1))
+            if observed is None:
+                return None
+            if observed not in configured_versions:
+                return observed
+            previous = observed
+        # More distinct retained versions than a valid keyring can represent
+        # is itself an incomplete-history configuration.
+        return previous
 
     @staticmethod
     def _idempotency_hmac(key: HmacKeyVersion, context: WorkspaceContext, raw_key: bytes) -> str:
