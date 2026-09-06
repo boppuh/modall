@@ -789,3 +789,48 @@ def test_cache_reuse_and_import_respect_a_stricter_rolling_byte_policy() -> None
                 assert calls == 3
 
     asyncio.run(scenario())
+
+
+def test_cache_reuse_and_import_respect_a_stricter_rolling_ttl() -> None:
+    async def scenario() -> None:
+        calls = 0
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if "cursor" in request.url.params:
+                return fixture_response("search_page_2.json", request)
+            return fixture_response("search_page_1.json", request)
+
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="rolling-ttl")
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                    original = await OfficialRegistryService(
+                        session, OfficialRegistryAdapter(client), now=lambda: now
+                    ).search(context=context, query="fixture")
+
+                now += timedelta(minutes=10)
+                strict_limits = OfficialRegistryLimits(cache_ttl=timedelta(minutes=5))
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                    service = OfficialRegistryService(
+                        session,
+                        OfficialRegistryAdapter(client, limits=strict_limits),
+                        now=lambda: now,
+                    )
+                    refreshed = await service.search(context=context, query="fixture")
+                    assert refreshed.from_cache is False
+                    assert refreshed.cache_id != original.cache_id
+                    with pytest.raises(OfficialRegistryError) as expired_import:
+                        await service.import_cached(
+                            context=context,
+                            cache_id=original.cache_id,
+                            provenance_digest=original.items[0].provenance_digest,
+                        )
+                    assert expired_import.value.code == OfficialRegistryFailureCode.CACHE_MISS
+                assert calls == 4
+
+    asyncio.run(scenario())

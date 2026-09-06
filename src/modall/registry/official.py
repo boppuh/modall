@@ -545,6 +545,7 @@ class OfficialRegistryService:
                 RegistrySearchCache.provider == OFFICIAL_REGISTRY_PROVIDER,
                 RegistrySearchCache.query_digest == query_digest,
                 RegistrySearchCache.expires_at > now,
+                RegistrySearchCache.fetched_at > now - self._limits.cache_ttl,
                 RegistrySearchCache.byte_count <= self._limits.max_response_bytes,
             )
             .order_by(RegistrySearchCache.fetched_at.desc(), RegistrySearchCache.id.desc())
@@ -615,6 +616,7 @@ class OfficialRegistryService:
                 RegistrySearchCache.workspace_id == context.workspace_id,
                 RegistrySearchCache.provider == OFFICIAL_REGISTRY_PROVIDER,
                 RegistrySearchCache.expires_at > now,
+                RegistrySearchCache.fetched_at > now - self._limits.cache_ttl,
                 RegistrySearchCache.byte_count <= self._limits.max_response_bytes,
             )
         )
