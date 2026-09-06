@@ -687,6 +687,8 @@ def test_adapter_bounds_streams_timeouts_transport_errors_and_direct_queries() -
                     limits=OfficialRegistryLimits(total_timeout_seconds=0.01),
                 ).search("weather")
             assert timed_out.value.code == OfficialRegistryFailureCode.TIMEOUT
+            assert timed_out.value.__cause__ is None
+            assert timed_out.value.__context__ is None
 
         async def disconnected(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("fixture disconnect", request=request)
@@ -866,6 +868,42 @@ def test_adapter_does_not_close_borrowed_transport_between_searches() -> None:
     asyncio.run(scenario())
 
 
+def test_adapter_disables_the_independent_httpx_timeout() -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert set(request.extensions["timeout"].values()) == {None}
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={"servers": [], "metadata": {"count": 0}},
+                request=request,
+            )
+
+        assert (
+            await OfficialRegistryAdapter(
+                transport=httpx.MockTransport(handler),
+                limits=OfficialRegistryLimits(total_timeout_seconds=10),
+            ).search("weather")
+            == ()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_scanner_semaphore_supports_uvloop() -> None:
+    uvloop = pytest.importorskip("uvloop")
+    loop = uvloop.new_event_loop()
+
+    async def scenario() -> None:
+        first = official_registry._scanner_process_semaphore()
+        assert official_registry._scanner_process_semaphore() is first
+
+    try:
+        loop.run_until_complete(scenario())
+    finally:
+        loop.close()
+
+
 def test_scanning_runs_off_loop_under_the_configured_deadline() -> None:
     async def scenario() -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -882,6 +920,35 @@ def test_scanning_runs_off_loop_under_the_configured_deadline() -> None:
             with pytest.raises(OfficialRegistryError) as raised:
                 await adapter.search("weather")
         assert raised.value.code == OfficialRegistryFailureCode.TIMEOUT
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+    asyncio.run(scenario())
+
+
+def test_service_deadline_is_detached_from_scanned_metadata() -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return fixture_response("search_page_1.json", request)
+
+        limits = OfficialRegistryLimits(total_timeout_seconds=0.01)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="service-timeout-context")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                with pytest.raises(OfficialRegistryError) as raised:
+                    await OfficialRegistryService(
+                        session,
+                        OfficialRegistryAdapter(
+                            transport=httpx.MockTransport(handler),
+                            limits=limits,
+                            query_scanner=scanner_allows,
+                            metadata_scanner=scanner_blocks_briefly,
+                        ),
+                    ).search(context=context, query="private operator query")
+        assert raised.value.code == OfficialRegistryFailureCode.TIMEOUT
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
 
     asyncio.run(scenario())
 
@@ -1415,6 +1482,48 @@ def test_cache_reuse_and_import_respect_a_stricter_rolling_byte_policy() -> None
                     assert import_miss.value.code == OfficialRegistryFailureCode.CACHE_MISS
                     assert await session.get(RegistrySearchCache, original.cache_id) is None
                 assert calls == 3
+
+    asyncio.run(scenario())
+
+
+def test_cache_quota_excludes_rows_above_a_stricter_rolling_item_policy() -> None:
+    async def scenario() -> None:
+        calls = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls >= 3:
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "application/json"},
+                    json={"servers": [], "metadata": {"count": 0}},
+                    request=request,
+                )
+            if "cursor" in request.url.params:
+                return fixture_response("search_page_2.json", request)
+            return fixture_response("search_page_1.json", request)
+
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="rolling-item-limit")
+            transport = httpx.MockTransport(handler)
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                original = await OfficialRegistryService(
+                    session, OfficialRegistryAdapter(transport=transport)
+                ).search(context=context, query="fixture")
+                assert len(original.items) == 2
+
+            limits = OfficialRegistryLimits(max_items=1, max_workspace_cache_rows=1)
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                replacement = await OfficialRegistryService(
+                    session, OfficialRegistryAdapter(transport=transport, limits=limits)
+                ).search(context=context, query="fixture")
+                assert replacement.from_cache is False
+                assert replacement.cache_id != original.cache_id
+                assert await session.get(RegistrySearchCache, original.cache_id) is None
+            assert calls == 3
 
     asyncio.run(scenario())
 

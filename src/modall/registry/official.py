@@ -19,6 +19,7 @@ from threading import Lock
 from typing import cast
 from urllib.parse import unquote
 from uuid import UUID, uuid4
+from weakref import WeakKeyDictionary
 
 import httpx
 from sqlalchemy import delete, func, or_, select
@@ -71,15 +72,20 @@ _REGISTRY_LOG_USERS = 0
 _SCANNER_PROCESS_CONTEXT = multiprocessing.get_context("spawn")
 _SCANNER_PROCESS_LIMIT = 4
 _CACHE_CLEANUP_BATCH_SIZE = 500
+_SCANNER_SEMAPHORE_LOCK = Lock()
+_SCANNER_SEMAPHORES: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    WeakKeyDictionary()
+)
 
 
 def _scanner_process_semaphore() -> asyncio.Semaphore:
     loop = asyncio.get_running_loop()
-    semaphore = getattr(loop, "_modall_registry_scanner_semaphore", None)
-    if semaphore is None:
-        semaphore = asyncio.Semaphore(_SCANNER_PROCESS_LIMIT)
-        setattr(loop, "_modall_registry_scanner_semaphore", semaphore)  # noqa: B010
-    return cast(asyncio.Semaphore, semaphore)
+    with _SCANNER_SEMAPHORE_LOCK:
+        semaphore = _SCANNER_SEMAPHORES.get(loop)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(_SCANNER_PROCESS_LIMIT)
+            _SCANNER_SEMAPHORES[loop] = semaphore
+        return semaphore
 
 
 @contextmanager
@@ -386,6 +392,7 @@ class OfficialRegistryAdapter:
             auth=None,
             trust_env=False,
             follow_redirects=False,
+            timeout=None,
         ) as client:
             return await self._search_with_client(client, query)
 
@@ -641,7 +648,8 @@ class OfficialRegistryService:
             async with asyncio.timeout(self._limits.total_timeout_seconds):
                 return await self._search_authorized(context=context, query=query)
         except TimeoutError:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from None
+            pass
+        raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT)
 
     async def _search_authorized(
         self, *, context: WorkspaceContext, query: str
@@ -698,6 +706,7 @@ class OfficialRegistryService:
             now=fetched_at,
             cache_ttl=self._limits.cache_ttl,
             max_response_bytes=self._limits.max_response_bytes,
+            max_items=self._limits.max_items,
         )
         cached_result, rejected_cache = await self._read_cache(
             context=context, query_digest=query_digest, now=fetched_at
@@ -793,6 +802,7 @@ class OfficialRegistryService:
             now=now,
             cache_ttl=self._limits.cache_ttl,
             max_response_bytes=self._limits.max_response_bytes,
+            max_items=self._limits.max_items,
         )
         cache = await self._session.scalar(
             select(RegistrySearchCache).where(
@@ -975,6 +985,11 @@ async def _run_scanner(
     receiver: Connection | None = None
     sender: Connection | None = None
     process: SpawnProcess | None = None
+    loop: asyncio.AbstractEventLoop | None = None
+    reader_registered = False
+    failure_code: OfficialRegistryFailureCode | None = None
+    scan_result = False
+    scan_completed = False
     try:
         async with asyncio.timeout(timeout_seconds):
             semaphore = _scanner_process_semaphore()
@@ -996,38 +1011,53 @@ async def _run_scanner(
                     ready.set_result(None)
 
             loop.add_reader(receiver.fileno(), mark_ready)
+            reader_registered = True
             await ready
         loop.remove_reader(receiver.fileno())
+        reader_registered = False
         try:
-            succeeded, result = cast(tuple[bool, bool], receiver.recv())
+            succeeded, scan_result = cast(tuple[bool, bool], receiver.recv())
         except (EOFError, OSError, TypeError, ValueError):
-            raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from None
-        if not succeeded:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED)
-        return result
+            failure_code = OfficialRegistryFailureCode.SCANNER_FAILED
+        else:
+            if succeeded:
+                scan_completed = True
+            else:
+                failure_code = OfficialRegistryFailureCode.SCANNER_FAILED
     except TimeoutError:
-        raise OfficialRegistryError(timeout_code) from None
-    except OfficialRegistryError:
-        raise
+        failure_code = timeout_code
     except Exception:
-        raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from None
+        failure_code = OfficialRegistryFailureCode.SCANNER_FAILED
     finally:
-        if receiver is not None and "loop" in locals() and "ready" in locals():
-            loop.remove_reader(receiver.fileno())
+        if receiver is not None and loop is not None and reader_registered:
+            with suppress(Exception):
+                loop.remove_reader(receiver.fileno())
         if sender is not None:
-            sender.close()
+            with suppress(Exception):
+                sender.close()
         if receiver is not None:
-            receiver.close()
+            with suppress(Exception):
+                receiver.close()
         if process is not None and process.pid is not None:
             if process.is_alive():
-                process.terminate()
-                process.join(timeout=0.25)
+                with suppress(Exception):
+                    process.terminate()
+                with suppress(Exception):
+                    process.join(timeout=0.25)
             if process.is_alive():
-                process.kill()
-                process.join()
-            process.close()
+                with suppress(Exception):
+                    process.kill()
+                with suppress(Exception):
+                    process.join()
+            with suppress(Exception):
+                process.close()
         if permit_acquired:
             semaphore.release()
+    if failure_code is not None:
+        raise OfficialRegistryError(failure_code)
+    if not scan_completed:
+        raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED)
+    return scan_result
 
 
 async def purge_expired_registry_cache(
@@ -1062,12 +1092,15 @@ async def _purge_expired_workspace_cache(
     now: datetime,
     cache_ttl: timedelta | None = None,
     max_response_bytes: int | None = None,
+    max_items: int | None = None,
 ) -> None:
     expiry_predicates = [RegistrySearchCache.expires_at <= now]
     if cache_ttl is not None:
         expiry_predicates.append(RegistrySearchCache.fetched_at <= now - cache_ttl)
     if max_response_bytes is not None:
         expiry_predicates.append(RegistrySearchCache.byte_count > max_response_bytes)
+    if max_items is not None:
+        expiry_predicates.append(RegistrySearchCache.result_count > max_items)
     await session.execute(
         delete(RegistrySearchCache).where(
             RegistrySearchCache.workspace_id == workspace_id,
