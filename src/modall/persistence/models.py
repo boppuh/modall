@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     event,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Mapper, mapped_column
 from sqlalchemy.orm.attributes import get_history
@@ -101,12 +102,13 @@ class AuditEvent(Base):
             "action IN ('workspace.created', 'membership.changed', 'secret_binding.created', "
             "'connection.created', 'connection.version_appended', 'connection.verified', "
             "'connection.disabled', 'connection.enabled', 'capability.version_recorded', "
-            "'capability.enabled', 'capability.disabled', 'registry_entry.imported')",
+            "'capability.enabled', 'capability.disabled', 'registry_entry.imported', "
+            "'run.created', 'run.cancelled')",
             name="ck_audit_action",
         ),
         CheckConstraint(
             "resource_type IN ('workspace', 'membership', 'secret_binding', 'server_connection', "
-            "'capability', 'registry_entry')",
+            "'capability', 'registry_entry', 'run')",
             name="ck_audit_resource_type",
         ),
         Index("ix_audit_workspace_time_id", "workspace_id", "occurred_at", "id"),
@@ -663,6 +665,255 @@ class DiscoveryRefreshJob(Base):
     created_at: Mapped[CreatedAt]
 
 
+class SystemExecutionState(Base):
+    __tablename__ = "system_execution_state"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_system_execution_state_singleton"),
+        CheckConstraint("execution_epoch > 0", name="ck_system_execution_state_epoch"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    execution_epoch: Mapped[int] = mapped_column(Integer, default=1)
+    dispatch_quarantined: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class Run(Base):
+    __tablename__ = "runs"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "id"),
+        CheckConstraint(
+            "status IN ('queued', 'preparing', 'session_fenced', 'dispatch_fenced', "
+            "'succeeded', 'failed', 'cancelled', 'timed_out', 'indeterminate')",
+            name="ck_run_status",
+        ),
+        CheckConstraint(
+            "(status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'indeterminate')) "
+            "= (terminal_at IS NOT NULL)",
+            name="ck_run_terminal_time",
+        ),
+        CheckConstraint("connection_control_epoch >= 0", name="ck_run_connection_epoch"),
+        CheckConstraint("capability_status_epoch >= 0", name="ck_run_capability_epoch"),
+        CheckConstraint("length(argument_digest) = 64", name="ck_run_argument_digest"),
+        ForeignKeyConstraint(
+            ["workspace_id", "capability_id"],
+            ["capabilities.workspace_id", "capabilities.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "capability_version_id"],
+            ["capability_versions.workspace_id", "capability_versions.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "connection_id"],
+            ["server_connections.workspace_id", "server_connections.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "connection_version_id"],
+            ["server_connection_versions.workspace_id", "server_connection_versions.id"],
+            ondelete="RESTRICT",
+        ),
+        Index("ix_runs_workspace_created", "workspace_id", "created_at", "id"),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    capability_id: Mapped[UUID]
+    capability_version_id: Mapped[UUID]
+    connection_id: Mapped[UUID]
+    connection_version_id: Mapped[UUID]
+    connection_control_epoch: Mapped[int] = mapped_column(Integer)
+    capability_status_epoch: Mapped[int] = mapped_column(Integer)
+    protocol_revision: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24))
+    arguments: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    argument_digest: Mapped[str] = mapped_column(String(64))
+    arguments_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    cancellation_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    safe_error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[CreatedAt]
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "id"),
+        UniqueConstraint("run_id"),
+        CheckConstraint("execution_epoch > 0", name="ck_job_execution_epoch"),
+        CheckConstraint("lease_epoch >= 0", name="ck_job_lease_epoch"),
+        CheckConstraint(
+            "status IN ('queued', 'leased', 'succeeded', 'failed', 'cancelled', "
+            "'timed_out', 'indeterminate')",
+            name="ck_job_status",
+        ),
+        CheckConstraint(
+            "(status = 'leased' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (status <> 'leased' AND lease_owner IS NULL AND lease_expires_at IS NULL)",
+            name="ck_job_active_lease",
+        ),
+        CheckConstraint(
+            "(status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'indeterminate')) "
+            "= (completed_at IS NOT NULL)",
+            name="ck_job_completion_time",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "run_id"],
+            ["runs.workspace_id", "runs.id"],
+            ondelete="CASCADE",
+        ),
+        Index("ix_jobs_claim", "status", "available_at", "created_at"),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    run_id: Mapped[UUID]
+    actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    execution_epoch: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_epoch: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[CreatedAt]
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RunAttempt(Base):
+    __tablename__ = "run_attempts"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "id"),
+        UniqueConstraint("run_id", "sequence"),
+        CheckConstraint("sequence > 0", name="ck_run_attempt_sequence"),
+        CheckConstraint("lease_epoch > 0", name="ck_run_attempt_lease_epoch"),
+        CheckConstraint(
+            "status IN ('preparing', 'session_fenced', 'dispatch_fenced', 'succeeded', "
+            "'failed', 'cancelled', 'timed_out', 'indeterminate')",
+            name="ck_run_attempt_status",
+        ),
+        CheckConstraint(
+            "(status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'indeterminate')) "
+            "= (terminal_at IS NOT NULL)",
+            name="ck_run_attempt_terminal_time",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "run_id"],
+            ["runs.workspace_id", "runs.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "job_id"],
+            ["jobs.workspace_id", "jobs.id"],
+            ondelete="CASCADE",
+        ),
+        Index(
+            "uq_run_attempts_active",
+            "run_id",
+            unique=True,
+            postgresql_where=text("status IN ('preparing', 'session_fenced', 'dispatch_fenced')"),
+            sqlite_where=text("status IN ('preparing', 'session_fenced', 'dispatch_fenced')"),
+        ),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    run_id: Mapped[UUID]
+    job_id: Mapped[UUID]
+    sequence: Mapped[int] = mapped_column(Integer)
+    lease_epoch: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    safe_error_code: Mapped[str | None] = mapped_column(String(64))
+
+
+class RunEvent(Base):
+    __tablename__ = "run_events"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "id"),
+        UniqueConstraint("run_id", "sequence"),
+        CheckConstraint("sequence > 0", name="ck_run_event_sequence"),
+        ForeignKeyConstraint(
+            ["workspace_id", "run_id"],
+            ["runs.workspace_id", "runs.id"],
+            ondelete="CASCADE",
+        ),
+        Index("ix_run_events_run_sequence", "run_id", "sequence"),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    run_id: Mapped[UUID]
+    sequence: Mapped[int] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24))
+    safe_error_code: Mapped[str | None] = mapped_column(String(64))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ConfirmationNonce(Base):
+    __tablename__ = "confirmation_nonces"
+    __table_args__ = (
+        UniqueConstraint("nonce_digest"),
+        ForeignKeyConstraint(
+            ["workspace_id", "run_id"],
+            ["runs.workspace_id", "runs.id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("length(nonce_digest) = 64", name="ck_confirmation_nonce_digest"),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    nonce_digest: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[UUID]
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class IdempotencyRecord(Base):
+    __tablename__ = "idempotency_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "actor_user_id", "method", "route", "key_version", "key_hmac"
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "resource_id"],
+            ["runs.workspace_id", "runs.id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("length(key_hmac) = 64", name="ck_idempotency_key_hmac"),
+        CheckConstraint("length(request_hmac) = 64", name="ck_idempotency_request_hmac"),
+        CheckConstraint("resource_type = 'run'", name="ck_idempotency_resource_type"),
+        Index("ix_idempotency_expiry", "expires_at"),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    method: Mapped[str] = mapped_column(String(8))
+    route: Mapped[str] = mapped_column(String(128))
+    key_version: Mapped[str] = mapped_column(String(32))
+    key_hmac: Mapped[str] = mapped_column(String(64))
+    request_hmac: Mapped[str] = mapped_column(String(64))
+    resource_type: Mapped[str] = mapped_column(String(32))
+    resource_id: Mapped[UUID]
+    created_at: Mapped[CreatedAt]
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 def _reject_immutable_update(mapper: Mapper[object], connection: object, target: object) -> None:
     del connection
     if any(get_history(target, attribute.key).has_changes() for attribute in mapper.column_attrs):
@@ -698,6 +949,18 @@ def _reject_registry_entry_identity_update(
         raise ValueError("registry entry identity cannot be updated")
 
 
+def _reject_terminal_status_update(
+    mapper: Mapper[object], connection: object, target: object
+) -> None:
+    del mapper, connection
+    history = get_history(target, "status")
+    if history.has_changes() and any(
+        status in {"succeeded", "failed", "cancelled", "timed_out", "indeterminate"}
+        for status in history.deleted
+    ):
+        raise ValueError("terminal execution status cannot be updated")
+
+
 def _validate_registry_entry_insert(
     mapper: Mapper[object], connection: object, target: object
 ) -> None:
@@ -720,6 +983,9 @@ for immutable_model in (
     DiscoverySnapshot,
     DiscoverySnapshotCapability,
     RegistrySearchCache,
+    RunEvent,
+    ConfirmationNonce,
+    IdempotencyRecord,
 ):
     event.listen(immutable_model, "before_update", _reject_immutable_update)
 
@@ -728,3 +994,5 @@ event.listen(CapabilityStatusEvent, "before_delete", _reject_immutable_delete)
 event.listen(Capability, "before_update", _reject_capability_identity_update)
 event.listen(RegistryEntry, "before_update", _reject_registry_entry_identity_update)
 event.listen(RegistryEntry, "before_insert", _validate_registry_entry_insert)
+for execution_model in (Run, Job, RunAttempt):
+    event.listen(execution_model, "before_update", _reject_terminal_status_update)

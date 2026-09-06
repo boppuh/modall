@@ -1,15 +1,19 @@
 import asyncio
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from modall.execution.service import ExecutionService
+from modall.execution.types import HmacKeyVersion
 from modall.identity.repository import AuthorizationDenied, AuthorizationService
 from modall.identity.service import IdentityService
-from modall.identity.types import Permission, Principal, Role
+from modall.identity.types import Permission, Principal, Role, WorkspaceContext
 from modall.persistence.database import (
     async_database_url,
     create_engine,
@@ -19,9 +23,16 @@ from modall.persistence.database import (
 from modall.persistence.models import (
     Capability,
     CapabilityStatusEvent,
+    CapabilityVersion,
+    ConfirmationNonce,
+    DiscoveryPayload,
+    DiscoverySnapshot,
+    DiscoverySnapshotCapability,
+    Job,
     McpToolBinding,
     RegistryEntry,
     RegistrySearchCache,
+    Run,
     ServerConnectionVersion,
     User,
     WorkspaceMembership,
@@ -34,10 +45,95 @@ pytestmark = pytest.mark.skipif(
     reason="requires the migrated PostgreSQL integration database",
 )
 
+CONFIRMATION_KEYS = (HmacKeyVersion("confirm-v1", b"c" * 32),)
+IDEMPOTENCY_KEYS = (HmacKeyVersion("idem-v1", b"i" * 32),)
+
 
 def scanner_allows(value: object) -> bool:
     del value
     return False
+
+
+async def create_executable_target(
+    session: AsyncSession, context: WorkspaceContext
+) -> CapabilityVersion:
+    connection = await ConnectionService(session).create(
+        context=context,
+        name="Concurrent execution fixture",
+        endpoint_url="https://mcp.example/tools",
+        secret_binding_id=None,
+        policy_version="v1",
+    )
+    connection_version_id = connection.pending_version_id
+    assert connection_version_id is not None
+    generation, control_epoch, _ = await ConnectionService(session).allocate_refresh_generation(
+        context=context,
+        connection_id=connection.id,
+    )
+    capability_service = CapabilityService(session)
+    version = await capability_service.record_version(
+        context=context,
+        connection_id=connection.id,
+        connection_version_id=connection_version_id,
+        expected_control_epoch=control_epoch,
+        expected_refresh_generation=generation,
+        tool_identity="tools/search",
+        tool_name="search",
+        display_name="Search",
+        description="Search public records",
+        input_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string", "maxLength": 100}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        output_schema=None,
+        metadata_digest="a" * 64,
+        protocol_revision="2025-06-18",
+    )
+    payload = DiscoveryPayload(
+        workspace_id=context.workspace_id,
+        canonical_digest="b" * 64,
+        normalized_payload={"tools": []},
+        byte_count=2,
+    )
+    session.add(payload)
+    await session.flush()
+    snapshot = DiscoverySnapshot(
+        workspace_id=context.workspace_id,
+        connection_id=connection.id,
+        connection_version_id=connection_version_id,
+        payload_id=payload.id,
+        generation=generation,
+        control_epoch=control_epoch,
+        protocol_revision="2025-06-18",
+    )
+    session.add(snapshot)
+    await session.flush()
+    session.add(
+        DiscoverySnapshotCapability(
+            workspace_id=context.workspace_id,
+            connection_id=connection.id,
+            connection_version_id=connection_version_id,
+            snapshot_id=snapshot.id,
+            capability_version_id=version.id,
+        )
+    )
+    await ConnectionService(session).promote_pending(
+        context=context,
+        connection_id=connection.id,
+        expected_version_id=connection_version_id,
+        expected_control_epoch=control_epoch,
+        expected_refresh_generation=generation,
+    )
+    connection.current_snapshot_id = snapshot.id
+    await session.flush()
+    await capability_service.enable(
+        context=context,
+        capability_id=version.capability_id,
+        expected_version_id=version.id,
+    )
+    return version
 
 
 def test_concurrent_registry_search_misses_share_one_cache_row() -> None:
@@ -489,6 +585,184 @@ def test_database_guards_stable_capability_identity_and_exact_binding() -> None:
             async with factory() as session:
                 assert await session.get(Capability, capability_id) is None
                 assert await session.get(McpToolBinding, version_id) is None
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_run_creation_replays_one_resource() -> None:
+    async def scenario() -> None:
+        engine = create_engine(async_database_url(os.environ["MODALL_DATABASE_URL"]))
+        factory = create_session_factory(engine)
+        suffix = str(uuid4())
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        try:
+            async with transaction(factory) as session:
+                identity = IdentityService(session)
+                operator = await identity.resolve_user(
+                    Principal("issuer", f"execution-idempotency-{suffix}", None)
+                )
+                workspace = await identity.create_workspace(
+                    owner=operator, name=f"Execution idempotency {suffix}"
+                )
+                context = await AuthorizationService(session).authorize(
+                    user_id=operator.id,
+                    workspace_id=workspace.id,
+                    permission=Permission.INVOKE,
+                )
+                version = await create_executable_target(session, context)
+                execution = ExecutionService(
+                    session,
+                    confirmation_keys=CONFIRMATION_KEYS,
+                    idempotency_keys=IDEMPOTENCY_KEYS,
+                    now=lambda: now,
+                )
+                confirmations = [
+                    (
+                        await execution.preflight(
+                            context=context,
+                            capability_version_id=version.id,
+                            arguments={"query": "same"},
+                        )
+                    ).confirmation_token
+                    for _ in range(2)
+                ]
+                user_id, workspace_id, version_id = operator.id, workspace.id, version.id
+
+            both_ready = asyncio.Event()
+            ready_count = 0
+            ready_lock = asyncio.Lock()
+
+            async def create(confirmation: str) -> UUID:
+                nonlocal ready_count
+                async with transaction(factory) as session:
+                    context = await AuthorizationService(session).authorize(
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                        permission=Permission.INVOKE,
+                    )
+                    async with ready_lock:
+                        ready_count += 1
+                        if ready_count == 2:
+                            both_ready.set()
+                    await both_ready.wait()
+                    run = await ExecutionService(
+                        session,
+                        confirmation_keys=CONFIRMATION_KEYS,
+                        idempotency_keys=IDEMPOTENCY_KEYS,
+                        now=lambda: now,
+                    ).create_run(
+                        context=context,
+                        capability_version_id=version_id,
+                        arguments={"query": "same"},
+                        confirmation_token=confirmation,
+                        idempotency_key="concurrent-key",
+                    )
+                    return run.id
+
+            run_ids = await asyncio.gather(*(create(token) for token in confirmations))
+            assert len(set(run_ids)) == 1
+            async with factory() as session:
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(Run)
+                        .where(Run.workspace_id == workspace_id)
+                    )
+                    == 1
+                )
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(ConfirmationNonce)
+                        .where(ConfirmationNonce.run_id == run_ids[0])
+                    )
+                    == 2
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_workers_claim_each_job_once() -> None:
+    async def scenario() -> None:
+        engine = create_engine(async_database_url(os.environ["MODALL_DATABASE_URL"]))
+        factory = create_session_factory(engine)
+        suffix = str(uuid4())
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        try:
+            async with transaction(factory) as session:
+                identity = IdentityService(session)
+                operator = await identity.resolve_user(
+                    Principal("issuer", f"execution-claims-{suffix}", None)
+                )
+                workspace = await identity.create_workspace(
+                    owner=operator, name=f"Execution claims {suffix}"
+                )
+                context = await AuthorizationService(session).authorize(
+                    user_id=operator.id,
+                    workspace_id=workspace.id,
+                    permission=Permission.INVOKE,
+                )
+                version = await create_executable_target(session, context)
+                execution = ExecutionService(
+                    session,
+                    confirmation_keys=CONFIRMATION_KEYS,
+                    idempotency_keys=IDEMPOTENCY_KEYS,
+                    now=lambda: now,
+                )
+                for sequence in range(2):
+                    arguments: dict[str, object] = {"query": f"job-{sequence}"}
+                    preflight = await execution.preflight(
+                        context=context,
+                        capability_version_id=version.id,
+                        arguments=arguments,
+                    )
+                    await execution.create_run(
+                        context=context,
+                        capability_version_id=version.id,
+                        arguments=arguments,
+                        confirmation_token=preflight.confirmation_token,
+                        idempotency_key=f"claim-{sequence}",
+                    )
+                workspace_id = workspace.id
+
+            both_ready = asyncio.Event()
+            ready_count = 0
+            ready_lock = asyncio.Lock()
+
+            async def claim(worker_id: str) -> UUID:
+                nonlocal ready_count
+                async with transaction(factory) as session:
+                    async with ready_lock:
+                        ready_count += 1
+                        if ready_count == 2:
+                            both_ready.set()
+                    await both_ready.wait()
+                    lease = await ExecutionService(
+                        session,
+                        confirmation_keys=CONFIRMATION_KEYS,
+                        idempotency_keys=IDEMPOTENCY_KEYS,
+                        now=lambda: now,
+                    ).claim_job(
+                        worker_id=worker_id,
+                        lease_duration=timedelta(seconds=30),
+                    )
+                    return lease.job_id
+
+            job_ids = await asyncio.gather(claim("worker-one"), claim("worker-two"))
+            assert len(set(job_ids)) == 2
+            async with factory() as session:
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(Job)
+                        .where(Job.workspace_id == workspace_id, Job.status == "leased")
+                    )
+                    == 2
+                )
         finally:
             await engine.dispose()
 

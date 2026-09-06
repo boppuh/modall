@@ -1,0 +1,1118 @@
+"""Durable invocation admission, replay protection, and worker leasing."""
+
+import hashlib
+import hmac
+import json
+import re
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Literal, cast
+from uuid import UUID, uuid4
+
+import jwt
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
+from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from modall.audit.types import AuditAction, ResourceType
+from modall.execution.types import (
+    ExecutionError,
+    ExecutionFailureCode,
+    ExecutionLimits,
+    HmacKeyVersion,
+    JobLease,
+    JobStatus,
+    RunEventType,
+    RunPreflight,
+    RunStatus,
+)
+from modall.identity.repository import require_current_role
+from modall.identity.types import Role, WorkspaceContext
+from modall.mcp_adapter.client import QUALIFIED_PROTOCOL_REVISION
+from modall.persistence.models import (
+    AuditEvent,
+    Capability,
+    CapabilityVersion,
+    ConfirmationNonce,
+    DiscoverySnapshotCapability,
+    IdempotencyRecord,
+    Job,
+    McpToolBinding,
+    Run,
+    RunAttempt,
+    RunEvent,
+    ServerConnection,
+    SystemExecutionState,
+)
+from modall.registry.types import CapabilityStatus, ConnectionLifecycle
+from modall.security.metadata import (
+    MetadataValidationError,
+    contains_sensitive_json,
+    validate_bounded_json,
+)
+
+_TOKEN_ISSUER = "modall"
+_TOKEN_AUDIENCE = "modall-run-confirmation"
+_RUN_METHOD = "POST"
+_RUN_ROUTE = "/v1/runs"
+_KEY_VERSION = re.compile(r"[A-Za-z0-9._-]{1,32}\Z")
+_TERMINAL_RUN_STATUSES = frozenset(
+    {
+        RunStatus.SUCCEEDED,
+        RunStatus.FAILED,
+        RunStatus.CANCELLED,
+        RunStatus.TIMED_OUT,
+        RunStatus.INDETERMINATE,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmissionTarget:
+    capability: Capability
+    version: CapabilityVersion
+    binding: McpToolBinding
+    connection: ServerConnection
+
+
+@dataclass(frozen=True, slots=True)
+class _ConfirmationClaims:
+    workspace_id: UUID
+    actor_user_id: UUID
+    capability_version_id: UUID
+    capability_id: UUID
+    connection_id: UUID
+    connection_version_id: UUID
+    argument_digest: str
+    route: str
+    nonce: str
+    expires_at: datetime
+
+
+class ExecutionService:
+    """Workspace-scoped execution admission and durable worker coordination."""
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        confirmation_keys: Sequence[HmacKeyVersion],
+        idempotency_keys: Sequence[HmacKeyVersion],
+        limits: ExecutionLimits | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._session = session
+        self._limits = limits or ExecutionLimits()
+        self._confirmation_keys = self._validate_keyring(confirmation_keys)
+        self._idempotency_keys = self._validate_keyring(idempotency_keys)
+        self._now = now or (lambda: datetime.now(UTC))
+
+    async def preflight(
+        self,
+        *,
+        context: WorkspaceContext,
+        capability_version_id: UUID,
+        arguments: dict[str, object],
+    ) -> RunPreflight:
+        await require_current_role(self._session, context, Role.ADMIN, Role.OPERATOR)
+        target = await self._load_admission_target(context, capability_version_id)
+        normalized, argument_digest = self._validate_arguments(
+            arguments, target.version.input_schema
+        )
+        del normalized
+        now = self._utc_now()
+        expires_at = now + timedelta(seconds=self._limits.confirmation_ttl_seconds)
+        nonce = uuid4().hex
+        active = self._confirmation_keys[0]
+        claims = {
+            "iss": _TOKEN_ISSUER,
+            "aud": _TOKEN_AUDIENCE,
+            "iat": int(now.timestamp()),
+            "exp": int(expires_at.timestamp()),
+            "jti": nonce,
+            "w": str(context.workspace_id),
+            "a": str(context.actor_user_id),
+            "cv": str(capability_version_id),
+            "c": str(target.capability.id),
+            "cn": str(target.connection.id),
+            "cnv": str(target.binding.connection_version_id),
+            "ad": argument_digest,
+            "r": _RUN_ROUTE,
+        }
+        token = jwt.encode(
+            claims, active.secret, algorithm="HS256", headers={"kid": active.version}
+        )
+        return RunPreflight(
+            confirmation_token=token,
+            capability_version_id=capability_version_id,
+            connection_version_id=target.binding.connection_version_id,
+            argument_digest=argument_digest,
+            expires_at=expires_at,
+        )
+
+    async def create_run(
+        self,
+        *,
+        context: WorkspaceContext,
+        capability_version_id: UUID,
+        arguments: dict[str, object],
+        confirmation_token: str,
+        idempotency_key: str,
+        deadline: datetime | None = None,
+        correlation_id: UUID | None = None,
+    ) -> Run:
+        await require_current_role(
+            self._session,
+            context,
+            Role.ADMIN,
+            Role.OPERATOR,
+            serialize_workspace=True,
+        )
+        normalized, argument_digest = self._normalize_arguments(arguments)
+        claims = self._decode_confirmation(confirmation_token)
+        now = self._utc_now()
+        self._require_confirmation_bindings(
+            claims=claims,
+            context=context,
+            capability_version_id=capability_version_id,
+            argument_digest=argument_digest,
+            now=now,
+        )
+        requested_deadline, effective_deadline = self._normalize_deadline(deadline, now)
+        raw_key = self._validate_idempotency_key(idempotency_key)
+        canonical_request = self._canonical_request(
+            capability_id=claims.capability_id,
+            capability_version_id=capability_version_id,
+            connection_id=claims.connection_id,
+            connection_version_id=claims.connection_version_id,
+            argument_digest=argument_digest,
+            deadline=requested_deadline,
+        )
+        existing_record = await self._find_idempotency_record(context, raw_key)
+        nonce_digest = _sha256(claims.nonce.encode())
+        used_nonce = await self._session.scalar(
+            select(ConfirmationNonce).where(ConfirmationNonce.nonce_digest == nonce_digest)
+        )
+        if existing_record is not None:
+            key = self._key_by_version(self._idempotency_keys, existing_record.key_version)
+            if key is None or not hmac.compare_digest(
+                existing_record.request_hmac,
+                _hmac_hex(key.secret, b"request\0" + canonical_request),
+            ):
+                raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
+            run = await self._session.scalar(
+                select(Run).where(
+                    Run.id == existing_record.resource_id,
+                    Run.workspace_id == context.workspace_id,
+                )
+            )
+            if run is None:
+                raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
+            if (
+                run.capability_id != claims.capability_id
+                or run.capability_version_id != claims.capability_version_id
+                or run.connection_id != claims.connection_id
+                or run.connection_version_id != claims.connection_version_id
+            ):
+                raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
+            if used_nonce is not None and used_nonce.run_id != run.id:
+                raise ExecutionError(ExecutionFailureCode.CONFIRMATION_REPLAYED)
+            if used_nonce is None:
+                self._session.add(
+                    ConfirmationNonce(
+                        workspace_id=context.workspace_id,
+                        actor_user_id=context.actor_user_id,
+                        nonce_digest=nonce_digest,
+                        run_id=run.id,
+                        expires_at=claims.expires_at,
+                        consumed_at=now,
+                    )
+                )
+                await self._session.flush()
+            return run
+        if used_nonce is not None:
+            raise ExecutionError(ExecutionFailureCode.CONFIRMATION_REPLAYED)
+
+        target = await self._load_admission_target(context, capability_version_id)
+        if (
+            claims.capability_id != target.capability.id
+            or claims.connection_id != target.connection.id
+            or claims.connection_version_id != target.binding.connection_version_id
+        ):
+            raise ExecutionError(ExecutionFailureCode.INVALID_CONFIRMATION)
+        self._validate_normalized_arguments(normalized, target.version.input_schema)
+
+        state = await self._execution_state(lock="shared")
+        if state.dispatch_quarantined:
+            raise ExecutionError(ExecutionFailureCode.DISPATCH_QUARANTINED)
+        run_id = uuid4()
+        run = Run(
+            id=run_id,
+            workspace_id=context.workspace_id,
+            actor_user_id=context.actor_user_id,
+            capability_id=target.capability.id,
+            capability_version_id=target.version.id,
+            connection_id=target.connection.id,
+            connection_version_id=target.binding.connection_version_id,
+            connection_control_epoch=target.connection.control_epoch,
+            capability_status_epoch=target.capability.status_epoch,
+            protocol_revision=target.binding.protocol_revision,
+            status=RunStatus.QUEUED.value,
+            arguments=normalized,
+            argument_digest=argument_digest,
+            arguments_expires_at=now + timedelta(days=self._limits.argument_retention_days),
+            deadline=effective_deadline,
+            cancellation_requested=False,
+            safe_error_code=None,
+            created_at=now,
+            updated_at=now,
+            terminal_at=None,
+        )
+        self._session.add(run)
+        if not await _flush_execution_payload(self._session):
+            raise ExecutionError(ExecutionFailureCode.PERSISTENCE_FAILURE)
+        self._session.add(
+            Job(
+                workspace_id=context.workspace_id,
+                run_id=run_id,
+                actor_user_id=context.actor_user_id,
+                execution_epoch=state.execution_epoch,
+                status=JobStatus.QUEUED.value,
+                lease_owner=None,
+                lease_epoch=0,
+                lease_expires_at=None,
+                available_at=now,
+                deadline=effective_deadline,
+                completed_at=None,
+            )
+        )
+        self._append_event(run, RunEventType.ADMITTED, RunStatus.QUEUED, now=now, sequence=1)
+        self._session.add(
+            ConfirmationNonce(
+                workspace_id=context.workspace_id,
+                actor_user_id=context.actor_user_id,
+                nonce_digest=nonce_digest,
+                run_id=run_id,
+                expires_at=claims.expires_at,
+                consumed_at=now,
+            )
+        )
+        active_key = self._idempotency_keys[0]
+        self._session.add(
+            IdempotencyRecord(
+                workspace_id=context.workspace_id,
+                actor_user_id=context.actor_user_id,
+                method=_RUN_METHOD,
+                route=_RUN_ROUTE,
+                key_version=active_key.version,
+                key_hmac=self._idempotency_hmac(active_key, context, raw_key),
+                request_hmac=_hmac_hex(active_key.secret, b"request\0" + canonical_request),
+                resource_type=ResourceType.RUN.value,
+                resource_id=run_id,
+                created_at=now,
+                completed_at=now,
+                expires_at=now + timedelta(days=self._limits.run_retention_days),
+            )
+        )
+        self._session.add(
+            AuditEvent.succeeded(
+                workspace_id=context.workspace_id,
+                actor_user_id=context.actor_user_id,
+                action=AuditAction.RUN_CREATED,
+                resource_type=ResourceType.RUN,
+                resource_id=run_id,
+                correlation_id=correlation_id or uuid4(),
+            )
+        )
+        if not await _flush_execution_payload(self._session):
+            raise ExecutionError(ExecutionFailureCode.PERSISTENCE_FAILURE)
+        return run
+
+    async def claim_job(
+        self,
+        *,
+        worker_id: str,
+        lease_duration: timedelta,
+    ) -> JobLease:
+        if not worker_id or len(worker_id) > 128 or lease_duration <= timedelta(0):
+            raise ValueError("invalid worker lease")
+        now = self._utc_now()
+        state = await self._execution_state(lock="shared")
+        if state.dispatch_quarantined:
+            raise ExecutionError(ExecutionFailureCode.DISPATCH_QUARANTINED)
+        await self._terminalize_expired_jobs(now)
+        await self._terminalize_abandoned_dispatches(now)
+        job = await self._session.scalar(
+            select(Job)
+            .where(
+                Job.execution_epoch == state.execution_epoch,
+                Job.available_at <= now,
+                Job.deadline > now,
+                or_(
+                    Job.status == JobStatus.QUEUED.value,
+                    and_(
+                        Job.status == JobStatus.LEASED.value,
+                        Job.lease_expires_at <= now,
+                    ),
+                ),
+            )
+            .order_by(Job.created_at, Job.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        if job is None:
+            raise ExecutionError(ExecutionFailureCode.NO_JOB_AVAILABLE)
+        run = await self._locked_run(job.workspace_id, job.run_id)
+        if job.status == JobStatus.LEASED.value:
+            previous = await self._active_attempt(run.id)
+            if previous is not None:
+                previous.status = RunStatus.FAILED.value
+                previous.safe_error_code = "worker_lost_before_dispatch"
+                previous.terminal_at = now
+                await self._append_next_event(
+                    run,
+                    RunEventType.LEASE_LOST,
+                    RunStatus.PREPARING,
+                    safe_error_code="worker_lost_before_dispatch",
+                    now=now,
+                )
+                await self._session.flush()
+        job.status = JobStatus.LEASED.value
+        job.lease_owner = worker_id
+        job.lease_epoch += 1
+        job.lease_expires_at = now + lease_duration
+        latest_attempt = await self._session.scalar(
+            select(func.max(RunAttempt.sequence)).where(RunAttempt.run_id == run.id)
+        )
+        self._session.add(
+            RunAttempt(
+                workspace_id=run.workspace_id,
+                run_id=run.id,
+                job_id=job.id,
+                sequence=(latest_attempt or 0) + 1,
+                lease_epoch=job.lease_epoch,
+                status=RunStatus.PREPARING.value,
+                started_at=now,
+                terminal_at=None,
+                safe_error_code=None,
+            )
+        )
+        run.status = RunStatus.PREPARING.value
+        run.updated_at = now
+        await self._append_next_event(
+            run, RunEventType.ATTEMPT_STARTED, RunStatus.PREPARING, now=now
+        )
+        await self._session.flush()
+        return JobLease(
+            job_id=job.id,
+            run_id=job.run_id,
+            workspace_id=job.workspace_id,
+            worker_id=worker_id,
+            lease_epoch=job.lease_epoch,
+            execution_epoch=job.execution_epoch,
+            expires_at=job.lease_expires_at,
+        )
+
+    async def heartbeat(self, lease: JobLease, *, lease_duration: timedelta) -> JobLease:
+        if lease_duration <= timedelta(0):
+            raise ValueError("invalid worker lease")
+        now = self._utc_now()
+        state = await self._execution_state(lock="shared")
+        job = await self._locked_job(lease)
+        if (
+            state.dispatch_quarantined
+            or state.execution_epoch != lease.execution_epoch
+            or job.status != JobStatus.LEASED.value
+            or job.lease_owner != lease.worker_id
+            or job.lease_epoch != lease.lease_epoch
+            or job.lease_expires_at is None
+            or _utc(job.lease_expires_at) <= now
+        ):
+            raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
+        job.lease_expires_at = now + lease_duration
+        await self._session.flush()
+        return JobLease(
+            job_id=job.id,
+            run_id=job.run_id,
+            workspace_id=job.workspace_id,
+            worker_id=lease.worker_id,
+            lease_epoch=lease.lease_epoch,
+            execution_epoch=lease.execution_epoch,
+            expires_at=job.lease_expires_at,
+        )
+
+    async def complete_lease(
+        self,
+        lease: JobLease,
+        *,
+        status: RunStatus,
+        safe_error_code: str | None = None,
+    ) -> Run:
+        if status not in _TERMINAL_RUN_STATUSES:
+            raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
+        now = self._utc_now()
+        state = await self._execution_state(lock="shared")
+        job = await self._locked_job(lease)
+        if (
+            state.execution_epoch != lease.execution_epoch
+            or job.status != JobStatus.LEASED.value
+            or job.lease_owner != lease.worker_id
+            or job.lease_epoch != lease.lease_epoch
+            or job.lease_expires_at is None
+            or _utc(job.lease_expires_at) <= now
+        ):
+            raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
+        run = await self._locked_run(job.workspace_id, job.run_id)
+        if RunStatus(run.status) in _TERMINAL_RUN_STATUSES:
+            raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
+        attempt = await self._active_attempt(run.id)
+        if attempt is None or attempt.lease_epoch != lease.lease_epoch:
+            raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
+        run.status = status.value
+        run.safe_error_code = safe_error_code
+        run.updated_at = now
+        run.terminal_at = now
+        attempt.status = status.value
+        attempt.safe_error_code = safe_error_code
+        attempt.terminal_at = now
+        job.status = JobStatus(status.value).value
+        job.lease_owner = None
+        job.lease_expires_at = None
+        job.completed_at = now
+        await self._append_next_event(
+            run,
+            RunEventType.TERMINAL,
+            status,
+            safe_error_code=safe_error_code,
+            now=now,
+        )
+        await self._session.flush()
+        return run
+
+    async def cancel_run(
+        self,
+        *,
+        context: WorkspaceContext,
+        run_id: UUID,
+        correlation_id: UUID | None = None,
+    ) -> Run:
+        await require_current_role(
+            self._session,
+            context,
+            Role.ADMIN,
+            Role.OPERATOR,
+            serialize_workspace=True,
+        )
+        run = await self._locked_run(context.workspace_id, run_id)
+        status = RunStatus(run.status)
+        if status in _TERMINAL_RUN_STATUSES:
+            return run
+        now = self._utc_now()
+        run.cancellation_requested = True
+        if status in {RunStatus.QUEUED, RunStatus.PREPARING, RunStatus.SESSION_FENCED}:
+            await self._terminalize_run(
+                run,
+                RunStatus.CANCELLED,
+                now,
+                "cancelled_before_dispatch",
+                event_type=RunEventType.CANCEL_REQUESTED,
+            )
+        else:
+            run.updated_at = now
+            await self._append_next_event(run, RunEventType.CANCEL_REQUESTED, status, now=now)
+        self._session.add(
+            AuditEvent.succeeded(
+                workspace_id=context.workspace_id,
+                actor_user_id=context.actor_user_id,
+                action=AuditAction.RUN_CANCELLED,
+                resource_type=ResourceType.RUN,
+                resource_id=run.id,
+                correlation_id=correlation_id or uuid4(),
+            )
+        )
+        await self._session.flush()
+        return run
+
+    async def enter_restore_quarantine(self) -> int:
+        now = self._utc_now()
+        state = await self._execution_state(lock="exclusive")
+        state.execution_epoch += 1
+        state.dispatch_quarantined = True
+        state.updated_at = now
+        runs = list(
+            (
+                await self._session.scalars(
+                    select(Run)
+                    .where(Run.status.not_in([status.value for status in _TERMINAL_RUN_STATUSES]))
+                    .with_for_update()
+                )
+            ).all()
+        )
+        for run in runs:
+            terminal = (
+                RunStatus.INDETERMINATE
+                if run.status == RunStatus.DISPATCH_FENCED.value
+                else RunStatus.CANCELLED
+            )
+            await self._terminalize_run(
+                run,
+                terminal,
+                now,
+                "restore_reconciliation",
+                event_type=RunEventType.RESTORE_RECONCILED,
+            )
+        await self._session.flush()
+        return state.execution_epoch
+
+    async def clear_restore_quarantine(self, *, context: WorkspaceContext) -> int:
+        await require_current_role(self._session, context, Role.ADMIN, serialize_workspace=True)
+        state = await self._execution_state(lock="exclusive")
+        state.dispatch_quarantined = False
+        state.updated_at = self._utc_now()
+        await self._session.flush()
+        return state.execution_epoch
+
+    async def expire_retained_content(self, *, batch_size: int = 500) -> int:
+        if batch_size <= 0 or batch_size > 1000:
+            raise ValueError("invalid cleanup batch")
+        now = self._utc_now()
+        runs = list(
+            (
+                await self._session.scalars(
+                    select(Run)
+                    .where(Run.arguments.is_not(None), Run.arguments_expires_at <= now)
+                    .order_by(Run.arguments_expires_at, Run.id)
+                    .limit(batch_size)
+                    .with_for_update(skip_locked=True)
+                )
+            ).all()
+        )
+        for run in runs:
+            status = RunStatus(run.status)
+            if status not in _TERMINAL_RUN_STATUSES:
+                terminal = (
+                    RunStatus.INDETERMINATE
+                    if status == RunStatus.DISPATCH_FENCED
+                    else RunStatus.TIMED_OUT
+                )
+                await self._terminalize_run(
+                    run,
+                    terminal,
+                    now,
+                    "content_retention_deadline",
+                    event_type=RunEventType.CONTENT_EXPIRED,
+                )
+            else:
+                await self._append_next_event(run, RunEventType.CONTENT_EXPIRED, status, now=now)
+            run.arguments = None
+            run.updated_at = now
+        await self._session.flush()
+        return len(runs)
+
+    async def delete_expired_run_metadata(self, *, batch_size: int = 500) -> int:
+        if batch_size <= 0 or batch_size > 1000:
+            raise ValueError("invalid cleanup batch")
+        cutoff = self._utc_now() - timedelta(days=self._limits.run_retention_days)
+        run_ids = list(
+            (
+                await self._session.scalars(
+                    select(Run.id)
+                    .where(
+                        Run.terminal_at.is_not(None),
+                        Run.terminal_at <= cutoff,
+                    )
+                    .order_by(Run.terminal_at, Run.id)
+                    .limit(batch_size)
+                    .with_for_update(skip_locked=True)
+                )
+            ).all()
+        )
+        if run_ids:
+            await self._session.execute(delete(Run).where(Run.id.in_(run_ids)))
+        return len(run_ids)
+
+    @staticmethod
+    def replay_projection(events: Sequence[RunEvent]) -> RunStatus:
+        if not events:
+            raise ValueError("run event history is empty")
+        expected_sequence = 1
+        current = RunStatus.QUEUED
+        for event in sorted(events, key=lambda candidate: candidate.sequence):
+            if event.sequence != expected_sequence:
+                raise ValueError("run event history is not contiguous")
+            current = RunStatus(event.status)
+            expected_sequence += 1
+        return current
+
+    async def _load_admission_target(
+        self, context: WorkspaceContext, capability_version_id: UUID
+    ) -> _AdmissionTarget:
+        version = await self._session.scalar(
+            select(CapabilityVersion).where(
+                CapabilityVersion.id == capability_version_id,
+                CapabilityVersion.workspace_id == context.workspace_id,
+            )
+        )
+        if version is None:
+            raise ExecutionError(ExecutionFailureCode.CAPABILITY_UNAVAILABLE)
+        capability = await self._session.scalar(
+            select(Capability).where(
+                Capability.id == version.capability_id,
+                Capability.workspace_id == context.workspace_id,
+            )
+        )
+        binding = await self._session.scalar(
+            select(McpToolBinding).where(
+                McpToolBinding.capability_version_id == version.id,
+                McpToolBinding.workspace_id == context.workspace_id,
+            )
+        )
+        if capability is None or binding is None:
+            raise ExecutionError(ExecutionFailureCode.CAPABILITY_UNAVAILABLE)
+        connection = await self._session.scalar(
+            select(ServerConnection).where(
+                ServerConnection.id == binding.connection_id,
+                ServerConnection.workspace_id == context.workspace_id,
+            )
+        )
+        observed = None
+        if connection is not None and connection.current_snapshot_id is not None:
+            observed = await self._session.scalar(
+                select(DiscoverySnapshotCapability.id).where(
+                    DiscoverySnapshotCapability.workspace_id == context.workspace_id,
+                    DiscoverySnapshotCapability.connection_id == connection.id,
+                    DiscoverySnapshotCapability.connection_version_id
+                    == binding.connection_version_id,
+                    DiscoverySnapshotCapability.snapshot_id == connection.current_snapshot_id,
+                    DiscoverySnapshotCapability.capability_version_id == version.id,
+                )
+            )
+        if (
+            connection is None
+            or observed is None
+            or not version.schema_supported
+            or capability.status != CapabilityStatus.ENABLED.value
+            or capability.enabled_version_id != version.id
+            or capability.pending_version_id is not None
+            or connection.lifecycle != ConnectionLifecycle.ACTIVE.value
+            or connection.pending_version_id is not None
+            or connection.verified_version_id != binding.connection_version_id
+            or binding.protocol_revision != QUALIFIED_PROTOCOL_REVISION
+        ):
+            raise ExecutionError(ExecutionFailureCode.CAPABILITY_UNAVAILABLE)
+        return _AdmissionTarget(capability, version, binding, connection)
+
+    def _validate_arguments(
+        self, arguments: dict[str, object], schema: dict[str, object]
+    ) -> tuple[dict[str, object], str]:
+        normalized, digest = self._normalize_arguments(arguments)
+        self._validate_normalized_arguments(normalized, schema)
+        return normalized, digest
+
+    def _normalize_arguments(self, arguments: dict[str, object]) -> tuple[dict[str, object], str]:
+        try:
+            validate_bounded_json(arguments)
+            encoded = json.dumps(
+                arguments,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            if len(encoded) > self._limits.max_argument_bytes:
+                raise ExecutionError(ExecutionFailureCode.ARGUMENT_LIMIT)
+            normalized = json.loads(encoded)
+        except ExecutionError:
+            raise
+        except (MetadataValidationError, TypeError, ValueError, UnicodeError, RecursionError):
+            raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS) from None
+        if not isinstance(normalized, dict):
+            raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS)
+        return normalized, _sha256(encoded)
+
+    @staticmethod
+    def _validate_normalized_arguments(
+        arguments: dict[str, object], schema: dict[str, object]
+    ) -> None:
+        try:
+            contains_secret = contains_sensitive_json(arguments)
+        except Exception:
+            raise ExecutionError(ExecutionFailureCode.SCANNER_FAILED) from None
+        if contains_secret:
+            raise ExecutionError(ExecutionFailureCode.SENSITIVE_ARGUMENTS)
+        try:
+            Draft202012Validator.check_schema(schema)
+            Draft202012Validator(schema).validate(arguments)
+        except ValidationError:
+            raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS) from None
+        except SchemaError:
+            raise ExecutionError(ExecutionFailureCode.CAPABILITY_UNAVAILABLE) from None
+        except Exception:
+            raise ExecutionError(ExecutionFailureCode.SCANNER_FAILED) from None
+
+    def _decode_confirmation(self, token: str) -> _ConfirmationClaims:
+        if not token or len(token) > 4096:
+            raise ExecutionError(ExecutionFailureCode.INVALID_CONFIRMATION)
+        try:
+            header = jwt.get_unverified_header(token)
+            kid = header.get("kid")
+            key = self._key_by_version(self._confirmation_keys, kid if isinstance(kid, str) else "")
+            if key is None:
+                raise ExecutionError(ExecutionFailureCode.INVALID_CONFIRMATION)
+            payload = jwt.decode(
+                token,
+                key.secret,
+                algorithms=["HS256"],
+                audience=_TOKEN_AUDIENCE,
+                issuer=_TOKEN_ISSUER,
+                options={"verify_exp": False, "require": ["exp", "iat", "jti"]},
+            )
+            return _ConfirmationClaims(
+                workspace_id=UUID(payload["w"]),
+                actor_user_id=UUID(payload["a"]),
+                capability_version_id=UUID(payload["cv"]),
+                capability_id=UUID(payload["c"]),
+                connection_id=UUID(payload["cn"]),
+                connection_version_id=UUID(payload["cnv"]),
+                argument_digest=str(payload["ad"]),
+                route=str(payload["r"]),
+                nonce=str(payload["jti"]),
+                expires_at=datetime.fromtimestamp(int(payload["exp"]), UTC),
+            )
+        except ExecutionError:
+            raise
+        except Exception:
+            raise ExecutionError(ExecutionFailureCode.INVALID_CONFIRMATION) from None
+
+    @staticmethod
+    def _require_confirmation_bindings(
+        *,
+        claims: _ConfirmationClaims,
+        context: WorkspaceContext,
+        capability_version_id: UUID,
+        argument_digest: str,
+        now: datetime,
+    ) -> None:
+        if claims.expires_at <= now:
+            raise ExecutionError(ExecutionFailureCode.CONFIRMATION_EXPIRED)
+        if (
+            claims.workspace_id != context.workspace_id
+            or claims.actor_user_id != context.actor_user_id
+            or claims.capability_version_id != capability_version_id
+            or claims.argument_digest != argument_digest
+            or claims.route != _RUN_ROUTE
+            or not claims.nonce
+        ):
+            raise ExecutionError(ExecutionFailureCode.INVALID_CONFIRMATION)
+
+    async def _find_idempotency_record(
+        self, context: WorkspaceContext, raw_key: bytes
+    ) -> IdempotencyRecord | None:
+        candidates = [
+            and_(
+                IdempotencyRecord.key_version == key.version,
+                IdempotencyRecord.key_hmac == self._idempotency_hmac(key, context, raw_key),
+            )
+            for key in self._idempotency_keys
+        ]
+        return cast(
+            IdempotencyRecord | None,
+            await self._session.scalar(
+                select(IdempotencyRecord)
+                .where(
+                    IdempotencyRecord.workspace_id == context.workspace_id,
+                    IdempotencyRecord.actor_user_id == context.actor_user_id,
+                    IdempotencyRecord.method == _RUN_METHOD,
+                    IdempotencyRecord.route == _RUN_ROUTE,
+                    or_(*candidates),
+                )
+                .with_for_update()
+            ),
+        )
+
+    @staticmethod
+    def _idempotency_hmac(key: HmacKeyVersion, context: WorkspaceContext, raw_key: bytes) -> str:
+        scope = (
+            b"key\0"
+            + str(context.workspace_id).encode()
+            + b"\0"
+            + str(context.actor_user_id).encode()
+            + b"\0"
+            + _RUN_METHOD.encode()
+            + b"\0"
+            + _RUN_ROUTE.encode()
+            + b"\0"
+        )
+        return _hmac_hex(key.secret, scope + raw_key)
+
+    @staticmethod
+    def _canonical_request(
+        *,
+        capability_id: UUID,
+        capability_version_id: UUID,
+        connection_id: UUID,
+        connection_version_id: UUID,
+        argument_digest: str,
+        deadline: datetime | None,
+    ) -> bytes:
+        return json.dumps(
+            {
+                "argument_digest": argument_digest,
+                "capability_id": str(capability_id),
+                "capability_version_id": str(capability_version_id),
+                "connection_id": str(connection_id),
+                "connection_version_id": str(connection_version_id),
+                "deadline": deadline.isoformat() if deadline is not None else None,
+                "method": _RUN_METHOD,
+                "route": _RUN_ROUTE,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+
+    def _normalize_deadline(
+        self, deadline: datetime | None, now: datetime
+    ) -> tuple[datetime | None, datetime]:
+        if deadline is None:
+            return None, now + timedelta(seconds=self._limits.max_run_seconds)
+        if deadline.tzinfo is None or deadline.utcoffset() is None:
+            raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS)
+        requested = deadline.astimezone(UTC)
+        if requested <= now or requested > now + timedelta(seconds=self._limits.max_run_seconds):
+            raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS)
+        return requested, requested
+
+    def _validate_idempotency_key(self, value: str) -> bytes:
+        if (
+            not value
+            or len(value) > self._limits.max_idempotency_key_characters
+            or any(ord(character) < 33 or ord(character) > 126 for character in value)
+        ):
+            raise ExecutionError(ExecutionFailureCode.INVALID_IDEMPOTENCY_KEY)
+        return value.encode("ascii")
+
+    async def _execution_state(
+        self, *, lock: Literal["none", "shared", "exclusive"]
+    ) -> SystemExecutionState:
+        statement = select(SystemExecutionState).where(SystemExecutionState.id == 1)
+        if lock != "none":
+            statement = statement.with_for_update(read=lock == "shared")
+        state = await self._session.scalar(statement)
+        if state is None:
+            state = SystemExecutionState(
+                id=1,
+                execution_epoch=1,
+                dispatch_quarantined=False,
+                updated_at=self._utc_now(),
+            )
+            self._session.add(state)
+            await self._session.flush()
+        return state
+
+    async def _locked_job(self, lease: JobLease) -> Job:
+        job = await self._session.scalar(
+            select(Job)
+            .where(Job.id == lease.job_id, Job.workspace_id == lease.workspace_id)
+            .with_for_update()
+        )
+        if job is None or job.run_id != lease.run_id:
+            raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
+        return job
+
+    async def _locked_run(self, workspace_id: UUID, run_id: UUID) -> Run:
+        run = await self._session.scalar(
+            select(Run).where(Run.id == run_id, Run.workspace_id == workspace_id).with_for_update()
+        )
+        if run is None:
+            raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
+        return run
+
+    async def _active_attempt(self, run_id: UUID) -> RunAttempt | None:
+        return cast(
+            RunAttempt | None,
+            await self._session.scalar(
+                select(RunAttempt)
+                .where(
+                    RunAttempt.run_id == run_id,
+                    RunAttempt.status.in_(
+                        [
+                            RunStatus.PREPARING.value,
+                            RunStatus.SESSION_FENCED.value,
+                            RunStatus.DISPATCH_FENCED.value,
+                        ]
+                    ),
+                )
+                .order_by(RunAttempt.sequence.desc())
+                .limit(1)
+                .with_for_update()
+            ),
+        )
+
+    async def _terminalize_expired_jobs(self, now: datetime) -> None:
+        jobs = list(
+            (
+                await self._session.scalars(
+                    select(Job)
+                    .where(
+                        Job.status.in_([JobStatus.QUEUED.value, JobStatus.LEASED.value]),
+                        Job.deadline <= now,
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+            ).all()
+        )
+        for job in jobs:
+            run = await self._locked_run(job.workspace_id, job.run_id)
+            status = (
+                RunStatus.INDETERMINATE
+                if run.status == RunStatus.DISPATCH_FENCED.value
+                else RunStatus.TIMED_OUT
+            )
+            await self._terminalize_run(run, status, now, "deadline_exceeded")
+
+    async def _terminalize_abandoned_dispatches(self, now: datetime) -> None:
+        jobs = list(
+            (
+                await self._session.scalars(
+                    select(Job)
+                    .where(
+                        Job.status == JobStatus.LEASED.value,
+                        Job.lease_expires_at <= now,
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+            ).all()
+        )
+        for job in jobs:
+            run = await self._locked_run(job.workspace_id, job.run_id)
+            attempt = await self._active_attempt(run.id)
+            if attempt is not None and attempt.status == RunStatus.DISPATCH_FENCED.value:
+                await self._terminalize_run(
+                    run,
+                    RunStatus.INDETERMINATE,
+                    now,
+                    "worker_lost_after_dispatch",
+                )
+        await self._session.flush()
+
+    async def _terminalize_run(
+        self,
+        run: Run,
+        status: RunStatus,
+        now: datetime,
+        safe_error_code: str,
+        *,
+        event_type: RunEventType = RunEventType.TERMINAL,
+    ) -> None:
+        run.status = status.value
+        run.safe_error_code = safe_error_code
+        run.updated_at = now
+        run.terminal_at = now
+        job = await self._session.scalar(select(Job).where(Job.run_id == run.id).with_for_update())
+        if job is not None:
+            job.status = JobStatus(status.value).value
+            job.lease_owner = None
+            job.lease_expires_at = None
+            job.completed_at = now
+        attempt = await self._active_attempt(run.id)
+        if attempt is not None:
+            attempt.status = status.value
+            attempt.safe_error_code = safe_error_code
+            attempt.terminal_at = now
+        await self._append_next_event(
+            run,
+            event_type,
+            status,
+            safe_error_code=safe_error_code,
+            now=now,
+        )
+
+    async def _append_next_event(
+        self,
+        run: Run,
+        event_type: RunEventType,
+        status: RunStatus,
+        *,
+        safe_error_code: str | None = None,
+        now: datetime,
+    ) -> None:
+        sequence = await self._session.scalar(
+            select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run.id)
+        )
+        self._append_event(
+            run,
+            event_type,
+            status,
+            safe_error_code=safe_error_code,
+            now=now,
+            sequence=(sequence or 0) + 1,
+        )
+
+    def _append_event(
+        self,
+        run: Run,
+        event_type: RunEventType,
+        status: RunStatus,
+        *,
+        now: datetime,
+        sequence: int,
+        safe_error_code: str | None = None,
+    ) -> None:
+        self._session.add(
+            RunEvent(
+                workspace_id=run.workspace_id,
+                run_id=run.id,
+                sequence=sequence,
+                event_type=event_type.value,
+                status=status.value,
+                safe_error_code=safe_error_code,
+                occurred_at=now,
+            )
+        )
+
+    def _utc_now(self) -> datetime:
+        value = self._now()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("execution clock must be timezone-aware")
+        return value.astimezone(UTC)
+
+    def _validate_keyring(self, values: Sequence[HmacKeyVersion]) -> tuple[HmacKeyVersion, ...]:
+        keys = tuple(values)
+        if (
+            not keys
+            or len(keys) > self._limits.max_historical_hmac_keys
+            or len({key.version for key in keys}) != len(keys)
+            or any(_KEY_VERSION.fullmatch(key.version) is None for key in keys)
+            or any(len(key.secret) < 32 for key in keys)
+        ):
+            raise ValueError("invalid HMAC keyring")
+        return keys
+
+    @staticmethod
+    def _key_by_version(keys: Sequence[HmacKeyVersion], version: str) -> HmacKeyVersion | None:
+        return next((key for key in keys if key.version == version), None)
+
+
+def _sha256(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _hmac_hex(secret: bytes, value: bytes) -> str:
+    return hmac.new(secret, value, hashlib.sha256).hexdigest()
+
+
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+async def _flush_execution_payload(session: AsyncSession) -> bool:
+    try:
+        await session.flush()
+    except SQLAlchemyError:
+        return False
+    return True
