@@ -187,6 +187,7 @@ class RegistryEntryVersion(Base):
         UniqueConstraint("workspace_id", "id"),
         UniqueConstraint("registry_entry_id", "id"),
         UniqueConstraint("registry_entry_id", "sequence"),
+        UniqueConstraint("registry_entry_id", "provenance_digest"),
     )
 
     id: Mapped[UuidPrimaryKey]

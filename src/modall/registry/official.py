@@ -3,10 +3,13 @@
 import asyncio
 import hashlib
 import json
-from collections.abc import Callable
+import logging
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from threading import Lock
 from typing import cast
 from urllib.parse import unquote
 from uuid import UUID, uuid4
@@ -35,6 +38,36 @@ from modall.security.metadata import (
 
 OFFICIAL_REGISTRY_PROVIDER = "official"
 OFFICIAL_REGISTRY_SERVERS_URL = "https://registry.modelcontextprotocol.io/v0.1/servers"
+
+
+class _SuppressRegistryRequestLogs(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        del record
+        return False
+
+
+_REGISTRY_LOG_FILTER = _SuppressRegistryRequestLogs()
+_REGISTRY_LOGGER_NAMES = ("httpx", "httpcore")
+_REGISTRY_LOG_LOCK = Lock()
+_REGISTRY_LOG_USERS = 0
+
+
+@contextmanager
+def _suppress_registry_request_logs() -> Iterator[None]:
+    global _REGISTRY_LOG_USERS
+    with _REGISTRY_LOG_LOCK:
+        if _REGISTRY_LOG_USERS == 0:
+            for logger_name in _REGISTRY_LOGGER_NAMES:
+                logging.getLogger(logger_name).addFilter(_REGISTRY_LOG_FILTER)
+        _REGISTRY_LOG_USERS += 1
+    try:
+        yield
+    finally:
+        with _REGISTRY_LOG_LOCK:
+            _REGISTRY_LOG_USERS -= 1
+            if _REGISTRY_LOG_USERS == 0:
+                for logger_name in _REGISTRY_LOGGER_NAMES:
+                    logging.getLogger(logger_name).removeFilter(_REGISTRY_LOG_FILTER)
 
 
 class OfficialRegistryFailureCode(StrEnum):
@@ -200,8 +233,11 @@ class OfficialRegistryAdapter:
         self._query_scanner = query_scanner
         self._metadata_scanner = metadata_scanner
 
+    @property
+    def limits(self) -> OfficialRegistryLimits:
+        return self._limits
+
     async def search(self, query: str) -> tuple[OfficialRegistryItem, ...]:
-        query = _screen_query(query, self._limits, self._query_scanner)
         items: list[OfficialRegistryItem] = []
         identities: set[tuple[str, str]] = set()
         cursor: str | None = None
@@ -209,6 +245,7 @@ class OfficialRegistryAdapter:
         total_bytes = 0
         try:
             async with asyncio.timeout(self._limits.total_timeout_seconds):
+                query = await _screen_query(query, self._limits, self._query_scanner)
                 for _ in range(self._limits.max_pages):
                     params: dict[str, str | int] = {
                         "search": query,
@@ -217,13 +254,19 @@ class OfficialRegistryAdapter:
                     }
                     if cursor is not None:
                         params["cursor"] = cursor
-                    request = self._client.build_request(
+                    request = httpx.Request(
                         "GET",
                         OFFICIAL_REGISTRY_SERVERS_URL,
                         params=params,
                         headers={"Accept": "application/json", "Accept-Encoding": "identity"},
                     )
-                    response = await self._client.send(request, follow_redirects=False, stream=True)
+                    with _suppress_registry_request_logs():
+                        response = await self._client.send(
+                            request,
+                            auth=None,
+                            follow_redirects=False,
+                            stream=True,
+                        )
                     try:
                         if response.is_redirect:
                             raise OfficialRegistryError(
@@ -283,7 +326,7 @@ class OfficialRegistryAdapter:
                         body = bytes(buffered)
                     finally:
                         await response.aclose()
-                    page, cursor = self._parse_page(body)
+                    page, cursor = await self._parse_page(body)
                     if len(items) + len(page) > self._limits.max_items:
                         raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT)
                     page_identities = {(item.external_id, item.source_version) for item in page}
@@ -298,17 +341,19 @@ class OfficialRegistryAdapter:
                     seen_cursors.add(cursor)
         except TimeoutError as exc:
             raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from exc
+        except httpx.DecodingError as exc:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from exc
         except httpx.HTTPError as exc:
             raise OfficialRegistryError(OfficialRegistryFailureCode.UPSTREAM_UNAVAILABLE) from exc
         raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT)
 
-    def parse_cached_items(self, values: object) -> tuple[OfficialRegistryItem, ...]:
+    async def parse_cached_items(self, values: object) -> tuple[OfficialRegistryItem, ...]:
         if not isinstance(values, list) or len(values) > self._limits.max_items:
             raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
-        self._screen(values)
+        await self._screen(values)
         return self._normalize_items(values)
 
-    def _parse_page(self, body: bytes) -> tuple[tuple[OfficialRegistryItem, ...], str | None]:
+    async def _parse_page(self, body: bytes) -> tuple[tuple[OfficialRegistryItem, ...], str | None]:
         try:
             payload = json.loads(
                 body.decode("utf-8"),
@@ -321,7 +366,7 @@ class OfficialRegistryAdapter:
             validate_bounded_json(payload)
         except MetadataValidationError as exc:
             raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT) from exc
-        self._screen(payload)
+        await self._screen(payload)
         if not isinstance(payload, dict) or set(payload) - {"servers", "metadata"}:
             raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
         servers = payload.get("servers")
@@ -341,13 +386,13 @@ class OfficialRegistryAdapter:
             raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
         return self._normalize_items(servers), cursor
 
-    def _screen(self, value: object) -> None:
-        try:
-            unsafe = self._metadata_scanner(value)
-        except OfficialRegistryError:
-            raise
-        except Exception as exc:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from exc
+    async def _screen(self, value: object) -> None:
+        unsafe = await _run_scanner(
+            self._metadata_scanner,
+            value,
+            timeout_seconds=self._limits.total_timeout_seconds,
+            timeout_code=OfficialRegistryFailureCode.TIMEOUT,
+        )
         if unsafe:
             raise OfficialRegistryError(OfficialRegistryFailureCode.UNSAFE_METADATA)
 
@@ -434,7 +479,9 @@ class OfficialRegistryService:
     ) -> None:
         self._session = session
         self._adapter = adapter
-        self._limits = limits or OfficialRegistryLimits()
+        if limits is not None and limits != adapter.limits:
+            raise ValueError("service and adapter must use one official Registry limits policy")
+        self._limits = adapter.limits
         self._query_scanner = query_scanner
         self._now = now
 
@@ -442,14 +489,11 @@ class OfficialRegistryService:
         self, *, context: WorkspaceContext, query: str
     ) -> OfficialRegistrySearchResult:
         await require_current_role(self._session, context, Role.ADMIN, Role.OPERATOR)
-        normalized_query = _screen_query(query, self._limits, self._query_scanner)
+        normalized_query = await _screen_query(query, self._limits, self._query_scanner)
         query_digest = hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
         now = self._utc_now()
-        await self._session.execute(
-            delete(RegistrySearchCache).where(
-                RegistrySearchCache.workspace_id == context.workspace_id,
-                RegistrySearchCache.expires_at <= now,
-            )
+        await _purge_expired_workspace_cache(
+            self._session, workspace_id=context.workspace_id, now=now
         )
         cache = await self._session.scalar(
             select(RegistrySearchCache)
@@ -464,7 +508,7 @@ class OfficialRegistryService:
         )
         if cache is not None:
             try:
-                items = self._adapter.parse_cached_items(cache.normalized_results)
+                items = await self._adapter.parse_cached_items(cache.normalized_results)
             except OfficialRegistryError:
                 await self._session.delete(cache)
             else:
@@ -515,11 +559,8 @@ class OfficialRegistryService:
         ):
             raise OfficialRegistryError(OfficialRegistryFailureCode.CACHE_MISS)
         now = self._utc_now()
-        await self._session.execute(
-            delete(RegistrySearchCache).where(
-                RegistrySearchCache.workspace_id == context.workspace_id,
-                RegistrySearchCache.expires_at <= now,
-            )
+        await _purge_expired_workspace_cache(
+            self._session, workspace_id=context.workspace_id, now=now
         )
         cache = await self._session.scalar(
             select(RegistrySearchCache).where(
@@ -531,7 +572,7 @@ class OfficialRegistryService:
         )
         if cache is None or _digest(cache.normalized_results) != cache.response_digest:
             raise OfficialRegistryError(OfficialRegistryFailureCode.CACHE_MISS)
-        items = self._adapter.parse_cached_items(cache.normalized_results)
+        items = await self._adapter.parse_cached_items(cache.normalized_results)
         item = next(
             (candidate for candidate in items if candidate.provenance_digest == provenance_digest),
             None,
@@ -557,10 +598,14 @@ class OfficialRegistryService:
             )
             self._session.add(entry)
             await self._session.flush()
-        if entry.current_version_id is not None:
-            current = await self._session.get(RegistryEntryVersion, entry.current_version_id)
-            if current is not None and current.provenance_digest == item.provenance_digest:
-                return current
+        existing = await self._session.scalar(
+            select(RegistryEntryVersion).where(
+                RegistryEntryVersion.registry_entry_id == entry.id,
+                RegistryEntryVersion.provenance_digest == item.provenance_digest,
+            )
+        )
+        if existing is not None:
+            return existing
         sequence = await self._session.scalar(
             select(func.max(RegistryEntryVersion.sequence)).where(
                 RegistryEntryVersion.registry_entry_id == entry.id
@@ -617,7 +662,7 @@ class OfficialRegistryService:
         )
 
 
-def _screen_query(
+async def _screen_query(
     query: str,
     limits: OfficialRegistryLimits,
     scanner: Callable[[object], bool],
@@ -631,14 +676,59 @@ def _screen_query(
     normalized = query.strip()
     try:
         normalized.encode("utf-8")
-        unsafe = scanner(normalized)
+    except UnicodeEncodeError as exc:
+        raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_QUERY) from exc
+    unsafe = await _run_scanner(
+        scanner,
+        normalized,
+        timeout_seconds=limits.total_timeout_seconds,
+        timeout_code=OfficialRegistryFailureCode.SCANNER_FAILED,
+    )
+    if unsafe:
+        raise OfficialRegistryError(OfficialRegistryFailureCode.UNSAFE_QUERY)
+    return normalized
+
+
+async def _run_scanner(
+    scanner: Callable[[object], bool],
+    value: object,
+    *,
+    timeout_seconds: float,
+    timeout_code: OfficialRegistryFailureCode,
+) -> bool:
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            return await asyncio.to_thread(scanner, value)
+    except TimeoutError as exc:
+        raise OfficialRegistryError(timeout_code) from exc
     except OfficialRegistryError:
         raise
     except Exception as exc:
         raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from exc
-    if unsafe:
-        raise OfficialRegistryError(OfficialRegistryFailureCode.UNSAFE_QUERY)
-    return normalized
+
+
+async def purge_expired_registry_cache(
+    session: AsyncSession, *, now: datetime | None = None
+) -> None:
+    """Delete expired public catalog cache rows across all workspaces."""
+
+    cutoff = now or datetime.now(UTC)
+    if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+        raise ValueError("official Registry cleanup clock must be timezone-aware")
+    await session.execute(
+        delete(RegistrySearchCache).where(RegistrySearchCache.expires_at <= cutoff.astimezone(UTC))
+    )
+
+
+async def _purge_expired_workspace_cache(
+    session: AsyncSession, *, workspace_id: UUID, now: datetime
+) -> None:
+    await session.execute(
+        delete(RegistrySearchCache).where(
+            RegistrySearchCache.workspace_id == workspace_id,
+            RegistrySearchCache.expires_at <= now,
+        )
+    )
 
 
 __all__ = [
@@ -651,4 +741,5 @@ __all__ = [
     "OfficialRegistryLimits",
     "OfficialRegistrySearchResult",
     "OfficialRegistryService",
+    "purge_expired_registry_cache",
 ]

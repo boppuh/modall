@@ -1,5 +1,7 @@
 import asyncio
 import json
+import logging
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -31,6 +33,7 @@ from modall.registry.official import (
     OfficialRegistryFailureCode,
     OfficialRegistryLimits,
     OfficialRegistryService,
+    purge_expired_registry_cache,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "registry"
@@ -377,6 +380,11 @@ def test_cache_is_workspace_scoped_expires_within_one_hour_and_roles_are_current
                     ).search(context=context_a, query="inference")
                     assert refreshed.cache_id != result_a.cache_id
                     assert await session.get(RegistrySearchCache, result_a.cache_id) is None
+                    await purge_expired_registry_cache(session, now=now)
+                    assert (
+                        await session.scalar(select(func.count()).select_from(RegistrySearchCache))
+                        == 1
+                    )
                 assert calls == 6
 
                 async with transaction(factory) as session:
@@ -419,7 +427,7 @@ def test_limit_configuration_rejects_nonpositive_and_overlong_cache_ttl() -> Non
                 content=b"{}",
                 request=request,
             ),
-            OfficialRegistryFailureCode.UPSTREAM_UNAVAILABLE,
+            OfficialRegistryFailureCode.INVALID_RESPONSE,
         ),
         (
             lambda request: httpx.Response(
@@ -576,12 +584,100 @@ def test_changed_official_metadata_appends_an_immutable_entry_version() -> None:
                         cache_id=second_search.cache_id,
                         provenance_digest=second_search.items[0].provenance_digest,
                     )
+                    replayed_first = await service.import_cached(
+                        context=context,
+                        cache_id=first_search.cache_id,
+                        provenance_digest=first_search.items[0].provenance_digest,
+                    )
                     assert first.registry_entry_id == second.registry_entry_id
                     assert (first.sequence, second.sequence) == (1, 2)
+                    assert replayed_first.id == first.id
                     assert (first.source_version, second.source_version) == ("1.2.0", "1.3.0")
                     entry = await session.get(RegistryEntry, first.registry_entry_id)
                     assert entry is not None
                     assert entry.current_version_id == second.id
                     assert first.description == "Read public weather observations"
+                    assert (
+                        await session.scalar(
+                            select(func.count())
+                            .select_from(RegistryEntryVersion)
+                            .where(
+                                RegistryEntryVersion.registry_entry_id == first.registry_entry_id
+                            )
+                        )
+                        == 2
+                    )
+
+    asyncio.run(scenario())
+
+
+def test_registry_request_strips_ambient_credentials_and_suppresses_query_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert "Authorization" not in request.headers
+            assert "Cookie" not in request.headers
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={"servers": [], "metadata": {"count": 0}},
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            headers={"Authorization": "Bearer ambient-secret"},
+            cookies={"session": "ambient-cookie"},
+        ) as client:
+            with caplog.at_level(logging.INFO, logger="httpx"):
+                await OfficialRegistryAdapter(client).search("private operator search")
+
+    asyncio.run(scenario())
+    assert "private operator search" not in caplog.text
+    assert "ambient-secret" not in caplog.text
+
+
+def test_scanning_runs_off_loop_under_the_configured_deadline() -> None:
+    def blocked_scanner(value: object) -> bool:
+        del value
+        time.sleep(0.1)
+        return False
+
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return fixture_response("search_page_1.json", request)
+
+        limits = OfficialRegistryLimits(total_timeout_seconds=0.01)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OfficialRegistryAdapter(
+                client,
+                limits=limits,
+                query_scanner=lambda value: False,
+                metadata_scanner=blocked_scanner,
+            )
+            with pytest.raises(OfficialRegistryError) as raised:
+                await adapter.search("weather")
+        assert raised.value.code == OfficialRegistryFailureCode.TIMEOUT
+
+    asyncio.run(scenario())
+
+
+def test_service_and_adapter_cannot_diverge_on_limits() -> None:
+    async def scenario() -> None:
+        async with (
+            database() as factory,
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request))
+            ) as client,
+            transaction(factory) as session,
+        ):
+            adapter = OfficialRegistryAdapter(client, limits=OfficialRegistryLimits(max_items=2))
+            with pytest.raises(ValueError, match="one official Registry limits policy"):
+                OfficialRegistryService(
+                    session,
+                    adapter,
+                    limits=OfficialRegistryLimits(max_items=1),
+                )
 
     asyncio.run(scenario())

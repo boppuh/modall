@@ -48,6 +48,11 @@ def upgrade() -> None:
         ["id"],
         ondelete="RESTRICT",
     )
+    op.create_unique_constraint(
+        "uq_registry_entry_version_provenance",
+        "registry_entry_versions",
+        ["registry_entry_id", "provenance_digest"],
+    )
     op.create_table(
         "registry_search_cache",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -77,12 +82,19 @@ def downgrade() -> None:
     op.drop_constraint(
         "fk_registry_entry_version_imported_by", "registry_entry_versions", type_="foreignkey"
     )
+    op.drop_constraint(
+        "uq_registry_entry_version_provenance", "registry_entry_versions", type_="unique"
+    )
     op.drop_column("registry_entry_versions", "imported_by_user_id")
     op.drop_column("registry_entry_versions", "normalized_metadata")
     op.drop_column("registry_entry_versions", "source_uri")
     op.drop_column("registry_entry_versions", "source_version")
     op.drop_constraint("ck_audit_resource_type", "audit_events", type_="check")
     op.drop_constraint("ck_audit_action", "audit_events", type_="check")
+    op.execute(
+        "DELETE FROM audit_events WHERE action = 'registry_entry.imported' "
+        "OR resource_type = 'registry_entry'"
+    )
     op.create_check_constraint(
         "ck_audit_resource_type",
         "audit_events",
