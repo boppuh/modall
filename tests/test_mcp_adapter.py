@@ -904,6 +904,21 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
             with pytest.raises(EndpointPolicyError, match="response body"):
                 await client.send(request, stream=True)
 
+        async def accepted_recursive_prefix(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                202,
+                headers={"Content-Type": "application/json"},
+                content=(b"[" * 10_000) + b'{"token":{"value":"AbCdEfGhIjKlMnOpQrStUvWx"}}',
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(accepted_recursive_prefix), 20_000)
+        ) as client:
+            request = client.build_request("POST", "https://example.test")
+            with pytest.raises(EndpointPolicyError, match="response body"):
+                await client.send(request, stream=True)
+
         async def sse(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,

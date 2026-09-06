@@ -449,7 +449,7 @@ def _contains_sensitive_json_text(value: str) -> bool:
         except _DuplicateJsonMember:
             return True
         except RecursionError:
-            return False
+            return True
         except json.JSONDecodeError as exc:
             next_object = value.find("{", max(index + 1, exc.pos + 1))
             next_array = value.find("[", max(index + 1, exc.pos + 1))
