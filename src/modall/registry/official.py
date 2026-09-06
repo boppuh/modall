@@ -7,7 +7,7 @@ import logging
 import math
 import multiprocessing
 import signal
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -72,6 +72,7 @@ _SCANNER_PROCESS_CONTEXT = multiprocessing.get_context("spawn")
 _SCANNER_PROCESS_LIMIT = 4
 _CACHE_CLEANUP_BATCH_SIZE = 500
 _SCANNER_PROCESS_PERMITS = BoundedSemaphore(_SCANNER_PROCESS_LIMIT)
+_RESOURCE_CLOSE_TIMEOUT_SECONDS = 0.25
 
 
 async def _acquire_scanner_process_permit() -> None:
@@ -391,14 +392,17 @@ class OfficialRegistryAdapter:
 
     async def _search_screened(self, query: str) -> tuple[OfficialRegistryItem, ...]:
         transport = None if self._transport is None else _BorrowedAsyncTransport(self._transport)
-        async with httpx.AsyncClient(
+        client = httpx.AsyncClient(
             transport=transport,
             auth=None,
             trust_env=False,
             follow_redirects=False,
             timeout=None,
-        ) as client:
+        )
+        try:
             return await self._search_with_client(client, query)
+        finally:
+            await _bounded_close(client.aclose, self._limits.total_timeout_seconds)
 
     async def _search_with_client(
         self, client: httpx.AsyncClient, query: str
@@ -489,7 +493,7 @@ class OfficialRegistryAdapter:
                                 buffered.extend(chunk)
                         body = bytes(buffered)
                     finally:
-                        await response.aclose()
+                        await _bounded_close(response.aclose, self._limits.total_timeout_seconds)
                     page, cursor = await self._parse_page(body)
                     if len(items) + len(page) > self._limits.max_items:
                         raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT)
@@ -1056,19 +1060,26 @@ async def _run_scanner(
     except Exception:
         failure_code = OfficialRegistryFailureCode.SCANNER_FAILED
     finally:
-        if receiver is not None and loop is not None and reader_registered:
-            with suppress(Exception):
-                loop.remove_reader(receiver.fileno())
-        if sender is not None:
-            with suppress(Exception):
-                sender.close()
-        if receiver is not None:
-            with suppress(Exception):
-                receiver.close()
-        if process is not None:
-            await _close_scanner_process(process)
-        if permit_acquired:
-            _release_scanner_process_permit()
+        try:
+            if receiver is not None and loop is not None and reader_registered:
+                with suppress(Exception):
+                    loop.remove_reader(receiver.fileno())
+            if sender is not None:
+                with suppress(Exception):
+                    sender.close()
+            if receiver is not None:
+                with suppress(Exception):
+                    receiver.close()
+            if process is not None:
+                cleanup = asyncio.create_task(_close_scanner_process(process))
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    await cleanup
+                    raise
+        finally:
+            if permit_acquired:
+                _release_scanner_process_permit()
     if failure_code is not None:
         raise OfficialRegistryError(failure_code)
     if not scan_completed:
@@ -1092,6 +1103,14 @@ async def _close_scanner_process(process: SpawnProcess) -> None:
     if not process.is_alive():
         with suppress(Exception):
             process.close()
+
+
+async def _bounded_close(close: Callable[[], Awaitable[None]], operation_timeout: float) -> None:
+    try:
+        async with asyncio.timeout(min(_RESOURCE_CLOSE_TIMEOUT_SECONDS, operation_timeout)):
+            await close()
+    except Exception:
+        return
 
 
 async def purge_expired_registry_cache(

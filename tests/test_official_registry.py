@@ -5,7 +5,7 @@ import multiprocessing
 import threading
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -100,6 +100,20 @@ class ReusableTrackingTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         self.closes += 1
+
+
+class StallingCloseStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.close_started = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        await asyncio.Event().wait()
+        if False:
+            yield b""
+
+    async def aclose(self) -> None:
+        self.close_started = True
+        await asyncio.Event().wait()
 
 
 @asynccontextmanager
@@ -731,6 +745,32 @@ def test_adapter_bounds_streams_timeouts_transport_errors_and_direct_queries() -
     asyncio.run(scenario())
 
 
+def test_response_close_is_bounded_after_body_read_timeout() -> None:
+    async def scenario() -> None:
+        stream = StallingCloseStream()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                stream=stream,
+                request=request,
+            )
+
+        with pytest.raises(OfficialRegistryError) as raised:
+            await asyncio.wait_for(
+                OfficialRegistryAdapter(
+                    transport=httpx.MockTransport(handler),
+                    limits=OfficialRegistryLimits(total_timeout_seconds=0.01),
+                )._search_screened("weather"),
+                timeout=0.2,
+            )
+        assert raised.value.code == OfficialRegistryFailureCode.TIMEOUT
+        assert stream.close_started is True
+
+    asyncio.run(scenario())
+
+
 def test_canonicalization_failure_detaches_payload_bearing_exception() -> None:
     async def scenario() -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -1151,6 +1191,48 @@ def test_scanner_process_join_does_not_block_the_event_loop() -> None:
         assert process.killed is True
         assert process.closed is True
         assert ticks >= 20
+
+    asyncio.run(scenario())
+
+
+def test_scanner_cleanup_cancellation_releases_process_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        original_close = official_registry._close_scanner_process
+        cleanup_started = asyncio.Event()
+        finish_cleanup = asyncio.Event()
+
+        async def delayed_close(process: object) -> None:
+            cleanup_started.set()
+            try:
+                await finish_cleanup.wait()
+            finally:
+                await original_close(process)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(official_registry, "_close_scanner_process", delayed_close)
+        task = asyncio.create_task(
+            OfficialRegistryAdapter(
+                limits=OfficialRegistryLimits(total_timeout_seconds=10),
+                query_scanner=scanner_hangs,
+            ).screen_query("weather")
+        )
+        await asyncio.sleep(0.1)
+        task.cancel()
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        task.cancel()
+        finish_cleanup.set()
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+        acquired = sum(
+            official_registry._SCANNER_PROCESS_PERMITS.acquire(blocking=False) for _ in range(4)
+        )
+        try:
+            assert acquired == 4
+        finally:
+            for _ in range(acquired):
+                official_registry._release_scanner_process_permit()
 
     asyncio.run(scenario())
 
