@@ -1250,18 +1250,21 @@ def test_scanner_process_waiters_are_notified_on_release() -> None:
     async def scenario() -> None:
         for _ in range(4):
             await official_registry._acquire_scanner_process_permit()
+        held_permits = 4
         waiter = asyncio.create_task(official_registry._acquire_scanner_process_permit())
         try:
             await asyncio.sleep(0)
             assert waiter.done() is False
             official_registry._release_scanner_process_permit()
+            held_permits -= 1
             await asyncio.wait_for(waiter, timeout=0.1)
+            held_permits += 1
         finally:
             if not waiter.done():
                 waiter.cancel()
                 with suppress(asyncio.CancelledError):
                     await waiter
-            for _ in range(4):
+            for _ in range(held_permits):
                 official_registry._release_scanner_process_permit()
 
     asyncio.run(scenario())
