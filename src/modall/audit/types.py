@@ -15,6 +15,7 @@ class AuditAction(StrEnum):
     CAPABILITY_VERSION_RECORDED = "capability.version_recorded"
     CAPABILITY_ENABLED = "capability.enabled"
     CAPABILITY_DISABLED = "capability.disabled"
+    REGISTRY_ENTRY_IMPORTED = "registry_entry.imported"
 
 
 class AuditOutcome(StrEnum):
@@ -29,3 +30,4 @@ class ResourceType(StrEnum):
     SECRET_BINDING = "secret_binding"
     SERVER_CONNECTION = "server_connection"
     CAPABILITY = "capability"
+    REGISTRY_ENTRY = "registry_entry"
