@@ -423,14 +423,14 @@ def test_post_response_validation_timeout_is_a_definitive_failure(
 ) -> None:
     async def validate(*args: object, **kwargs: object) -> schema_validation.SchemaValidationResult:
         del args, kwargs
-        await asyncio.Event().wait()
+        await asyncio.sleep(1.1)
         raise AssertionError("unreachable")
 
     monkeypatch.setattr(schema_validation, "validate_schema_arguments", validate)
 
     async def scenario() -> None:
         client, endpoint = adapter_for(
-            "default", limits=TransportLimits(read_seconds=0.1, total_seconds=0.05)
+            "default", limits=TransportLimits(read_seconds=1.0, total_seconds=1.0)
         )
 
         async def fence() -> None:

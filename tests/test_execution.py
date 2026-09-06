@@ -1266,6 +1266,7 @@ def test_invocation_runner_commits_both_fences_and_one_safe_result() -> None:
         ("factory", RunStatus.FAILED, RunFailureCode.PREPARATION_FAILED),
         ("preparation", RunStatus.FAILED, RunFailureCode.PREPARATION_FAILED),
         ("session", RunStatus.FAILED, RunFailureCode.SESSION_INITIALIZATION_FAILED),
+        ("pre-sensitive", RunStatus.FAILED, RunFailureCode.SESSION_INITIALIZATION_FAILED),
         ("invalid", RunStatus.FAILED, RunFailureCode.INVALID_TOOL_RESULT),
         ("unsupported", RunStatus.FAILED, RunFailureCode.UNSUPPORTED_TOOL_RESULT),
         ("sensitive", RunStatus.FAILED, RunFailureCode.SENSITIVE_TOOL_RESULT),
@@ -1295,6 +1296,8 @@ def test_invocation_runner_maps_only_safe_failures(
             await before_session()
             if mode == "session":
                 raise InvocationError(InvocationFailureCode.SESSION_INITIALIZATION_FAILED)
+            if mode == "pre-sensitive":
+                raise InvocationError(InvocationFailureCode.SENSITIVE_RESULT)
             await before_dispatch()
             if mode == "indeterminate":
                 raise InvocationIndeterminate(

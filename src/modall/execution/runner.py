@@ -71,10 +71,12 @@ class InvocationRunner:
             )
         if lease is None:
             return False
-        await self.run(lease)
+        await self.run(lease, lease_duration=lease_duration)
         return True
 
-    async def run(self, lease: JobLease) -> RunStatus | None:
+    async def run(
+        self, lease: JobLease, *, lease_duration: timedelta | None = None
+    ) -> RunStatus | None:
         try:
             target = await self._load_target(lease)
             adapter = self._adapter_factory(target.policy_version)
@@ -84,7 +86,7 @@ class InvocationRunner:
                     tool_name=target.tool_name,
                     arguments=target.arguments,
                     output_schema=target.output_schema,
-                    before_session=lambda: self._fence_session(lease),
+                    before_session=lambda: self._fence_session(lease, lease_duration),
                     before_dispatch=lambda: self._fence_dispatch(lease),
                 )
             else:
@@ -95,7 +97,7 @@ class InvocationRunner:
                         arguments=target.arguments,
                         output_schema=target.output_schema,
                         bearer_token=credential,
-                        before_session=lambda: self._fence_session(lease),
+                        before_session=lambda: self._fence_session(lease, lease_duration),
                         before_dispatch=lambda: self._fence_dispatch(lease),
                     )
         except InvocationFenceRejected:
@@ -111,7 +113,10 @@ class InvocationRunner:
         except InvocationError as error:
             if error.code == InvocationFailureCode.PREPARATION_FAILED:
                 code = RunFailureCode.PREPARATION_FAILED
-            elif error.code == InvocationFailureCode.SESSION_INITIALIZATION_FAILED:
+            elif (
+                not error.dispatched
+                or error.code == InvocationFailureCode.SESSION_INITIALIZATION_FAILED
+            ):
                 code = RunFailureCode.SESSION_INITIALIZATION_FAILED
             elif error.code == InvocationFailureCode.TOOL_CALL_FAILED:
                 code = RunFailureCode.TOOL_CALL_FAILED
@@ -142,10 +147,13 @@ class InvocationRunner:
             return None
         return RunStatus(completed.status)
 
-    async def _fence_session(self, lease: JobLease) -> None:
+    async def _fence_session(self, lease: JobLease, lease_duration: timedelta | None) -> None:
         try:
             async with transaction(self._session_factory) as session:
-                await self._execution_service_factory(session).fence_session(lease)
+                execution = self._execution_service_factory(session)
+                if lease_duration is not None:
+                    await execution.heartbeat(lease, lease_duration=lease_duration)
+                await execution.fence_session(lease)
         except ExecutionError as exc:
             raise InvocationFenceRejected(
                 InvocationFailureCode.SESSION_INITIALIZATION_FAILED
