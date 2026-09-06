@@ -24,6 +24,7 @@ from modall.execution.types import (
     ExecutionFailureCode,
     ExecutionLimits,
     HmacKeyVersion,
+    JobLease,
     RunFailureCode,
     RunStatus,
     SystemExecutionAuthority,
@@ -1207,6 +1208,7 @@ def test_invocation_runner_commits_both_fences_and_one_safe_result() -> None:
     async def scenario() -> None:
         now = datetime(2026, 9, 6, tzinfo=UTC)
         adapter = FakeAdapter()
+        heartbeat_calls = 0
         async with database() as factory:
             user_id, workspace_id = await bootstrap(factory, subject="runner")
             async with transaction(factory) as session:
@@ -1236,9 +1238,26 @@ def test_invocation_runner_commits_both_fences_and_one_safe_result() -> None:
                     confirmation_token=token.confirmation_token,
                     idempotency_key="runner",
                 )
+
+            def execution_service_factory(session: AsyncSession) -> ExecutionService:
+                class RecordingExecutionService(ExecutionService):
+                    async def heartbeat(
+                        self, lease: JobLease, *, lease_duration: timedelta
+                    ) -> JobLease:
+                        nonlocal heartbeat_calls
+                        heartbeat_calls += 1
+                        return await super().heartbeat(lease, lease_duration=lease_duration)
+
+                return RecordingExecutionService(
+                    session,
+                    confirmation_keys=CONFIRMATION_KEYS,
+                    idempotency_keys=IDEMPOTENCY_KEYS,
+                    now=lambda: now,
+                )
+
             runner = InvocationRunner(
                 session_factory=factory,
-                execution_service_factory=lambda session: service(session, now=now),
+                execution_service_factory=execution_service_factory,
                 secret_provider=FixtureSecretProvider(
                     {("runner-secret", "v1"): b"runner-credential-value-123456"}
                 ),
@@ -1251,6 +1270,7 @@ def test_invocation_runner_commits_both_fences_and_one_safe_result() -> None:
                 worker_id="runner-worker", lease_duration=timedelta(seconds=30)
             )
             assert adapter.calls == 1
+            assert heartbeat_calls == 2
             async with factory() as session:
                 stored_run = await session.get(Run, run.id)
                 assert stored_run is not None

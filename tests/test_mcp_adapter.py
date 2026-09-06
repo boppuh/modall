@@ -1168,10 +1168,14 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
                 request=request,
             )
 
-        async with httpx.AsyncClient(
-            transport=LimitedTransport(httpx.MockTransport(sse), 100)
-        ) as client:
-            assert (await client.get("https://example.test")).content.endswith(b"\r\r")
+        response_less_transport = LimitedTransport(httpx.MockTransport(sse), 100)
+        async with httpx.AsyncClient(transport=response_less_transport) as client:
+            response = await client.post(
+                "https://example.test",
+                json={"jsonrpc": "2.0", "id": 7, "method": "tools/call"},
+            )
+            assert response.content.endswith(b"\r\r")
+            assert response_less_transport.tool_call_response_completed is False
 
         async def sensitive_sse(request: httpx.Request) -> httpx.Response:
             return httpx.Response(

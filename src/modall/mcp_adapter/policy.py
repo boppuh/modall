@@ -286,7 +286,12 @@ class LimitedByteStream(httpx.AsyncByteStream):
             bytes(self._structured_buffer)
         ):
             self._reject_sensitive_body()
-        self._mark_complete_once()
+        # EOF proves a bounded JSON document was received. For SSE, only a
+        # completed event carrying the matching JSON-RPC id proves that the
+        # invocation outcome is definitive; a closed response-less stream is
+        # still indeterminate.
+        if self._buffer_json_document:
+            self._mark_complete_once()
 
     def _screen_completed_sse_events(self) -> None:
         consumed = 0

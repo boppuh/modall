@@ -104,11 +104,17 @@ class InvocationRunner:
             return None
         except (KeyError, ValueError, SecretProviderError):
             return await self._complete_failure(
-                lease, RunStatus.FAILED, RunFailureCode.PREPARATION_FAILED
+                lease,
+                RunStatus.FAILED,
+                RunFailureCode.PREPARATION_FAILED,
+                lease_duration=lease_duration,
             )
         except InvocationIndeterminate:
             return await self._complete_failure(
-                lease, RunStatus.INDETERMINATE, RunFailureCode.UPSTREAM_OUTCOME_UNKNOWN
+                lease,
+                RunStatus.INDETERMINATE,
+                RunFailureCode.UPSTREAM_OUTCOME_UNKNOWN,
+                lease_duration=lease_duration,
             )
         except InvocationError as error:
             if error.code == InvocationFailureCode.PREPARATION_FAILED:
@@ -126,8 +132,11 @@ class InvocationRunner:
                 code = RunFailureCode.SENSITIVE_TOOL_RESULT
             else:
                 code = RunFailureCode.INVALID_TOOL_RESULT
-            return await self._complete_failure(lease, RunStatus.FAILED, code)
+            return await self._complete_failure(
+                lease, RunStatus.FAILED, code, lease_duration=lease_duration
+            )
         try:
+            lease = await self._renew_lease(lease, lease_duration)
             async with transaction(self._session_factory) as session:
                 completed = await self._execution_service_factory(
                     session
@@ -142,7 +151,10 @@ class InvocationRunner:
         except ExecutionError as error:
             if error.code == ExecutionFailureCode.INVALID_ARGUMENTS:
                 return await self._complete_failure(
-                    lease, RunStatus.FAILED, RunFailureCode.INVALID_TOOL_RESULT
+                    lease,
+                    RunStatus.FAILED,
+                    RunFailureCode.INVALID_TOOL_RESULT,
+                    lease_duration=lease_duration,
                 )
             return None
         return RunStatus(completed.status)
@@ -167,9 +179,15 @@ class InvocationRunner:
             raise InvocationFenceRejected(InvocationFailureCode.TOOL_CALL_FAILED) from exc
 
     async def _complete_failure(
-        self, lease: JobLease, status: RunStatus, code: RunFailureCode
+        self,
+        lease: JobLease,
+        status: RunStatus,
+        code: RunFailureCode,
+        *,
+        lease_duration: timedelta | None = None,
     ) -> RunStatus | None:
         try:
+            lease = await self._renew_lease(lease, lease_duration)
             async with transaction(self._session_factory) as session:
                 run = await self._execution_service_factory(session).complete_lease(
                     lease, status=status, safe_error_code=code
@@ -177,6 +195,16 @@ class InvocationRunner:
                 return RunStatus(run.status)
         except ExecutionError:
             return None
+
+    async def _renew_lease(self, lease: JobLease, lease_duration: timedelta | None) -> JobLease:
+        """Renew immediately before persisting a definitive upstream outcome."""
+
+        if lease_duration is None:
+            return lease
+        async with transaction(self._session_factory) as session:
+            return await self._execution_service_factory(session).heartbeat(
+                lease, lease_duration=lease_duration
+            )
 
     async def _load_target(self, lease: JobLease) -> _InvocationTarget:
         async with self._session_factory() as session:
