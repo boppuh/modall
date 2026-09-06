@@ -24,3 +24,21 @@ class CapabilityStatus(StrEnum):
     ENABLED = "enabled"
     DISABLED = "disabled"
     UNAVAILABLE = "unavailable"
+
+
+class DiscoveryFailureCode(StrEnum):
+    AUTHENTICATION_FAILED = "authentication_failed"
+    ENDPOINT_REJECTED = "endpoint_rejected"
+    PROTOCOL_MISMATCH = "protocol_mismatch"
+    RESPONSE_LIMIT = "response_limit"
+    TIMEOUT = "timeout"
+    TRANSPORT_FAILED = "transport_failed"
+    INVALID_METADATA = "invalid_metadata"
+
+
+class RefreshJobStatus(StrEnum):
+    QUEUED = "queued"
+    LEASED = "leased"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    OBSOLETE = "obsolete"

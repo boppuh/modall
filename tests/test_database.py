@@ -63,6 +63,10 @@ def test_alembic_uses_database_only_settings_in_deployed_mode() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+    assert (
+        "ALTER TABLE capability_versions ADD COLUMN schema_supported "
+        "BOOLEAN DEFAULT false NOT NULL;"
+    ) in completed.stdout
 
 
 def test_migration_database_url_loads_repository_env_without_runtime_validation(
