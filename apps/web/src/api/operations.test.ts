@@ -188,6 +188,17 @@ describe("control-plane operations", () => {
     const api = createControlPlane({ identityId: "reviewer", workspaceId: id });
     expect(await api.listConnections()).toHaveLength(2);
 
+    page = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(() => {
+      page += 1;
+      return Promise.resolve(new Response(JSON.stringify({
+        items: [run],
+        page: { next_cursor: "older-runs" },
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    }));
+    expect(await api.listRuns()).toHaveLength(1);
+    expect(page).toBe(1);
+
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(() => Promise.resolve(new Response(JSON.stringify({
       items: [connection], page: { next_cursor: "same" },
     }), { status: 200, headers: { "Content-Type": "application/json" } }))));

@@ -201,7 +201,8 @@ class GeneratedControlPlane implements ControlPlane {
   }
 
   async listRuns(): Promise<Run[]> {
-    return collectPages((cursor) => unwrap(this.client.GET("/v1/runs", { params: { query: { limit: 100, cursor } } })));
+    const page = await unwrap(this.client.GET("/v1/runs", { params: { query: { limit: 100 } } }));
+    return page.items;
   }
 
   getRun(id: string): Promise<Run> {

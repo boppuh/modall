@@ -164,6 +164,7 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Registry search"), { target: { value: "search" } });
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     expect(await screen.findByText("Public search")).toBeTruthy();
+    expect(screen.getByText("io.modall/search @ 1.2.0")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Import" }));
     await waitFor(() => expect(api.importRegistry).toHaveBeenCalled());
 
@@ -267,6 +268,7 @@ describe("App", () => {
     const originalKey = createRun.mock.calls[0]?.[2] ?? "";
 
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    fireEvent.change(screen.getByLabelText("Arguments"), { target: { value: "{ \"query\" : \"status\" }" } });
     fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
     confirm = await screen.findByRole("button", { name: "Confirm and run" });
     await waitFor(() => expect(confirm).toHaveProperty("disabled", false));

@@ -456,7 +456,7 @@ function Registry({ api, scope, role, selectedId, select }: { api: ControlPlane;
                 <ul className="row-list">
                   {searchResult.items.map((item) => (
                     <li key={item.provenance_digest}>
-                      <div><strong>{item.name}</strong><span>{item.description ?? item.external_id}</span>{item.advertised_urls.map((url) => <code key={url}>{url}</code>)}</div>
+                      <div><strong>{item.name}</strong><span>{item.description ?? "No description supplied."}</span><code>{item.external_id} @ {item.source_version}</code>{item.advertised_urls.map((url) => <code key={url}>{url}</code>)}</div>
                       <button
                         className="text-action"
                         type="button"
@@ -638,7 +638,7 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter 
 function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; select: (id: string | null) => void }) {
   const queryClient = useQueryClient();
   const [selectedVersionId, setSelectedVersionId] = useState("");
-  const runKey = useRef(mutationId());
+  const runKeys = useRef(new Map<string, string>());
   const cancelKeys = useRef(new Map<string, string>());
   const finalEventFetchRun = useRef<string | null>(null);
   const runsKey = useMemo(() => queryKey(scope, "runs"), [scope]);
@@ -691,17 +691,23 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
     onSuccess: (prepared) => { setConfirmationClock(Date.now()); setPreflight(prepared); },
   });
   const invoke = useMutation({
-    mutationFn: ({ prepared, args }: { prepared: RunPreflight; args: Record<string, unknown> }) => api.createRun(prepared, args, runKey.current),
-    onSuccess: async (run) => {
-      runKey.current = mutationId();
+    mutationFn: ({ prepared, args }: { prepared: RunPreflight; args: Record<string, unknown> }) => {
+      const operation = `${prepared.capability_version_id}:${prepared.argument_digest}`;
+      const key = runKeys.current.get(operation) ?? mutationId();
+      runKeys.current.set(operation, key);
+      return api.createRun(prepared, args, key);
+    },
+    onSuccess: async (run, variables) => {
+      runKeys.current.delete(`${variables.prepared.capability_version_id}:${variables.prepared.argument_digest}`);
       select(run.id);
       setPreflight(null);
       setPendingArguments(null);
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "runs") });
     },
-    onError: (error) => {
+    onError: (error, variables) => {
       if (error instanceof ApiFailure && ["invalid_confirmation", "confirmation_expired", "confirmation_replayed"].includes(error.code)) {
-        setPreflight(null); setPendingArguments(null); runKey.current = mutationId();
+        runKeys.current.delete(`${variables.prepared.capability_version_id}:${variables.prepared.argument_digest}`);
+        setPreflight(null); setPendingArguments(null);
       }
     },
   });
@@ -726,9 +732,8 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
   const confirmedEndpoint = confirmationConnection.data?.versions.find((version) => version.id === preflight?.connection_version_id)?.endpoint_url;
   const confirmationExpired = preflight ? Date.parse(preflight.expires_at) <= confirmationClock : false;
 
-  function invalidatePreparedRun(resetRunKey = false) {
+  function invalidatePreparedRun() {
     setPreflight(null); setPendingArguments(null); prepare.reset(); invoke.reset();
-    if (resetRunKey) runKey.current = mutationId();
   }
 
   function submitPreflight(event: FormEvent<HTMLFormElement>) {
@@ -756,8 +761,8 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
         <div className="section-block playground">
           <div className="section-heading"><div><span className="index">Playground / 01</span><h2>Prepare a run</h2></div></div>
           <form className="stacked-form" onSubmit={submitPreflight} noValidate>
-            <label>Enabled capability<select name="capability" required value={selectedVersionId} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(true); setSelectedVersionId(event.target.value); }}><option value="" disabled>Select a capability</option>{enabledCapabilities.map((item) => <option key={item.id} value={item.enabled_version_id ?? ""}>{item.tool_identity} — {connectionNames.get(item.connection_id) ?? shortId(item.connection_id)}</option>)}</select></label>
-            <label>Arguments<textarea value={argumentsText} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(true); setArgumentsText(event.target.value); }} rows={8} spellCheck={false} aria-invalid={Boolean(argumentsError)} /></label>
+            <label>Enabled capability<select name="capability" required value={selectedVersionId} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(); setSelectedVersionId(event.target.value); }}><option value="" disabled>Select a capability</option>{enabledCapabilities.map((item) => <option key={item.id} value={item.enabled_version_id ?? ""}>{item.tool_identity} — {connectionNames.get(item.connection_id) ?? shortId(item.connection_id)}</option>)}</select></label>
+            <label>Arguments<textarea value={argumentsText} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(); setArgumentsText(event.target.value); }} rows={8} spellCheck={false} aria-invalid={Boolean(argumentsError)} /></label>
             <p className="incident-note">Only public, synthetic, or explicitly non-confidential data.</p>
             {argumentsError && <p className="field-error" role="alert">{argumentsError}</p>}
             {prepare.isError && <p className="field-error" role="alert">{failureMessage(prepare.error)}</p>}
@@ -772,6 +777,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
           {runs.isPending ? <LoadingState label="Loading runs" /> : runs.isError ? <QueryFailure error={runs.error} retry={() => void runs.refetch()} /> : runs.data.length === 0 ? <EmptyState title="No runs retained" copy="Completed and in-flight work will appear here." /> : (
             <ul className="select-list">{orderedRuns.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{capabilityNames.get(run.capability_id) ?? shortId(run.capability_id)}</strong><small>{connectionNames.get(run.connection_id) ?? shortId(run.connection_id)} · {shortId(run.id)} · {formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
           )}
+          {(runs.data?.length ?? 0) === 100 && <p className="field-help">Showing the 100 most recent runs.</p>}
         </div>
       </section>
       {preflight && pendingArguments && (
