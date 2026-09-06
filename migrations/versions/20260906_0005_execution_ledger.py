@@ -309,6 +309,10 @@ def downgrade() -> None:
     op.drop_table("runs")
     op.drop_table("system_execution_state")
 
+    op.execute(
+        "DELETE FROM audit_events WHERE action IN ('run.created', 'run.cancelled') "
+        "OR resource_type = 'run'"
+    )
     op.drop_constraint("ck_audit_action", "audit_events", type_="check")
     op.drop_constraint("ck_audit_resource_type", "audit_events", type_="check")
     op.create_check_constraint(

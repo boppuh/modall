@@ -81,7 +81,10 @@ async def context_for(
 
 
 async def create_executable_target(
-    session: AsyncSession, context: WorkspaceContext
+    session: AsyncSession,
+    context: WorkspaceContext,
+    *,
+    input_schema: dict[str, object] | None = None,
 ) -> CapabilityVersion:
     connection = await ConnectionService(session).create(
         context=context,
@@ -106,7 +109,8 @@ async def create_executable_target(
         tool_name="search",
         display_name="Search",
         description="Search public records",
-        input_schema={
+        input_schema=input_schema
+        or {
             "type": "object",
             "properties": {"query": {"type": "string", "maxLength": 100}},
             "required": ["query"],
@@ -118,7 +122,7 @@ async def create_executable_target(
     )
     payload = DiscoveryPayload(
         workspace_id=context.workspace_id,
-        canonical_digest="b" * 64,
+        canonical_digest=connection.id.hex * 2,
         normalized_payload={"tools": []},
         byte_count=2,
     )
@@ -337,6 +341,43 @@ def test_idempotency_survives_key_rotation_and_detects_conflict() -> None:
                     )
                 assert conflict.value.code == ExecutionFailureCode.IDEMPOTENCY_CONFLICT
 
+                deadline = now + timedelta(seconds=30)
+                deadline_token = await rotated_service.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "deadline"},
+                )
+                deadline_run = await rotated_service.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "deadline"},
+                    confirmation_token=deadline_token.confirmation_token,
+                    idempotency_key="deadline-replay",
+                    deadline=deadline,
+                )
+                replay_token = await service(
+                    session,
+                    now=now + timedelta(seconds=31),
+                    idempotency_keys=(rotated, *IDEMPOTENCY_KEYS),
+                ).preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "deadline"},
+                )
+                past_deadline_replay = await service(
+                    session,
+                    now=now + timedelta(seconds=31),
+                    idempotency_keys=(rotated, *IDEMPOTENCY_KEYS),
+                ).create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "deadline"},
+                    confirmation_token=replay_token.confirmation_token,
+                    idempotency_key="deadline-replay",
+                    deadline=deadline,
+                )
+                assert past_deadline_replay.id == deadline_run.id
+
     asyncio.run(scenario())
 
 
@@ -451,6 +492,7 @@ def test_restore_quarantine_fences_old_jobs_and_retention_erases_content() -> No
                 retained = await session.get(Run, run.id)
                 assert retained is not None
                 assert retained.arguments is None
+                assert await execution.expire_retained_content() == 0
 
             current += timedelta(days=2)
             async with transaction(factory) as session:
@@ -720,5 +762,49 @@ def test_confirmation_limits_expiry_and_key_configuration_fail_closed(
                 await execution.expire_retained_content(batch_size=0)
             with pytest.raises(ValueError, match="invalid cleanup batch"):
                 await execution.delete_expired_run_metadata(batch_size=1001)
+
+    asyncio.run(scenario())
+
+
+def test_schema_validation_is_killable_and_invalid_schemas_fail_closed() -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="schema-sandbox")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                pathological = await create_executable_target(
+                    session,
+                    context,
+                    input_schema={
+                        "type": "object",
+                        "properties": {"query": {"type": "string", "pattern": "(a+)+$"}},
+                        "required": ["query"],
+                    },
+                )
+                with pytest.raises(ExecutionError) as timed_out:
+                    await service(
+                        session,
+                        now=now,
+                        limits=ExecutionLimits(schema_validation_timeout_seconds=0.05),
+                    ).preflight(
+                        context=context,
+                        capability_version_id=pathological.id,
+                        arguments={"query": "a" * 8191 + "!"},
+                    )
+                assert timed_out.value.code == ExecutionFailureCode.SCANNER_FAILED
+
+                invalid = await create_executable_target(
+                    session,
+                    context,
+                    input_schema={"type": "not-a-json-schema-type"},
+                )
+                with pytest.raises(ExecutionError) as invalid_schema:
+                    await service(session, now=now).preflight(
+                        context=context,
+                        capability_version_id=invalid.id,
+                        arguments={"query": "safe"},
+                    )
+                assert invalid_schema.value.code == ExecutionFailureCode.CAPABILITY_UNAVAILABLE
 
     asyncio.run(scenario())

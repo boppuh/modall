@@ -11,8 +11,6 @@ from typing import Literal, cast
 from uuid import UUID, uuid4
 
 import jwt
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError, ValidationError
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +27,7 @@ from modall.execution.types import (
     RunPreflight,
     RunStatus,
 )
+from modall.execution.validation import SchemaValidationResult, validate_schema_arguments
 from modall.identity.repository import require_current_role
 from modall.identity.types import Role, WorkspaceContext
 from modall.mcp_adapter.client import QUALIFIED_PROTOCOL_REVISION
@@ -119,7 +118,7 @@ class ExecutionService:
     ) -> RunPreflight:
         await require_current_role(self._session, context, Role.ADMIN, Role.OPERATOR)
         target = await self._load_admission_target(context, capability_version_id)
-        normalized, argument_digest = self._validate_arguments(
+        normalized, argument_digest = await self._validate_arguments(
             arguments, target.version.input_schema
         )
         del normalized
@@ -181,7 +180,7 @@ class ExecutionService:
             argument_digest=argument_digest,
             now=now,
         )
-        requested_deadline, effective_deadline = self._normalize_deadline(deadline, now)
+        requested_deadline = self._canonicalize_deadline(deadline)
         raw_key = self._validate_idempotency_key(idempotency_key)
         canonical_request = self._canonical_request(
             capability_id=claims.capability_id,
@@ -236,6 +235,8 @@ class ExecutionService:
         if used_nonce is not None:
             raise ExecutionError(ExecutionFailureCode.CONFIRMATION_REPLAYED)
 
+        effective_deadline = self._admission_deadline(requested_deadline, now)
+
         target = await self._load_admission_target(context, capability_version_id)
         if (
             claims.capability_id != target.capability.id
@@ -243,7 +244,7 @@ class ExecutionService:
             or claims.connection_version_id != target.binding.connection_version_id
         ):
             raise ExecutionError(ExecutionFailureCode.INVALID_CONFIRMATION)
-        self._validate_normalized_arguments(normalized, target.version.input_schema)
+        await self._validate_normalized_arguments(normalized, target.version.input_schema)
 
         state = await self._execution_state(lock="shared")
         if state.dispatch_quarantined:
@@ -345,8 +346,12 @@ class ExecutionService:
             raise ExecutionError(ExecutionFailureCode.DISPATCH_QUARANTINED)
         await self._terminalize_expired_jobs(now)
         await self._terminalize_abandoned_dispatches(now)
-        job = await self._session.scalar(
-            select(Job)
+        run = await self._session.scalar(
+            select(Run)
+            .join(
+                Job,
+                and_(Job.workspace_id == Run.workspace_id, Job.run_id == Run.id),
+            )
             .where(
                 Job.execution_epoch == state.execution_epoch,
                 Job.available_at <= now,
@@ -361,11 +366,13 @@ class ExecutionService:
             )
             .order_by(Job.created_at, Job.id)
             .limit(1)
-            .with_for_update(skip_locked=True)
+            .with_for_update(of=Run, skip_locked=True)
         )
+        if run is None:
+            raise ExecutionError(ExecutionFailureCode.NO_JOB_AVAILABLE)
+        job = await self._session.scalar(select(Job).where(Job.run_id == run.id).with_for_update())
         if job is None:
             raise ExecutionError(ExecutionFailureCode.NO_JOB_AVAILABLE)
-        run = await self._locked_run(job.workspace_id, job.run_id)
         if job.status == JobStatus.LEASED.value:
             previous = await self._active_attempt(run.id)
             if previous is not None:
@@ -421,7 +428,7 @@ class ExecutionService:
             raise ValueError("invalid worker lease")
         now = self._utc_now()
         state = await self._execution_state(lock="shared")
-        job = await self._locked_job(lease)
+        _, job = await self._locked_lease_lineage(lease)
         if (
             state.dispatch_quarantined
             or state.execution_epoch != lease.execution_epoch
@@ -455,7 +462,7 @@ class ExecutionService:
             raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
         now = self._utc_now()
         state = await self._execution_state(lock="shared")
-        job = await self._locked_job(lease)
+        run, job = await self._locked_lease_lineage(lease)
         if (
             state.execution_epoch != lease.execution_epoch
             or job.status != JobStatus.LEASED.value
@@ -465,7 +472,6 @@ class ExecutionService:
             or _utc(job.lease_expires_at) <= now
         ):
             raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
-        run = await self._locked_run(job.workspace_id, job.run_id)
         if RunStatus(run.status) in _TERMINAL_RUN_STATUSES:
             raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
         attempt = await self._active_attempt(run.id)
@@ -705,11 +711,11 @@ class ExecutionService:
             raise ExecutionError(ExecutionFailureCode.CAPABILITY_UNAVAILABLE)
         return _AdmissionTarget(capability, version, binding, connection)
 
-    def _validate_arguments(
+    async def _validate_arguments(
         self, arguments: dict[str, object], schema: dict[str, object]
     ) -> tuple[dict[str, object], str]:
         normalized, digest = self._normalize_arguments(arguments)
-        self._validate_normalized_arguments(normalized, schema)
+        await self._validate_normalized_arguments(normalized, schema)
         return normalized, digest
 
     def _normalize_arguments(self, arguments: dict[str, object]) -> tuple[dict[str, object], str]:
@@ -733,9 +739,8 @@ class ExecutionService:
             raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS)
         return normalized, _sha256(encoded)
 
-    @staticmethod
-    def _validate_normalized_arguments(
-        arguments: dict[str, object], schema: dict[str, object]
+    async def _validate_normalized_arguments(
+        self, arguments: dict[str, object], schema: dict[str, object]
     ) -> None:
         try:
             contains_secret = contains_sensitive_json(arguments)
@@ -743,14 +748,16 @@ class ExecutionService:
             raise ExecutionError(ExecutionFailureCode.SCANNER_FAILED) from None
         if contains_secret:
             raise ExecutionError(ExecutionFailureCode.SENSITIVE_ARGUMENTS)
-        try:
-            Draft202012Validator.check_schema(schema)
-            Draft202012Validator(schema).validate(arguments)
-        except ValidationError:
+        result = await validate_schema_arguments(
+            arguments,
+            schema,
+            timeout_seconds=self._limits.schema_validation_timeout_seconds,
+        )
+        if result == SchemaValidationResult.INVALID_ARGUMENTS:
             raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS) from None
-        except SchemaError:
+        if result == SchemaValidationResult.INVALID_SCHEMA:
             raise ExecutionError(ExecutionFailureCode.CAPABILITY_UNAVAILABLE) from None
-        except Exception:
+        if result != SchemaValidationResult.VALID:
             raise ExecutionError(ExecutionFailureCode.SCANNER_FAILED) from None
 
     def _decode_confirmation(self, token: str) -> _ConfirmationClaims:
@@ -873,17 +880,20 @@ class ExecutionService:
             separators=(",", ":"),
         ).encode()
 
-    def _normalize_deadline(
-        self, deadline: datetime | None, now: datetime
-    ) -> tuple[datetime | None, datetime]:
+    @staticmethod
+    def _canonicalize_deadline(deadline: datetime | None) -> datetime | None:
         if deadline is None:
-            return None, now + timedelta(seconds=self._limits.max_run_seconds)
+            return None
         if deadline.tzinfo is None or deadline.utcoffset() is None:
             raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS)
-        requested = deadline.astimezone(UTC)
+        return deadline.astimezone(UTC)
+
+    def _admission_deadline(self, requested: datetime | None, now: datetime) -> datetime:
+        if requested is None:
+            return now + timedelta(seconds=self._limits.max_run_seconds)
         if requested <= now or requested > now + timedelta(seconds=self._limits.max_run_seconds):
             raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS)
-        return requested, requested
+        return requested
 
     def _validate_idempotency_key(self, value: str) -> bytes:
         if (
@@ -922,6 +932,25 @@ class ExecutionService:
             raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
         return job
 
+    async def _locked_lease_lineage(self, lease: JobLease) -> tuple[Run, Job]:
+        lineage = await self._session.execute(
+            select(Job.workspace_id, Job.run_id).where(
+                Job.id == lease.job_id,
+                Job.workspace_id == lease.workspace_id,
+            )
+        )
+        row = lineage.one_or_none()
+        if row is None or row.run_id != lease.run_id:
+            raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
+        run = await self._session.scalar(
+            select(Run)
+            .where(Run.id == row.run_id, Run.workspace_id == row.workspace_id)
+            .with_for_update()
+        )
+        if run is None:
+            raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
+        return run, await self._locked_job(lease)
+
     async def _locked_run(self, workspace_id: UUID, run_id: UUID) -> Run:
         run = await self._session.scalar(
             select(Run).where(Run.id == run_id, Run.workspace_id == workspace_id).with_for_update()
@@ -952,20 +981,23 @@ class ExecutionService:
         )
 
     async def _terminalize_expired_jobs(self, now: datetime) -> None:
-        jobs = list(
+        runs = list(
             (
                 await self._session.scalars(
-                    select(Job)
+                    select(Run)
+                    .join(
+                        Job,
+                        and_(Job.workspace_id == Run.workspace_id, Job.run_id == Run.id),
+                    )
                     .where(
                         Job.status.in_([JobStatus.QUEUED.value, JobStatus.LEASED.value]),
                         Job.deadline <= now,
                     )
-                    .with_for_update(skip_locked=True)
+                    .with_for_update(of=Run, skip_locked=True)
                 )
             ).all()
         )
-        for job in jobs:
-            run = await self._locked_run(job.workspace_id, job.run_id)
+        for run in runs:
             status = (
                 RunStatus.INDETERMINATE
                 if run.status == RunStatus.DISPATCH_FENCED.value
@@ -974,20 +1006,23 @@ class ExecutionService:
             await self._terminalize_run(run, status, now, "deadline_exceeded")
 
     async def _terminalize_abandoned_dispatches(self, now: datetime) -> None:
-        jobs = list(
+        runs = list(
             (
                 await self._session.scalars(
-                    select(Job)
+                    select(Run)
+                    .join(
+                        Job,
+                        and_(Job.workspace_id == Run.workspace_id, Job.run_id == Run.id),
+                    )
                     .where(
                         Job.status == JobStatus.LEASED.value,
                         Job.lease_expires_at <= now,
                     )
-                    .with_for_update(skip_locked=True)
+                    .with_for_update(of=Run, skip_locked=True)
                 )
             ).all()
         )
-        for job in jobs:
-            run = await self._locked_run(job.workspace_id, job.run_id)
+        for run in runs:
             attempt = await self._active_attempt(run.id)
             if attempt is not None and attempt.status == RunStatus.DISPATCH_FENCED.value:
                 await self._terminalize_run(

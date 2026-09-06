@@ -1,5 +1,6 @@
 """Allowlisted execution states and payload-free failure codes."""
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -79,6 +80,7 @@ class ExecutionLimits:
     run_retention_days: int = 90
     max_idempotency_key_characters: int = 256
     max_historical_hmac_keys: int = 8
+    schema_validation_timeout_seconds: float = 2.0
 
     def __post_init__(self) -> None:
         if (
@@ -89,6 +91,8 @@ class ExecutionLimits:
             or self.run_retention_days < self.argument_retention_days
             or self.max_idempotency_key_characters <= 0
             or not 1 <= self.max_historical_hmac_keys <= 16
+            or not 0 < self.schema_validation_timeout_seconds <= 5
+            or not math.isfinite(self.schema_validation_timeout_seconds)
         ):
             raise ValueError("invalid execution limits")
 

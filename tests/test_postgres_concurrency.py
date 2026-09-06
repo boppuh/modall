@@ -10,7 +10,12 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modall.execution.service import ExecutionService
-from modall.execution.types import HmacKeyVersion
+from modall.execution.types import (
+    ExecutionError,
+    ExecutionFailureCode,
+    HmacKeyVersion,
+    RunStatus,
+)
 from modall.identity.repository import AuthorizationDenied, AuthorizationService
 from modall.identity.service import IdentityService
 from modall.identity.types import Permission, Principal, Role, WorkspaceContext
@@ -766,6 +771,105 @@ def test_concurrent_workers_claim_each_job_once() -> None:
                     )
                     == 2
                 )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_claim_and_cancellation_share_one_lock_order() -> None:
+    async def scenario() -> None:
+        engine = create_engine(async_database_url(os.environ["MODALL_DATABASE_URL"]))
+        factory = create_session_factory(engine)
+        suffix = str(uuid4())
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        try:
+            async with transaction(factory) as session:
+                await session.execute(delete(Run))
+                identity = IdentityService(session)
+                operator = await identity.resolve_user(
+                    Principal("issuer", f"execution-cancel-race-{suffix}", None)
+                )
+                workspace = await identity.create_workspace(
+                    owner=operator, name=f"Execution cancel race {suffix}"
+                )
+                context = await AuthorizationService(session).authorize(
+                    user_id=operator.id,
+                    workspace_id=workspace.id,
+                    permission=Permission.INVOKE,
+                )
+                version = await create_executable_target(session, context)
+                execution = ExecutionService(
+                    session,
+                    confirmation_keys=CONFIRMATION_KEYS,
+                    idempotency_keys=IDEMPOTENCY_KEYS,
+                    now=lambda: now,
+                )
+                preflight = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "race"},
+                )
+                run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "race"},
+                    confirmation_token=preflight.confirmation_token,
+                    idempotency_key="cancel-race",
+                )
+                user_id, workspace_id, run_id = operator.id, workspace.id, run.id
+
+            both_ready = asyncio.Event()
+            ready_count = 0
+            ready_lock = asyncio.Lock()
+
+            async def rendezvous() -> None:
+                nonlocal ready_count
+                async with ready_lock:
+                    ready_count += 1
+                    if ready_count == 2:
+                        both_ready.set()
+                await both_ready.wait()
+
+            async def cancel() -> None:
+                async with transaction(factory) as session:
+                    context = await AuthorizationService(session).authorize(
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                        permission=Permission.INVOKE,
+                    )
+                    await rendezvous()
+                    await ExecutionService(
+                        session,
+                        confirmation_keys=CONFIRMATION_KEYS,
+                        idempotency_keys=IDEMPOTENCY_KEYS,
+                        now=lambda: now,
+                    ).cancel_run(context=context, run_id=run_id)
+
+            async def claim() -> None:
+                async with transaction(factory) as session:
+                    await rendezvous()
+                    try:
+                        await ExecutionService(
+                            session,
+                            confirmation_keys=CONFIRMATION_KEYS,
+                            idempotency_keys=IDEMPOTENCY_KEYS,
+                            now=lambda: now,
+                        ).claim_job(
+                            worker_id="racing-worker",
+                            lease_duration=timedelta(seconds=30),
+                        )
+                    except ExecutionError as exc:
+                        assert exc.code == ExecutionFailureCode.NO_JOB_AVAILABLE
+
+            await asyncio.wait_for(asyncio.gather(cancel(), claim()), timeout=5)
+            async with factory() as session:
+                persisted_run = await session.get(Run, run_id)
+                job = await session.scalar(select(Job).where(Job.run_id == run_id))
+                assert persisted_run is not None
+                assert job is not None
+                assert persisted_run.status == RunStatus.CANCELLED.value
+                assert job.status == RunStatus.CANCELLED.value
         finally:
             await engine.dispose()
 

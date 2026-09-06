@@ -731,7 +731,7 @@ class Run(Base):
     capability_status_epoch: Mapped[int] = mapped_column(Integer)
     protocol_revision: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(24))
-    arguments: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    arguments: Mapped[dict[str, object] | None] = mapped_column(JSON(none_as_null=True))
     argument_digest: Mapped[str] = mapped_column(String(64))
     arguments_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True))
