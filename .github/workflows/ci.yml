@@ -50,11 +50,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.17"
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - uses: actions/setup-node@v4
         with:
           node-version: "22.20"
           cache: npm
       - run: npm ci
+      - run: uv sync --frozen
+      - run: npm run api:generate
+      - run: git diff --exit-code -- apps/web/src/api
       - run: npm run web:lint
       - run: npm run web:typecheck
       - run: npm run web:test

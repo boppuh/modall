@@ -1069,6 +1069,33 @@ class IdempotencyRecord(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ApiIdempotencyRecord(Base):
+    """Replay-safe metadata response for non-run control-plane mutations."""
+
+    __tablename__ = "api_idempotency_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "actor_user_id", "method", "route", "key_version", "key_hmac"
+        ),
+        CheckConstraint("length(key_hmac) = 64", name="ck_api_idempotency_key_hmac"),
+        CheckConstraint("length(request_hmac) = 64", name="ck_api_idempotency_request_hmac"),
+        Index("ix_api_idempotency_expiry", "expires_at", "id"),
+        Index("ix_api_idempotency_key_version", "key_version"),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    method: Mapped[str] = mapped_column(String(8))
+    route: Mapped[str] = mapped_column(String(128))
+    key_version: Mapped[str] = mapped_column(String(32))
+    key_hmac: Mapped[str] = mapped_column(String(64))
+    request_hmac: Mapped[str] = mapped_column(String(64))
+    response_body: Mapped[dict[str, object]] = mapped_column(JSON)
+    created_at: Mapped[CreatedAt]
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 def _reject_immutable_update(mapper: Mapper[object], connection: object, target: object) -> None:
     del connection
     if any(get_history(target, attribute.key).has_changes() for attribute in mapper.column_attrs):

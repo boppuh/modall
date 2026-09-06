@@ -8,6 +8,7 @@
     "apps/web"
   ],
   "scripts": {
+    "api:generate": "uv run python scripts/export_openapi.py && npm exec --workspace @modall/web -- openapi-typescript src/api/openapi.json -o src/api/schema.d.ts",
     "web:build": "npm run build --workspace @modall/web",
     "web:dev": "npm run dev --workspace @modall/web",
     "web:lint": "npm run lint --workspace @modall/web",

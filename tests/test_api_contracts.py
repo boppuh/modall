@@ -1,0 +1,743 @@
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from typing import cast
+from uuid import UUID, uuid4
+
+import httpx
+import pytest
+from sqlalchemy import event, select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+from modall.api.contracts import ConnectionResponse
+from modall.api.idempotency import idempotent_mutation, purge_expired_api_idempotency
+from modall.api.main import create_app
+from modall.config import Settings
+from modall.execution.types import HmacKeyVersion
+from modall.identity.repository import AuthorizationService
+from modall.identity.service import IdentityService
+from modall.identity.types import Permission, Principal, Role, WorkspaceContext
+from modall.persistence.database import create_engine, create_session_factory, transaction
+from modall.persistence.models import (
+    ApiIdempotencyRecord,
+    Base,
+    Capability,
+    CapabilityVersion,
+    DiscoveryPayload,
+    DiscoverySnapshot,
+    DiscoverySnapshotCapability,
+    RegistryEntry,
+    RegistryEntryVersion,
+    ServerConnectionVersion,
+    WorkspaceMembership,
+)
+from modall.registry.official import OfficialRegistryAdapter
+from modall.registry.service import CapabilityService, ConnectionService
+from modall.registry.types import CapabilityStatus, RegistrySource
+
+
+@asynccontextmanager
+async def api_client(
+    registry_adapter: OfficialRegistryAdapter | None = None,
+) -> AsyncIterator[tuple[httpx.AsyncClient, AsyncEngine, UUID]]:
+    engine = create_engine("sqlite+aiosqlite:///:memory:")
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def enable_foreign_keys(dbapi_connection: object, connection_record: object) -> None:
+        del connection_record
+        cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = create_session_factory(engine)
+    async with transaction(factory) as session:
+        user = await IdentityService(session).resolve_user(
+            Principal("modall-local", "api-user", "API User")
+        )
+        workspace = await IdentityService(session).create_workspace(owner=user, name="API")
+        workspace_id = workspace.id
+    app = create_app(
+        Settings(environment="test", local_subject="api-user"),
+        readiness_probe=_ready,
+        engine=engine,
+        registry_adapter=registry_adapter,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        yield client, engine, workspace_id
+    await engine.dispose()
+
+
+async def _ready() -> bool:
+    return True
+
+
+def test_control_plane_requires_workspace_and_has_stable_errors() -> None:
+    async def scenario() -> None:
+        async with api_client() as (client, _engine, workspace_id):
+            missing = await client.get("/v1/server-connections")
+            assert missing.status_code == 403
+            assert missing.json()["error"]["code"] == "access_denied"
+            assert missing.headers["cache-control"] == "no-store"
+            assert UUID(missing.headers["x-correlation-id"])
+
+            bearer = await client.get(
+                "/v1/server-connections",
+                headers={
+                    "X-Workspace-ID": str(workspace_id),
+                    "Authorization": "Bearer forbidden-locally",
+                },
+            )
+            assert bearer.status_code == 401
+            assert bearer.json()["error"]["code"] == "authentication_required"
+
+            invalid = await client.get(
+                "/v1/server-connections?limit=101",
+                headers={
+                    "X-Workspace-ID": str(workspace_id),
+                    "X-Correlation-ID": "not-a-uuid",
+                },
+            )
+            assert invalid.status_code == 422
+            assert invalid.json()["error"]["code"] == "invalid_request"
+
+            invalid_cursor = await client.get(
+                "/v1/runs?cursor=bad", headers={"X-Workspace-ID": str(workspace_id)}
+            )
+            assert invalid_cursor.status_code == 422
+
+            unknown = await client.get(
+                f"/v1/capabilities/{uuid4()}",
+                headers={"X-Workspace-ID": str(workspace_id)},
+            )
+            assert unknown.status_code == 403
+
+    asyncio.run(scenario())
+
+
+def test_connection_contract_and_required_idempotency_key() -> None:
+    async def scenario() -> None:
+        async with api_client() as (client, engine, workspace_id):
+            headers = {"X-Workspace-ID": str(workspace_id)}
+            body = {
+                "name": "Fixture server",
+                "endpoint_url": "http://127.0.0.1:8765/mcp",
+                "policy_version": "v1",
+            }
+            missing_key = await client.post("/v1/server-connections", headers=headers, json=body)
+            assert missing_key.status_code == 422
+
+            created = await client.post(
+                "/v1/server-connections",
+                headers={**headers, "Idempotency-Key": "connection-create"},
+                json=body,
+            )
+            assert created.status_code == 201
+            connection = created.json()
+            assert connection["lifecycle"] == "verifying"
+            connection_id = connection["id"]
+
+            replayed = await client.post(
+                "/v1/server-connections",
+                headers={**headers, "Idempotency-Key": "connection-create"},
+                json=body,
+            )
+            assert replayed.status_code == 201
+            assert replayed.json()["id"] == connection_id
+
+            conflict = await client.post(
+                "/v1/server-connections",
+                headers={**headers, "Idempotency-Key": "connection-create"},
+                json={**body, "name": "Different"},
+            )
+            assert conflict.status_code == 409
+            assert conflict.json()["error"]["code"] == "idempotency_conflict"
+
+            factory = create_session_factory(engine)
+            async with transaction(factory) as session:
+                record = await session.scalar(select(ApiIdempotencyRecord))
+                assert record is not None
+                record.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            reused_after_expiry = await client.post(
+                "/v1/server-connections",
+                headers={**headers, "Idempotency-Key": "connection-create"},
+                json={**body, "name": "After expiry"},
+            )
+            assert reused_after_expiry.status_code == 201
+            assert reused_after_expiry.json()["id"] != connection_id
+
+            listed = await client.get("/v1/server-connections", headers=headers)
+            assert listed.status_code == 200
+            assert connection_id in {item["id"] for item in listed.json()["items"]}
+
+            detail = await client.get(f"/v1/server-connections/{connection_id}", headers=headers)
+            assert detail.status_code == 200
+            assert detail.json()["versions"][0]["sequence"] == 1
+
+            appended = await client.post(
+                f"/v1/server-connections/{connection_id}/versions",
+                headers={**headers, "Idempotency-Key": "connection-version"},
+                json={
+                    "endpoint_url": "http://127.0.0.1:8766/mcp",
+                    "policy_version": "v1",
+                },
+            )
+            assert appended.status_code == 201
+            assert appended.json()["sequence"] == 2
+
+            async with transaction(factory) as session:
+                seed_version = await session.scalar(
+                    select(ServerConnectionVersion).where(
+                        ServerConnectionVersion.connection_id == UUID(connection_id)
+                    )
+                )
+                assert seed_version is not None
+                session.add_all(
+                    ServerConnectionVersion(
+                        workspace_id=workspace_id,
+                        connection_id=UUID(connection_id),
+                        sequence=sequence,
+                        endpoint_url="http://127.0.0.1:8766/mcp",
+                        secret_binding_id=None,
+                        transport="streamable_http",
+                        policy_version="v1",
+                        created_by_user_id=seed_version.created_by_user_id,
+                    )
+                    for sequence in range(3, 104)
+                )
+            bounded_detail = await client.get(
+                f"/v1/server-connections/{connection_id}", headers=headers
+            )
+            assert len(bounded_detail.json()["versions"]) == 100
+            assert bounded_detail.json()["versions_truncated"] is True
+
+            refresh = await client.post(
+                f"/v1/server-connections/{connection_id}/verify",
+                headers={**headers, "Idempotency-Key": "verify"},
+            )
+            assert refresh.status_code == 200
+            assert refresh.json()["status"] == "queued"
+
+            disabled = await client.post(
+                f"/v1/server-connections/{connection_id}/disable",
+                headers={**headers, "Idempotency-Key": "disable"},
+            )
+            assert disabled.status_code == 200
+            assert disabled.json()["lifecycle"] == "disabled"
+
+            enabled = await client.post(
+                f"/v1/server-connections/{connection_id}/enable",
+                headers={**headers, "Idempotency-Key": "enable"},
+            )
+            assert enabled.status_code == 200
+            assert enabled.json()["status"] == "queued"
+
+            async with transaction(factory) as session:
+                record = await session.scalar(
+                    select(ApiIdempotencyRecord).where(
+                        ApiIdempotencyRecord.route == "/v1/server-connections"
+                    )
+                )
+                assert record is not None
+                record.key_version = "retired"
+            incomplete_history = await client.post(
+                "/v1/server-connections",
+                headers={**headers, "Idempotency-Key": "new-key"},
+                json={**body, "name": "Blocked rotation"},
+            )
+            assert incomplete_history.status_code == 503
+            assert (
+                incomplete_history.json()["error"]["code"] == "idempotency_key_history_incomplete"
+            )
+
+            async with transaction(factory) as session:
+                record = await session.scalar(
+                    select(ApiIdempotencyRecord).where(
+                        ApiIdempotencyRecord.key_version == "retired"
+                    )
+                )
+                assert record is not None
+                record.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+                await session.flush()
+                assert await purge_expired_api_idempotency(session) == 1
+                membership = await session.scalar(
+                    select(WorkspaceMembership).where(
+                        WorkspaceMembership.workspace_id == workspace_id
+                    )
+                )
+                assert membership is not None
+                membership.role = Role.VIEWER.value
+            denied_replay = await client.post(
+                f"/v1/server-connections/{connection_id}/enable",
+                headers={**headers, "Idempotency-Key": "enable"},
+            )
+            assert denied_replay.status_code == 403
+
+    asyncio.run(scenario())
+
+
+def test_registry_capability_and_audit_read_contracts() -> None:
+    async def scenario() -> None:
+        async with api_client() as (client, engine, workspace_id):
+            headers = {"X-Workspace-ID": str(workspace_id)}
+            connection = await client.post(
+                "/v1/server-connections",
+                headers={**headers, "Idempotency-Key": "seed-connection"},
+                json={
+                    "name": "Seed",
+                    "endpoint_url": "http://127.0.0.1:8765/mcp",
+                    "policy_version": "v1",
+                },
+            )
+            connection_id = UUID(connection.json()["id"])
+            capability_id = uuid4()
+            capability_version_id = uuid4()
+            registry_id = uuid4()
+            registry_version_id = uuid4()
+            factory = create_session_factory(engine)
+            async with transaction(factory) as session:
+                session.add_all(
+                    (
+                        Capability(
+                            id=capability_id,
+                            workspace_id=workspace_id,
+                            connection_id=connection_id,
+                            tool_identity="io.modall/test",
+                            pending_version_id=capability_version_id,
+                            enabled_version_id=None,
+                            status=CapabilityStatus.PENDING_REVIEW.value,
+                            status_epoch=1,
+                        ),
+                        CapabilityVersion(
+                            id=capability_version_id,
+                            workspace_id=workspace_id,
+                            capability_id=capability_id,
+                            sequence=1,
+                            display_name="Test tool",
+                            description="Safe metadata",
+                            input_schema={"type": "object"},
+                            output_schema=None,
+                            metadata_digest="a" * 64,
+                            schema_supported=True,
+                        ),
+                        RegistryEntry(
+                            id=registry_id,
+                            workspace_id=workspace_id,
+                            source=RegistrySource.MANUAL.value,
+                            external_id=None,
+                            current_version_id=registry_version_id,
+                        ),
+                        RegistryEntryVersion(
+                            id=registry_version_id,
+                            workspace_id=workspace_id,
+                            registry_entry_id=registry_id,
+                            sequence=1,
+                            name="Registry tool",
+                            description="Description",
+                            provenance_digest="b" * 64,
+                            source_version=None,
+                            source_uri=None,
+                            normalized_metadata=None,
+                            imported_by_user_id=None,
+                        ),
+                    )
+                )
+
+            registry = await client.get("/v1/registry/entries", headers=headers)
+            assert registry.status_code == 200
+            assert registry.json()["items"][0]["name"] == "Registry tool"
+
+            capabilities = await client.get("/v1/capabilities", headers=headers)
+            assert capabilities.status_code == 200
+            assert capabilities.json()["items"][0]["status"] == "pending_review"
+
+            capability = await client.get(f"/v1/capabilities/{capability_id}", headers=headers)
+            assert capability.status_code == 200
+            assert capability.json()["versions"][0]["display_name"] == "Test tool"
+
+            version = await client.get(
+                f"/v1/capability-versions/{capability_version_id}", headers=headers
+            )
+            assert version.status_code == 200
+            assert version.json()["input_schema"] == {"type": "object"}
+
+            disabled = await client.post(
+                f"/v1/capability-versions/{capability_version_id}/disable",
+                headers={**headers, "Idempotency-Key": "disable-capability"},
+            )
+            assert disabled.status_code == 200
+            assert disabled.json()["status"] == "disabled"
+
+            audit = await client.get("/v1/audit-events?resource_type=capability", headers=headers)
+            assert audit.status_code == 200
+            assert audit.json()["items"][0]["action"] == "capability.disabled"
+            assert "payload" not in audit.json()["items"][0]
+
+            naive_time = await client.get(
+                "/v1/audit-events?occurred_after=2026-09-06T12:00:00", headers=headers
+            )
+            assert naive_time.status_code == 422
+
+            filtered_time = await client.get(
+                "/v1/audit-events?occurred_after=2020-01-01T00:00:00Z"
+                "&occurred_before=2030-01-01T00:00:00Z&outcome=succeeded"
+                "&action=capability.disabled",
+                headers=headers,
+            )
+            assert filtered_time.status_code == 200
+            assert len(filtered_time.json()["items"]) == 1
+
+            invalid_range = await client.get(
+                "/v1/audit-events?occurred_after=2030-01-01T00:00:00Z"
+                "&occurred_before=2020-01-01T00:00:00Z",
+                headers=headers,
+            )
+            assert invalid_range.status_code == 422
+
+    asyncio.run(scenario())
+
+
+def test_official_registry_search_import_and_replay_contract() -> None:
+    def upstream(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json"},
+            json={
+                "servers": [
+                    {
+                        "server": {
+                            "name": "io.modall.fixture/weather",
+                            "description": "Read public weather observations",
+                            "version": "1.2.0",
+                            "remotes": [
+                                {
+                                    "type": "streamable-http",
+                                    "url": "https://weather.example/mcp",
+                                }
+                            ],
+                        },
+                        "_meta": {
+                            "io.modelcontextprotocol.registry/official": {
+                                "status": "active",
+                                "isLatest": True,
+                            }
+                        },
+                    }
+                ],
+                "metadata": {"count": 1},
+            },
+        )
+
+    async def scenario() -> None:
+        adapter = OfficialRegistryAdapter(transport=httpx.MockTransport(upstream))
+        async with api_client(adapter) as (client, _engine, workspace_id):
+            headers = {"X-Workspace-ID": str(workspace_id)}
+            searched = await client.post(
+                "/v1/registry/searches", headers=headers, json={"query": "weather"}
+            )
+            assert searched.status_code == 200
+            result = searched.json()
+            assert result["items"][0]["name"] == "io.modall.fixture/weather"
+
+            body = {
+                "cache_id": result["cache_id"],
+                "provenance_digest": result["items"][0]["provenance_digest"],
+            }
+            imported = await client.post(
+                "/v1/registry/imports",
+                headers={**headers, "Idempotency-Key": "registry-import"},
+                json=body,
+            )
+            assert imported.status_code == 201
+            assert imported.json()["source"] == "official"
+
+            replayed = await client.post(
+                "/v1/registry/imports",
+                headers={**headers, "Idempotency-Key": "registry-import"},
+                json=body,
+            )
+            assert replayed.status_code == 201
+            assert replayed.json()["id"] == imported.json()["id"]
+
+    asyncio.run(scenario())
+
+
+def test_unhandled_v1_failure_keeps_safe_response_policy() -> None:
+    def broken_upstream(_: httpx.Request) -> httpx.Response:
+        raise RuntimeError("fixture failure")
+
+    async def scenario() -> None:
+        adapter = OfficialRegistryAdapter(transport=httpx.MockTransport(broken_upstream))
+        async with api_client(adapter) as (client, _engine, workspace_id):
+            response = await client.post(
+                "/v1/registry/searches",
+                headers={"X-Workspace-ID": str(workspace_id)},
+                json={"query": "weather"},
+            )
+            assert response.status_code == 500
+            assert response.json()["error"]["code"] == "internal_error"
+            assert response.headers["cache-control"] == "no-store"
+            assert UUID(response.headers["x-correlation-id"])
+
+    asyncio.run(scenario())
+
+
+async def create_executable_target(engine: AsyncEngine, workspace_id: UUID) -> CapabilityVersion:
+    factory = create_session_factory(engine)
+    async with transaction(factory) as session:
+        user = await IdentityService(session).resolve_user(
+            Principal("modall-local", "api-user", "API User")
+        )
+        context: WorkspaceContext = await AuthorizationService(session).authorize(
+            user_id=user.id,
+            workspace_id=workspace_id,
+            permission=Permission.INVOKE,
+        )
+        connection = await ConnectionService(session).create(
+            context=context,
+            name="Run target",
+            endpoint_url="https://mcp.example/tools",
+            secret_binding_id=None,
+            policy_version="v1",
+        )
+        connection_version_id = connection.pending_version_id
+        assert connection_version_id is not None
+        generation, control_epoch, _ = await ConnectionService(session).allocate_refresh_generation(
+            context=context, connection_id=connection.id
+        )
+        capabilities = CapabilityService(session)
+        version = await capabilities.record_version(
+            context=context,
+            connection_id=connection.id,
+            connection_version_id=connection_version_id,
+            expected_control_epoch=control_epoch,
+            expected_refresh_generation=generation,
+            tool_identity="tools/search",
+            tool_name="search",
+            display_name="Search",
+            description="Search public records",
+            input_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string", "maxLength": 100}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            output_schema=None,
+            metadata_digest="c" * 64,
+            protocol_revision="2025-06-18",
+        )
+        payload = DiscoveryPayload(
+            workspace_id=workspace_id,
+            canonical_digest=connection.id.hex * 2,
+            normalized_payload={"tools": []},
+            byte_count=2,
+        )
+        session.add(payload)
+        await session.flush()
+        snapshot = DiscoverySnapshot(
+            workspace_id=workspace_id,
+            connection_id=connection.id,
+            connection_version_id=connection_version_id,
+            payload_id=payload.id,
+            generation=generation,
+            control_epoch=control_epoch,
+            protocol_revision="2025-06-18",
+        )
+        session.add(snapshot)
+        await session.flush()
+        session.add(
+            DiscoverySnapshotCapability(
+                workspace_id=workspace_id,
+                connection_id=connection.id,
+                connection_version_id=connection_version_id,
+                snapshot_id=snapshot.id,
+                capability_version_id=version.id,
+            )
+        )
+        await ConnectionService(session).promote_pending(
+            context=context,
+            connection_id=connection.id,
+            expected_version_id=connection_version_id,
+            expected_control_epoch=control_epoch,
+            expected_refresh_generation=generation,
+        )
+        connection.current_snapshot_id = snapshot.id
+        await session.flush()
+        await capabilities.enable(
+            context=context,
+            capability_id=version.capability_id,
+            expected_version_id=version.id,
+        )
+        return version
+
+
+def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
+    async def scenario() -> None:
+        async with api_client() as (client, engine, workspace_id):
+            version = await create_executable_target(engine, workspace_id)
+            headers = {"X-Workspace-ID": str(workspace_id)}
+            arguments = {"query": "weather"}
+            preflight = await client.post(
+                "/v1/run-preflights",
+                headers=headers,
+                json={"capability_version_id": str(version.id), "arguments": arguments},
+            )
+            assert preflight.status_code == 200
+            confirmation = preflight.json()["confirmation_token"]
+
+            created = await client.post(
+                "/v1/runs",
+                headers={**headers, "Idempotency-Key": "run-create"},
+                json={
+                    "capability_version_id": str(version.id),
+                    "arguments": arguments,
+                    "confirmation_token": confirmation,
+                },
+            )
+            assert created.status_code == 201
+            assert created.json()["status"] == "queued"
+            run_id = created.json()["id"]
+
+            result_queries = 0
+
+            def count_result_queries(
+                connection: object,
+                cursor: object,
+                statement: str,
+                parameters: object,
+                context: object,
+                executemany: bool,
+            ) -> None:
+                del connection, cursor, parameters, context, executemany
+                nonlocal result_queries
+                if "FROM run_results" in statement:
+                    result_queries += 1
+
+            event.listen(engine.sync_engine, "before_cursor_execute", count_result_queries)
+            listed = await client.get("/v1/runs", headers=headers)
+            event.remove(engine.sync_engine, "before_cursor_execute", count_result_queries)
+            assert listed.status_code == 200
+            assert listed.json()["items"][0]["arguments"] == arguments
+            assert result_queries == 1
+
+            filtered = await client.get("/v1/runs?status=queued", headers=headers)
+            assert filtered.status_code == 200
+            assert len(filtered.json()["items"]) == 1
+
+            fetched = await client.get(f"/v1/runs/{run_id}", headers=headers)
+            assert fetched.status_code == 200
+            assert fetched.json()["result"] is None
+
+            events = await client.get(f"/v1/runs/{run_id}/events", headers=headers)
+            assert events.status_code == 200
+            assert events.json()["items"][0]["event_type"] == "admitted"
+
+            cancelled = await client.post(
+                f"/v1/runs/{run_id}/cancel",
+                headers={**headers, "Idempotency-Key": "run-cancel"},
+            )
+            assert cancelled.status_code == 200
+            assert cancelled.json()["status"] == "cancelled"
+            assert cancelled.json()["safe_error_code"] == "cancelled_before_dispatch"
+
+            replayed_cancel = await client.post(
+                f"/v1/runs/{run_id}/cancel",
+                headers={**headers, "Idempotency-Key": "run-cancel"},
+            )
+            assert replayed_cancel.status_code == 200
+            assert replayed_cancel.json()["id"] == run_id
+
+            disabled = await client.post(
+                f"/v1/capability-versions/{version.id}/disable",
+                headers={**headers, "Idempotency-Key": "run-target-disable"},
+            )
+            assert disabled.status_code == 200
+            enabled = await client.post(
+                f"/v1/capability-versions/{version.id}/enable",
+                headers={**headers, "Idempotency-Key": "run-target-enable"},
+            )
+            assert enabled.status_code == 200
+            assert enabled.json()["status"] == "enabled"
+
+    asyncio.run(scenario())
+
+
+def test_openapi_publishes_every_planned_alpha_route() -> None:
+    app = create_app(Settings(environment="test"), readiness_probe=_ready)
+    paths = app.openapi()["paths"]
+    assert {
+        "/v1/registry/searches",
+        "/v1/registry/imports",
+        "/v1/registry/entries",
+        "/v1/server-connections",
+        "/v1/server-connections/{connection_id}",
+        "/v1/server-connections/{connection_id}/versions",
+        "/v1/server-connections/{connection_id}/verify",
+        "/v1/server-connections/{connection_id}/refresh",
+        "/v1/server-connections/{connection_id}/disable",
+        "/v1/server-connections/{connection_id}/enable",
+        "/v1/capabilities",
+        "/v1/capabilities/{capability_id}",
+        "/v1/capability-versions/{capability_version_id}",
+        "/v1/capability-versions/{capability_version_id}/enable",
+        "/v1/capability-versions/{capability_version_id}/disable",
+        "/v1/run-preflights",
+        "/v1/runs",
+        "/v1/runs/{run_id}",
+        "/v1/runs/{run_id}/events",
+        "/v1/runs/{run_id}/cancel",
+        "/v1/audit-events",
+    } <= set(paths)
+
+
+def test_api_idempotency_rejects_invalid_configuration_before_database_access() -> None:
+    async def operation() -> ConnectionResponse:
+        raise AssertionError("operation must not run")
+
+    async def scenario() -> None:
+        session = cast(AsyncSession, object())
+        context = WorkspaceContext(uuid4(), uuid4(), role=Role.ADMIN)
+        with pytest.raises(ValueError, match="invalid idempotency key"):
+            await idempotent_mutation(
+                session=session,
+                context=context,
+                keys=(HmacKeyVersion("v1", b"k" * 32),),
+                idempotency_key="bad\x00key",
+                route="/v1/test",
+                request_body={},
+                response_type=ConnectionResponse,
+                operation=operation,
+                required_roles=(Role.ADMIN,),
+            )
+        with pytest.raises(RuntimeError, match="keyring is empty"):
+            await idempotent_mutation(
+                session=session,
+                context=context,
+                keys=(),
+                idempotency_key="valid",
+                route="/v1/test",
+                request_body={},
+                response_type=ConnectionResponse,
+                operation=operation,
+                required_roles=(Role.ADMIN,),
+            )
+        with pytest.raises(ValueError, match="request exceeds"):
+            await idempotent_mutation(
+                session=session,
+                context=context,
+                keys=(HmacKeyVersion("v1", b"k" * 32),),
+                idempotency_key="valid",
+                route="/v1/test",
+                request_body={"value": "x" * 262_144},
+                response_type=ConnectionResponse,
+                operation=operation,
+                required_roles=(Role.ADMIN,),
+            )
+        with pytest.raises(ValueError, match="cleanup batch size"):
+            await purge_expired_api_idempotency(session, batch_size=0)
+
+    asyncio.run(scenario())

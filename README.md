@@ -48,12 +48,19 @@ encoding of the version (for example, `api-token`/`v2` maps to `YXBpLXRva2Vu.djI
 stores only the opaque reference and version. Bindings whose encoded filename exceeds the portable
 255-byte component limit are rejected before persistence.
 
-The worker loads confirmation and idempotency HMAC key versions from the same provider using the
-fixed references `system-confirmation-hmac` and `system-idempotency-hmac`. Configure active-first
-version lists with `MODALL_CONFIRMATION_HMAC_KEY_VERSIONS` and
+The API and worker load confirmation and idempotency HMAC key versions from the same provider
+using the fixed references `system-confirmation-hmac` and `system-idempotency-hmac`. Configure
+active-first version lists with `MODALL_CONFIRMATION_HMAC_KEY_VERSIONS` and
 `MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS`; deployed mounted-file environments must project the
-corresponding encoded files before the worker starts.
+corresponding encoded files before either process starts.
 
-The API remains intentionally thin while the independently reviewed control-plane and operator
-workflow slices land. The worker already claims durable invocation jobs and performs bounded
-maintenance.
+## API contracts
+
+The authenticated control-plane API is published under `/v1`. Supply the selected workspace in
+`X-Workspace-ID`; deployed clients also send their OIDC bearer token. Mutations require a bounded
+`Idempotency-Key`. Workspace responses are non-cacheable and every response carries an
+`X-Correlation-ID`; callers may supply a UUID correlation ID to continue an existing trace.
+
+OpenAPI is available at `/openapi.json`. Run `npm run api:generate` after changing a contract to
+refresh the committed schema and TypeScript declarations used by the web application. CI rejects
+generated-client drift.
