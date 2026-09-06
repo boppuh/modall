@@ -1,15 +1,14 @@
 import asyncio
-import gc
 import json
 import logging
 import multiprocessing
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
-from weakref import ReferenceType, ref
 
 import httpx
 import pytest
@@ -897,8 +896,8 @@ def test_scanner_semaphore_supports_uvloop() -> None:
     loop = uvloop.new_event_loop()
 
     async def scenario() -> None:
-        first = official_registry._scanner_process_semaphore()
-        assert official_registry._scanner_process_semaphore() is first
+        await official_registry._acquire_scanner_process_permit()
+        official_registry._release_scanner_process_permit()
 
     try:
         loop.run_until_complete(scenario())
@@ -906,31 +905,47 @@ def test_scanner_semaphore_supports_uvloop() -> None:
         loop.close()
 
 
-def test_contended_scanner_semaphore_does_not_retain_closed_loop() -> None:
-    def exercise_loop() -> ReferenceType[asyncio.AbstractEventLoop]:
-        loop = asyncio.new_event_loop()
+def test_scanner_permits_are_process_wide_across_event_loops() -> None:
+    start = threading.Barrier(3)
+    counter_lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+    failures: list[BaseException] = []
 
-        async def scenario() -> None:
-            semaphore = official_registry._scanner_process_semaphore()
-            for _ in range(4):
-                await semaphore.acquire()
-            waiter = asyncio.create_task(semaphore.acquire())
-            await asyncio.sleep(0)
-            assert not waiter.done()
-            waiter.cancel()
-            with suppress(asyncio.CancelledError):
-                await waiter
-            for _ in range(4):
-                semaphore.release()
+    async def hold_permit() -> None:
+        nonlocal active, maximum_active
+        await official_registry._acquire_scanner_process_permit()
+        try:
+            with counter_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            await asyncio.sleep(0.05)
+        finally:
+            with counter_lock:
+                active -= 1
+            official_registry._release_scanner_process_permit()
 
-        loop.run_until_complete(scenario())
-        loop_reference = ref(loop)
-        loop.close()
-        return loop_reference
+    def run_loop() -> None:
+        try:
+            start.wait()
 
-    loop_reference = exercise_loop()
-    gc.collect()
-    assert loop_reference() is None
+            async def scenario() -> None:
+                await asyncio.gather(*(hold_permit() for _ in range(4)))
+
+            asyncio.run(scenario())
+        except BaseException as error:
+            with counter_lock:
+                failures.append(error)
+
+    threads = [threading.Thread(target=run_loop) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert maximum_active == 4
 
 
 def test_scanning_runs_off_loop_under_the_configured_deadline() -> None:

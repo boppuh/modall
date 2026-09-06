@@ -15,11 +15,10 @@ from enum import StrEnum
 from multiprocessing.connection import Connection
 from multiprocessing.context import SpawnProcess
 from multiprocessing.reduction import ForkingPickler
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 from typing import cast
 from urllib.parse import unquote
 from uuid import UUID, uuid4
-from weakref import ReferenceType, WeakKeyDictionary, ref
 
 import httpx
 from sqlalchemy import delete, func, or_, select
@@ -72,21 +71,16 @@ _REGISTRY_LOG_USERS = 0
 _SCANNER_PROCESS_CONTEXT = multiprocessing.get_context("spawn")
 _SCANNER_PROCESS_LIMIT = 4
 _CACHE_CLEANUP_BATCH_SIZE = 500
-_SCANNER_SEMAPHORE_LOCK = Lock()
-_SCANNER_SEMAPHORES: WeakKeyDictionary[
-    asyncio.AbstractEventLoop, ReferenceType[asyncio.Semaphore]
-] = WeakKeyDictionary()
+_SCANNER_PROCESS_PERMITS = BoundedSemaphore(_SCANNER_PROCESS_LIMIT)
 
 
-def _scanner_process_semaphore() -> asyncio.Semaphore:
-    loop = asyncio.get_running_loop()
-    with _SCANNER_SEMAPHORE_LOCK:
-        semaphore_ref = _SCANNER_SEMAPHORES.get(loop)
-        semaphore = None if semaphore_ref is None else semaphore_ref()
-        if semaphore is None:
-            semaphore = asyncio.Semaphore(_SCANNER_PROCESS_LIMIT)
-            _SCANNER_SEMAPHORES[loop] = ref(semaphore)
-        return semaphore
+async def _acquire_scanner_process_permit() -> None:
+    while not _SCANNER_PROCESS_PERMITS.acquire(blocking=False):
+        await asyncio.sleep(0.001)
+
+
+def _release_scanner_process_permit() -> None:
+    _SCANNER_PROCESS_PERMITS.release()
 
 
 @contextmanager
@@ -1001,8 +995,7 @@ async def _run_scanner(
     scan_completed = False
     try:
         async with asyncio.timeout(timeout_seconds):
-            semaphore = _scanner_process_semaphore()
-            await semaphore.acquire()
+            await _acquire_scanner_process_permit()
             permit_acquired = True
             receiver, sender = _SCANNER_PROCESS_CONTEXT.Pipe(duplex=False)
             process = _SCANNER_PROCESS_CONTEXT.Process(
@@ -1061,7 +1054,7 @@ async def _run_scanner(
             with suppress(Exception):
                 process.close()
         if permit_acquired:
-            semaphore.release()
+            _release_scanner_process_permit()
     if failure_code is not None:
         raise OfficialRegistryError(failure_code)
     if not scan_completed:
