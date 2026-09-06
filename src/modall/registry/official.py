@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from multiprocessing.connection import Connection
+from multiprocessing.context import SpawnProcess
 from threading import Lock
 from typing import cast
 from urllib.parse import unquote
@@ -20,6 +21,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from sqlalchemy import delete, func, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modall.audit.types import AuditAction, ResourceType
@@ -106,6 +108,7 @@ class OfficialRegistryFailureCode(StrEnum):
     INVALID_RESPONSE = "invalid_response"
     UNSAFE_METADATA = "unsafe_metadata"
     CACHE_MISS = "cache_miss"
+    PERSISTENCE_FAILURE = "persistence_failure"
 
 
 class OfficialRegistryError(Exception):
@@ -329,6 +332,19 @@ def _scanner_process_main(scanner: Callable[[object], bool], value: object, send
         connection.close()
 
 
+class _BorrowedAsyncTransport(httpx.AsyncBaseTransport):
+    """Delegate requests without closing the caller-owned transport."""
+
+    def __init__(self, transport: httpx.AsyncBaseTransport) -> None:
+        self._transport = transport
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return await self._transport.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        return None
+
+
 class OfficialRegistryAdapter:
     """One fixed-origin, no-redirect adapter for the public Registry API."""
 
@@ -355,8 +371,9 @@ class OfficialRegistryAdapter:
         return await _screen_query(query, self._limits, self._query_scanner)
 
     async def search(self, query: str) -> tuple[OfficialRegistryItem, ...]:
+        transport = None if self._transport is None else _BorrowedAsyncTransport(self._transport)
         async with httpx.AsyncClient(
-            transport=self._transport,
+            transport=transport,
             auth=None,
             trust_env=False,
             follow_redirects=False,
@@ -639,7 +656,13 @@ class OfficialRegistryService:
                 serialize_workspace=True,
             )
             workspace_locked = True
-            await self._purge_rejected_cache(context=context, cache=rejected_cache)
+            cached_result, rejected_cache = await self._read_cache(
+                context=context, query_digest=query_digest, now=self._utc_now()
+            )
+            if cached_result is not None:
+                return cached_result
+            if rejected_cache is not None:
+                await self._purge_rejected_cache(context=context, cache=rejected_cache)
 
         items = await self._adapter.search(normalized_query)
         normalized_results = cast(
@@ -699,7 +722,8 @@ class OfficialRegistryService:
             expires_at=fetched_at + self._limits.cache_ttl,
         )
         self._session.add(cache)
-        await self._session.flush()
+        if not await _flush_registry_payload(self._session):
+            raise OfficialRegistryError(OfficialRegistryFailureCode.PERSISTENCE_FAILURE)
         return self._result(cache, items, from_cache=False)
 
     async def _read_cache(
@@ -804,7 +828,8 @@ class OfficialRegistryService:
                 current_version_id=None,
             )
             self._session.add(entry)
-            await self._session.flush()
+            if not await _flush_registry_payload(self._session):
+                raise OfficialRegistryError(OfficialRegistryFailureCode.PERSISTENCE_FAILURE)
         existing = await self._session.scalar(
             select(RegistryEntryVersion).where(
                 RegistryEntryVersion.registry_entry_id == entry.id,
@@ -831,7 +856,8 @@ class OfficialRegistryService:
             imported_by_user_id=context.actor_user_id,
         )
         self._session.add(version)
-        await self._session.flush()
+        if not await _flush_registry_payload(self._session):
+            raise OfficialRegistryError(OfficialRegistryFailureCode.PERSISTENCE_FAILURE)
         entry.current_version_id = version.id
         self._session.add(
             AuditEvent.succeeded(
@@ -912,6 +938,14 @@ async def _screen_query(
     return normalized
 
 
+async def _flush_registry_payload(session: AsyncSession) -> bool:
+    try:
+        await session.flush()
+    except SQLAlchemyError:
+        return False
+    return True
+
+
 async def _run_scanner(
     scanner: Callable[[object], bool],
     value: object,
@@ -920,17 +954,20 @@ async def _run_scanner(
     timeout_code: OfficialRegistryFailureCode,
 ) -> bool:
     permit_acquired = False
-    receiver, sender = _SCANNER_PROCESS_CONTEXT.Pipe(duplex=False)
-    process = _SCANNER_PROCESS_CONTEXT.Process(
-        target=_scanner_process_main,
-        args=(scanner, value, sender),
-        daemon=True,
-    )
+    receiver: Connection | None = None
+    sender: Connection | None = None
+    process: SpawnProcess | None = None
     try:
         async with asyncio.timeout(timeout_seconds):
             semaphore = _scanner_process_semaphore()
             await semaphore.acquire()
             permit_acquired = True
+            receiver, sender = _SCANNER_PROCESS_CONTEXT.Pipe(duplex=False)
+            process = _SCANNER_PROCESS_CONTEXT.Process(
+                target=_scanner_process_main,
+                args=(scanner, value, sender),
+                daemon=True,
+            )
             process.start()
             sender.close()
             loop = asyncio.get_running_loop()
@@ -957,11 +994,13 @@ async def _run_scanner(
     except Exception:
         raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from None
     finally:
-        if "loop" in locals() and "ready" in locals():
+        if receiver is not None and "loop" in locals() and "ready" in locals():
             loop.remove_reader(receiver.fileno())
-        sender.close()
-        receiver.close()
-        if process.pid is not None:
+        if sender is not None:
+            sender.close()
+        if receiver is not None:
+            receiver.close()
+        if process is not None and process.pid is not None:
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=0.25)

@@ -12,6 +12,7 @@ from uuid import UUID
 import httpx
 import pytest
 from sqlalchemy import event, func, select
+from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from modall.audit.types import AuditAction
@@ -66,6 +67,25 @@ def scanner_hangs(value: object) -> bool:
     del value
     while True:
         time.sleep(1)
+
+
+class ReusableTrackingTransport(httpx.AsyncBaseTransport):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.closes = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        assert self.closes == 0
+        self.calls += 1
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json"},
+            json={"servers": [], "metadata": {"count": 0}},
+            request=request,
+        )
+
+    async def aclose(self) -> None:
+        self.closes += 1
 
 
 @asynccontextmanager
@@ -783,6 +803,19 @@ def test_registry_request_strips_ambient_credentials_and_suppresses_query_logs(
     assert "unrelated outbound request" in caplog.text
 
 
+def test_adapter_does_not_close_borrowed_transport_between_searches() -> None:
+    async def scenario() -> None:
+        transport = ReusableTrackingTransport()
+        adapter = OfficialRegistryAdapter(transport=transport)
+        assert await adapter.search("first") == ()
+        assert await adapter.search("second") == ()
+        assert (transport.calls, transport.closes) == (2, 0)
+        await transport.aclose()
+        assert transport.closes == 1
+
+    asyncio.run(scenario())
+
+
 def test_scanning_runs_off_loop_under_the_configured_deadline() -> None:
     async def scenario() -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -1081,6 +1114,44 @@ def test_workspace_cache_byte_budget_rejects_additional_queries() -> None:
                         await session.scalar(select(func.count()).select_from(RegistrySearchCache))
                         == 1
                     )
+
+    asyncio.run(scenario())
+
+
+def test_registry_payload_flush_failure_is_context_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={"servers": [], "metadata": {"count": 0}},
+                request=request,
+            )
+
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="payload-flush-failure")
+            with pytest.raises(OfficialRegistryError) as raised:
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+
+                    async def failed_flush() -> None:
+                        raise StatementError(
+                            "insert failed",
+                            "INSERT INTO registry_search_cache",
+                            {"normalized_results": {"secret": "must-not-escape"}},
+                            RuntimeError("database detail"),
+                        )
+
+                    monkeypatch.setattr(session, "flush", failed_flush)
+                    await OfficialRegistryService(
+                        session,
+                        OfficialRegistryAdapter(transport=httpx.MockTransport(handler)),
+                    ).search(context=context, query="weather")
+            assert raised.value.code == OfficialRegistryFailureCode.PERSISTENCE_FAILURE
+            assert raised.value.__cause__ is None
+            assert raised.value.__context__ is None
 
     asyncio.run(scenario())
 
