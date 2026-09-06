@@ -707,6 +707,10 @@ class Run(Base):
             "'content_retention_deadline', 'tool_call_failed', 'invalid_tool_result')",
             name="ck_run_safe_error_code",
         ),
+        CheckConstraint(
+            "status <> 'succeeded' OR safe_error_code IS NULL",
+            name="ck_run_success_has_no_error",
+        ),
         ForeignKeyConstraint(
             ["workspace_id", "capability_id"],
             ["capabilities.workspace_id", "capabilities.id"],
@@ -821,6 +825,10 @@ class RunAttempt(Base):
             "'content_retention_deadline', 'tool_call_failed', 'invalid_tool_result')",
             name="ck_run_attempt_safe_error_code",
         ),
+        CheckConstraint(
+            "status <> 'succeeded' OR safe_error_code IS NULL",
+            name="ck_run_attempt_success_has_no_error",
+        ),
         ForeignKeyConstraint(
             ["workspace_id", "run_id"],
             ["runs.workspace_id", "runs.id"],
@@ -864,6 +872,10 @@ class RunEvent(Base):
             "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
             "'content_retention_deadline', 'tool_call_failed', 'invalid_tool_result')",
             name="ck_run_event_safe_error_code",
+        ),
+        CheckConstraint(
+            "status <> 'succeeded' OR safe_error_code IS NULL",
+            name="ck_run_event_success_has_no_error",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "run_id"],

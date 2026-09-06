@@ -93,6 +93,10 @@ def upgrade() -> None:
             f"safe_error_code IS NULL OR safe_error_code IN ({RUN_FAILURE_CODES})",
             name="ck_run_safe_error_code",
         ),
+        sa.CheckConstraint(
+            "status <> 'succeeded' OR safe_error_code IS NULL",
+            name="ck_run_success_has_no_error",
+        ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["actor_user_id"], ["users.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(
@@ -189,6 +193,10 @@ def upgrade() -> None:
             f"safe_error_code IS NULL OR safe_error_code IN ({RUN_FAILURE_CODES})",
             name="ck_run_attempt_safe_error_code",
         ),
+        sa.CheckConstraint(
+            "status <> 'succeeded' OR safe_error_code IS NULL",
+            name="ck_run_attempt_success_has_no_error",
+        ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
             ["workspace_id", "run_id"], ["runs.workspace_id", "runs.id"], ondelete="CASCADE"
@@ -223,6 +231,10 @@ def upgrade() -> None:
         sa.CheckConstraint(
             f"safe_error_code IS NULL OR safe_error_code IN ({RUN_FAILURE_CODES})",
             name="ck_run_event_safe_error_code",
+        ),
+        sa.CheckConstraint(
+            "status <> 'succeeded' OR safe_error_code IS NULL",
+            name="ck_run_event_success_has_no_error",
         ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(

@@ -32,6 +32,8 @@ class JobStatus(StrEnum):
 class RunEventType(StrEnum):
     ADMITTED = "admitted"
     ATTEMPT_STARTED = "attempt_started"
+    SESSION_FENCED = "session_fenced"
+    DISPATCH_FENCED = "dispatch_fenced"
     LEASE_LOST = "lease_lost"
     CANCEL_REQUESTED = "cancel_requested"
     TERMINAL = "terminal"
@@ -50,6 +52,7 @@ class ExecutionFailureCode(StrEnum):
     CONFIRMATION_REPLAYED = "confirmation_replayed"
     INVALID_IDEMPOTENCY_KEY = "invalid_idempotency_key"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+    IDEMPOTENCY_KEY_HISTORY_INCOMPLETE = "idempotency_key_history_incomplete"
     DISPATCH_QUARANTINED = "dispatch_quarantined"
     NO_JOB_AVAILABLE = "no_job_available"
     LEASE_LOST = "lease_lost"
@@ -95,6 +98,7 @@ class ExecutionLimits:
     max_historical_hmac_keys: int = 8
     schema_validation_timeout_seconds: float = 2.0
     schema_validation_memory_bytes: int = 256 * 1024 * 1024
+    reconciliation_batch_size: int = 100
 
     def __post_init__(self) -> None:
         if (
@@ -108,6 +112,7 @@ class ExecutionLimits:
             or not 0 < self.schema_validation_timeout_seconds <= 5
             or not math.isfinite(self.schema_validation_timeout_seconds)
             or not 64 * 1024 * 1024 <= self.schema_validation_memory_bytes <= 1024 * 1024 * 1024
+            or not 1 <= self.reconciliation_batch_size <= 1000
         ):
             raise ValueError("invalid execution limits")
 
@@ -130,3 +135,9 @@ class JobLease:
     lease_epoch: int
     execution_epoch: int
     expires_at: datetime
+
+
+class SystemExecutionAuthority:
+    """Opaque installation-scoped capability for global execution-state changes."""
+
+    __slots__ = ()

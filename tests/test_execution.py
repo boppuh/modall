@@ -21,6 +21,7 @@ from modall.execution.types import (
     HmacKeyVersion,
     RunFailureCode,
     RunStatus,
+    SystemExecutionAuthority,
 )
 from modall.identity.repository import AuthorizationService
 from modall.identity.service import IdentityService
@@ -45,6 +46,7 @@ from modall.registry.service import CapabilityService, ConnectionService
 
 CONFIRMATION_KEYS = (HmacKeyVersion("confirm-v1", b"c" * 32),)
 IDEMPOTENCY_KEYS = (HmacKeyVersion("idem-v1", b"i" * 32),)
+SYSTEM_AUTHORITY = SystemExecutionAuthority()
 
 
 @asynccontextmanager
@@ -179,6 +181,7 @@ def service(
     confirmation_keys: tuple[HmacKeyVersion, ...] = CONFIRMATION_KEYS,
     idempotency_keys: tuple[HmacKeyVersion, ...] = IDEMPOTENCY_KEYS,
     limits: ExecutionLimits | None = None,
+    system_authority: SystemExecutionAuthority | None = None,
 ) -> ExecutionService:
     return ExecutionService(
         session,
@@ -186,6 +189,7 @@ def service(
         idempotency_keys=idempotency_keys,
         limits=limits,
         now=lambda: now,
+        system_authority=system_authority,
     )
 
 
@@ -225,6 +229,21 @@ def test_preflight_creates_exact_lineage_and_idempotent_replays() -> None:
                 assert first.capability_version_id == version.id
                 assert first.connection_version_id == first_preflight.connection_version_id
                 assert first.arguments == {"query": "weather"}
+                expired_replay_token = await service(session, now=now).preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "weather"},
+                )
+                expired_replay = await service(
+                    session, now=now + timedelta(seconds=121)
+                ).create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "weather"},
+                    confirmation_token=expired_replay_token.confirmation_token,
+                    idempotency_key="request-one",
+                )
+                assert expired_replay.id == first.id
                 assert first.argument_digest == first_preflight.argument_digest
                 assert first.status == RunStatus.QUEUED.value
                 assert await session.scalar(select(func.count()).select_from(Job)) == 1
@@ -232,7 +251,7 @@ def test_preflight_creates_exact_lineage_and_idempotent_replays() -> None:
                     await session.scalar(select(func.count()).select_from(IdempotencyRecord)) == 1
                 )
                 assert (
-                    await session.scalar(select(func.count()).select_from(ConfirmationNonce)) == 2
+                    await session.scalar(select(func.count()).select_from(ConfirmationNonce)) == 3
                 )
                 events = list(
                     (
@@ -357,6 +376,27 @@ def test_idempotency_survives_key_rotation_and_detects_conflict() -> None:
                     idempotency_key="rotating-key",
                 )
                 assert replay.id == run.id
+                retired_key_token = await rotated_service.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "new request"},
+                )
+                with pytest.raises(ExecutionError) as incomplete_history:
+                    await service(
+                        session,
+                        now=now,
+                        idempotency_keys=(rotated,),
+                    ).create_run(
+                        context=context,
+                        capability_version_id=version.id,
+                        arguments={"query": "new request"},
+                        confirmation_token=retired_key_token.confirmation_token,
+                        idempotency_key="retired-history",
+                    )
+                assert (
+                    incomplete_history.value.code
+                    == ExecutionFailureCode.IDEMPOTENCY_KEY_HISTORY_INCOMPLETE
+                )
                 changed_token = await rotated_service.preflight(
                     context=context,
                     capability_version_id=version.id,
@@ -438,22 +478,17 @@ def test_job_leasing_reclaims_only_with_a_new_epoch_and_rejects_stale_heartbeat(
                 first = await service(session, now=current).claim_job(
                     worker_id="worker-one", lease_duration=timedelta(seconds=10)
                 )
+                assert first is not None
                 assert first.run_id == run.id
                 assert first.lease_epoch == 1
-                attempt = await session.scalar(
-                    select(RunAttempt).where(RunAttempt.run_id == run.id)
-                )
-                claimed_run = await session.get(Run, run.id)
-                assert claimed_run is not None
-                assert attempt is not None
-                claimed_run.status = RunStatus.SESSION_FENCED.value
-                attempt.status = RunStatus.SESSION_FENCED.value
+                await service(session, now=current).fence_session(first)
 
             current += timedelta(seconds=11)
             async with transaction(factory) as session:
                 second = await service(session, now=current).claim_job(
                     worker_id="worker-two", lease_duration=timedelta(seconds=10)
                 )
+                assert second is not None
                 assert second.lease_epoch == 2
                 with pytest.raises(ExecutionError) as stale:
                     await service(session, now=current).heartbeat(
@@ -502,7 +537,12 @@ def test_restore_quarantine_fences_old_jobs_and_retention_erases_content() -> No
             async with transaction(factory) as session:
                 context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
                 version = await create_executable_target(session, context)
-                execution = service(session, now=current, limits=limits)
+                execution = service(
+                    session,
+                    now=current,
+                    limits=limits,
+                    system_authority=SYSTEM_AUTHORITY,
+                )
                 token = await execution.preflight(
                     context=context,
                     capability_version_id=version.id,
@@ -516,6 +556,8 @@ def test_restore_quarantine_fences_old_jobs_and_retention_erases_content() -> No
                     idempotency_key="restore-key",
                 )
                 old_epoch = (await session.get(SystemExecutionState, 1)).execution_epoch  # type: ignore[union-attr]
+                with pytest.raises(PermissionError, match="system execution authority"):
+                    await service(session, now=current).enter_restore_quarantine()
                 new_epoch = await execution.enter_restore_quarantine()
                 assert new_epoch == old_epoch + 1
                 assert run.status == RunStatus.CANCELLED.value
@@ -524,7 +566,7 @@ def test_restore_quarantine_fences_old_jobs_and_retention_erases_content() -> No
                         worker_id="blocked", lease_duration=timedelta(seconds=10)
                     )
                 assert quarantined.value.code == ExecutionFailureCode.DISPATCH_QUARANTINED
-                assert await execution.clear_restore_quarantine(context=context) == new_epoch
+                assert await execution.clear_restore_quarantine() == new_epoch
 
             current += timedelta(days=1, seconds=1)
             async with transaction(factory) as session:
@@ -576,11 +618,12 @@ def test_cancellation_terminalizes_unfenced_work_and_is_idempotent() -> None:
                 job = await session.scalar(select(Job).where(Job.run_id == run.id))
                 assert job is not None
                 assert job.status == RunStatus.CANCELLED.value
-                with pytest.raises(ExecutionError) as empty:
+                assert (
                     await execution.claim_job(
                         worker_id="worker", lease_duration=timedelta(seconds=10)
                     )
-                assert empty.value.code == ExecutionFailureCode.NO_JOB_AVAILABLE
+                    is None
+                )
 
                 dispatched_token = await execution.preflight(
                     context=context,
@@ -597,13 +640,9 @@ def test_cancellation_terminalizes_unfenced_work_and_is_idempotent() -> None:
                 lease = await execution.claim_job(
                     worker_id="worker", lease_duration=timedelta(seconds=10)
                 )
-                attempt = await session.scalar(
-                    select(RunAttempt).where(RunAttempt.run_id == dispatched.id)
-                )
-                assert attempt is not None
-                dispatched.status = RunStatus.DISPATCH_FENCED.value
-                attempt.status = RunStatus.DISPATCH_FENCED.value
-                await session.flush()
+                assert lease is not None
+                await execution.fence_session(lease)
+                await execution.fence_dispatch(lease)
                 requested = await execution.cancel_run(context=context, run_id=dispatched.id)
                 assert requested.status == RunStatus.DISPATCH_FENCED.value
                 assert requested.cancellation_requested is True
@@ -617,11 +656,12 @@ def test_cancellation_terminalizes_unfenced_work_and_is_idempotent() -> None:
                 assert AuditAction.RUN_CANCELLATION_REQUESTED.value in audit_actions
                 assert AuditAction.RUN_CANCELLED.value not in audit_actions
                 assert lease.run_id == dispatched.id
-                with pytest.raises(ExecutionError) as abandoned:
+                assert (
                     await service(session, now=now + timedelta(seconds=11)).claim_job(
                         worker_id="replacement", lease_duration=timedelta(seconds=10)
                     )
-                assert abandoned.value.code == ExecutionFailureCode.NO_JOB_AVAILABLE
+                    is None
+                )
                 assert dispatched.status == RunStatus.INDETERMINATE.value
                 attempts = list(
                     (
@@ -669,6 +709,7 @@ def test_heartbeat_and_worker_boundary_validation() -> None:
                 lease = await execution.claim_job(
                     worker_id="worker", lease_duration=timedelta(seconds=10)
                 )
+                assert lease is not None
                 with pytest.raises(ValueError, match="invalid worker lease"):
                     await execution.heartbeat(lease, lease_duration=timedelta(0))
                 renewed = await execution.heartbeat(lease, lease_duration=timedelta(seconds=20))
@@ -683,6 +724,13 @@ def test_heartbeat_and_worker_boundary_validation() -> None:
                         safe_error_code="upstream secret",  # type: ignore[arg-type]
                     )
                 assert arbitrary_code.value.code == ExecutionFailureCode.INVALID_TRANSITION
+                with pytest.raises(ExecutionError) as contradictory_success:
+                    await execution.complete_lease(
+                        renewed,
+                        status=RunStatus.SUCCEEDED,
+                        safe_error_code=RunFailureCode.TOOL_CALL_FAILED,
+                    )
+                assert contradictory_success.value.code == ExecutionFailureCode.INVALID_TRANSITION
                 failed = await execution.complete_lease(
                     renewed,
                     status=RunStatus.FAILED,
@@ -706,12 +754,18 @@ def test_heartbeat_and_worker_boundary_validation() -> None:
                 overdue_lease = await execution.claim_job(
                     worker_id="deadline-worker", lease_duration=timedelta(seconds=10)
                 )
-                with pytest.raises(ExecutionError) as overdue:
-                    await service(session, now=now + timedelta(seconds=2)).complete_lease(
+                assert overdue_lease is not None
+                assert overdue_lease.expires_at == now + timedelta(seconds=1)
+                with pytest.raises(ExecutionError) as late_heartbeat:
+                    await service(session, now=now + timedelta(seconds=2)).heartbeat(
                         overdue_lease,
-                        status=RunStatus.SUCCEEDED,
+                        lease_duration=timedelta(seconds=10),
                     )
-                assert overdue.value.code == ExecutionFailureCode.LEASE_LOST
+                assert late_heartbeat.value.code == ExecutionFailureCode.LEASE_LOST
+                overdue_result = await service(
+                    session, now=now + timedelta(seconds=2)
+                ).complete_lease(overdue_lease, status=RunStatus.SUCCEEDED)
+                assert overdue_result.status == RunStatus.TIMED_OUT.value
                 assert overdue_run.status == RunStatus.TIMED_OUT.value
                 assert overdue_run.safe_error_code == RunFailureCode.DEADLINE_EXCEEDED.value
 
@@ -728,11 +782,12 @@ def test_heartbeat_and_worker_boundary_validation() -> None:
                     idempotency_key="deadline-key",
                     deadline=now + timedelta(seconds=1),
                 )
-                with pytest.raises(ExecutionError) as none_due:
+                assert (
                     await service(session, now=now + timedelta(seconds=2)).claim_job(
                         worker_id="worker", lease_duration=timedelta(seconds=10)
                     )
-                assert none_due.value.code == ExecutionFailureCode.NO_JOB_AVAILABLE
+                    is None
+                )
                 assert deadline_run.status == RunStatus.TIMED_OUT.value
 
     asyncio.run(scenario())

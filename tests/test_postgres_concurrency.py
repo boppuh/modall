@@ -12,8 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from modall.execution.service import ExecutionService
 from modall.execution.types import (
-    ExecutionError,
-    ExecutionFailureCode,
     HmacKeyVersion,
     RunStatus,
 )
@@ -771,6 +769,7 @@ def test_concurrent_workers_claim_each_job_once() -> None:
                         worker_id=worker_id,
                         lease_duration=timedelta(seconds=30),
                     )
+                    assert lease is not None
                     return lease.job_id
 
             job_ids = await asyncio.gather(claim("worker-one"), claim("worker-two"))
@@ -862,18 +861,15 @@ def test_claim_and_cancellation_share_one_lock_order() -> None:
             async def claim() -> None:
                 async with transaction(factory) as session:
                     await rendezvous()
-                    try:
-                        await ExecutionService(
-                            session,
-                            confirmation_keys=CONFIRMATION_KEYS,
-                            idempotency_keys=IDEMPOTENCY_KEYS,
-                            now=lambda: now,
-                        ).claim_job(
-                            worker_id="racing-worker",
-                            lease_duration=timedelta(seconds=30),
-                        )
-                    except ExecutionError as exc:
-                        assert exc.code == ExecutionFailureCode.NO_JOB_AVAILABLE
+                    await ExecutionService(
+                        session,
+                        confirmation_keys=CONFIRMATION_KEYS,
+                        idempotency_keys=IDEMPOTENCY_KEYS,
+                        now=lambda: now,
+                    ).claim_job(
+                        worker_id="racing-worker",
+                        lease_duration=timedelta(seconds=30),
+                    )
 
             await asyncio.wait_for(asyncio.gather(cancel(), claim()), timeout=5)
             async with factory() as session:
