@@ -417,6 +417,10 @@ def test_raw_structured_screen_handles_sse_and_invalid_utf8() -> None:
         b'"token": "AbCdEfGhIjKlMnOpQrStUvWx"\n'
         b'data: {"jsonrpc":"2.0","result":{"status":"safe"}}\n\n'
     )
+    assert _contains_sensitive_structured_response(
+        b'{"token":"AbCdEfGhIjKlMnOpQrStUvWx"}\n'
+        b'data: {"jsonrpc":"2.0","result":{"status":"safe"}}\n\n'
+    )
     assert not _contains_sensitive_structured_response(b'data: {"status":"ready"}\n\n')
     assert not _contains_sensitive_structured_response(b"\xff")
     assert _contains_sensitive_structured_response(
@@ -432,6 +436,8 @@ def test_url_secret_screen_handles_embedded_and_multiple_markers() -> None:
     assert contains_sensitive_url(
         "https://cdn.example/token-aaaaaaaaaaaa;token-AbCdEfGhIjKlMnOpQrStUvWx"
     )
+    assert contains_sensitive_url("https://token-AbCdEfGhIjKlMnOpQrStUvWx@cdn.example/path")
+    assert contains_sensitive_url("https://cdn.example/path?token-AbCdEfGhIjKlMnOpQrStUvWx")
     assert _contains_sensitive_tool(
         {
             "name": "safe-tool",
@@ -706,6 +712,19 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
 
         async with httpx.AsyncClient(
             transport=LimitedTransport(httpx.MockTransport(sensitive_header), 100)
+        ) as client:
+            with pytest.raises(EndpointPolicyError, match="response header"):
+                await client.get("https://example.test")
+
+        async def sensitive_json_header(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"X-Upstream-State": '{"token":"AbCdEfGhIjKlMnOpQrStUvWx"}'},
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(sensitive_json_header), 100)
         ) as client:
             with pytest.raises(EndpointPolicyError, match="response header"):
                 await client.get("https://example.test")

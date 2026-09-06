@@ -185,9 +185,27 @@ def contains_sensitive_url(value: str) -> bool:
             parsed = urlsplit(candidate)
             host = normalize_endpoint_host(parsed.hostname).value
             decoded_path = decode_safe_url_path(parsed.path)
+            decoded_username = (
+                decode_safe_url_path(parsed.username) if parsed.username is not None else None
+            )
+            decoded_query = decode_safe_url_path(parsed.query)
+            decoded_fragment = decode_safe_url_path(parsed.fragment)
         except ValueError:
             continue
-        if contains_sensitive_hostname(host) or contains_sensitive_url_path(decoded_path):
+        if (
+            parsed.password is not None
+            or contains_sensitive_hostname(host)
+            or contains_sensitive_url_path(decoded_path)
+            or contains_sensitive_url_path(decoded_query)
+            or contains_sensitive_url_path(decoded_fragment)
+            or (
+                decoded_username is not None
+                and (
+                    contains_obvious_secret(decoded_username)
+                    or contains_sensitive_url_path(decoded_username)
+                )
+            )
+        ):
             return True
     return False
 

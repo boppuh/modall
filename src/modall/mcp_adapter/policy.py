@@ -386,6 +386,7 @@ def _contains_sensitive_sse_event(event: bytes) -> bool:
     data_lines = [line.partition(":")[2].lstrip() for line in lines if line.startswith("data:")]
     return (
         contains_obvious_secret(text)
+        or any(_contains_sensitive_json_text(line) for line in lines)
         or any(_contains_sensitive_json_text(value) for value in field_values)
         or any(_contains_sensitive_json_text(value) for value in complete_field_members)
         or (bool(data_lines) and _contains_sensitive_json_text("\n".join(data_lines)))
@@ -438,7 +439,10 @@ class LimitedTransport(httpx.AsyncBaseTransport):
             for header_name, header_value in response.headers.multi_items()
             for forbidden in self._forbidden_response_values
         ) or any(
-            contains_obvious_secret(header_name) or contains_obvious_secret(header_value)
+            contains_obvious_secret(header_name)
+            or contains_obvious_secret(header_value)
+            or _contains_sensitive_json_text(header_name)
+            or _contains_sensitive_json_text(header_value)
             for header_name, header_value in response.headers.multi_items()
         ):
             self._mark_sensitive_response()
