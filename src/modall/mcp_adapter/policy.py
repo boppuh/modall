@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from ipaddress import ip_address
 from socket import AF_UNSPEC, SOCK_STREAM
-from typing import cast
+from typing import ClassVar, cast
 from urllib.parse import urlsplit
 
 import httpcore
@@ -23,8 +23,8 @@ from modall.security.metadata import (
     decode_safe_url_path,
 )
 
-_SSE_EVENT_BOUNDARY = r"(?:(?:\r\n)|\r|\n){2}"
-_SSE_EVENT_BOUNDARY_BYTES = re.compile(rb"(?:(?:\r\n)|\r|\n){2}")
+_SSE_EVENT_BOUNDARY = r"(?:\r\n|\r(?!\n)|(?<!\r)\n){2}"
+_SSE_EVENT_BOUNDARY_BYTES = re.compile(rb"(?:\r\n|\r(?!\n)|(?<!\r)\n){2}")
 
 
 class EndpointPolicyError(Exception):
@@ -236,29 +236,37 @@ class LimitedByteStream(httpx.AsyncByteStream):
     ) -> None:
         self._stream = stream
         self._budget = budget
-        self._forbidden_values = forbidden_values
         self._mark_sensitive_response = mark_sensitive_response
-        self._tail = b""
+        self._forbidden_matcher = _IncrementalByteMatcher(forbidden_values)
+        self._decoded_forbidden_matcher = _IncrementalByteMatcher(forbidden_values)
+        self._escape_decoder = _IncrementalJsonEscapeDecoder()
+        self._generic_tail = b""
         self._structured_buffer = bytearray()
         self._buffer_json_document = media_type != "text/event-stream"
         self._sse_scan_from = 0
-        self._tail_limit = max((len(value) for value in forbidden_values), default=0) * 6 + 256
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         async for chunk in self._stream:
             self._budget.consume(len(chunk))
-            window = self._tail + chunk
-            decoded_window = _decode_visible_json_escapes(window)
-            if any(
-                value in decoded_window for value in self._forbidden_values
-            ) or contains_obvious_secret(decoded_window.decode("utf-8", errors="ignore")):
+            decoded_chunk = self._escape_decoder.feed(chunk)
+            generic_window = self._generic_tail + decoded_chunk
+            if (
+                self._forbidden_matcher.feed(chunk)
+                or self._decoded_forbidden_matcher.feed(decoded_chunk)
+                or contains_obvious_secret(generic_window.decode("utf-8", errors="ignore"))
+            ):
                 self._reject_sensitive_body()
-            self._tail = window[-self._tail_limit :]
+            self._generic_tail = generic_window[-256:]
             self._structured_buffer.extend(chunk)
             if self._buffer_json_document:
                 continue
             self._screen_completed_sse_events()
             yield chunk
+        decoded_tail = self._escape_decoder.finish()
+        if self._decoded_forbidden_matcher.feed(decoded_tail) or contains_obvious_secret(
+            (self._generic_tail + decoded_tail).decode("utf-8", errors="ignore")
+        ):
+            self._reject_sensitive_body()
         if self._buffer_json_document:
             body = bytes(self._structured_buffer)
             if _contains_sensitive_json_document(body):
@@ -289,12 +297,44 @@ class LimitedByteStream(httpx.AsyncByteStream):
         await self._stream.aclose()
 
 
-def _decode_visible_json_escapes(value: bytes) -> bytes:
-    """Decode one JSON escape layer for ASCII credential screening."""
+class _IncrementalByteMatcher:
+    """Match fixed byte strings across chunks in linear time."""
 
-    decoded = bytearray()
-    index = 0
-    short_escapes = {
+    def __init__(self, patterns: tuple[bytes, ...]) -> None:
+        self._patterns = tuple(pattern for pattern in patterns if pattern)
+        self._prefixes = tuple(self._prefix_table(pattern) for pattern in self._patterns)
+        self._states = [0] * len(self._patterns)
+
+    @staticmethod
+    def _prefix_table(pattern: bytes) -> tuple[int, ...]:
+        prefix = [0] * len(pattern)
+        matched = 0
+        for index in range(1, len(pattern)):
+            while matched and pattern[index] != pattern[matched]:
+                matched = prefix[matched - 1]
+            if pattern[index] == pattern[matched]:
+                matched += 1
+            prefix[index] = matched
+        return tuple(prefix)
+
+    def feed(self, value: bytes) -> bool:
+        for byte in value:
+            for index, pattern in enumerate(self._patterns):
+                matched = self._states[index]
+                while matched and byte != pattern[matched]:
+                    matched = self._prefixes[index][matched - 1]
+                if byte == pattern[matched]:
+                    matched += 1
+                if matched == len(pattern):
+                    return True
+                self._states[index] = matched
+        return False
+
+
+class _IncrementalJsonEscapeDecoder:
+    """Decode visible ASCII JSON escapes without rescanning prior chunks."""
+
+    _SHORT_ESCAPES: ClassVar[dict[int, int]] = {
         ord('"'): ord('"'),
         ord("\\"): ord("\\"),
         ord("/"): ord("/"),
@@ -304,30 +344,46 @@ def _decode_visible_json_escapes(value: bytes) -> bytes:
         ord("r"): 13,
         ord("t"): 9,
     }
-    while index < len(value):
-        if value[index] == ord("\\") and index + 1 < len(value):
-            escaped = value[index + 1]
-            if escaped in short_escapes:
-                decoded.append(short_escapes[escaped])
-                index += 2
-                continue
-            if (
-                index + 5 < len(value)
-                and escaped == ord("u")
-                and value[index + 2 : index + 4] == b"00"
-            ):
-                try:
-                    character = int(value[index + 4 : index + 6], 16)
-                except ValueError:
-                    pass
+
+    def __init__(self) -> None:
+        self._pending = bytearray()
+
+    def feed(self, value: bytes) -> bytes:
+        decoded = bytearray()
+        for byte in value:
+            if not self._pending:
+                if byte == ord("\\"):
+                    self._pending.append(byte)
                 else:
-                    if 0 <= character <= 127:
-                        decoded.append(character)
-                        index += 6
-                        continue
-        decoded.append(value[index])
-        index += 1
-    return bytes(decoded)
+                    decoded.append(byte)
+                continue
+            self._pending.append(byte)
+            if len(self._pending) == 2:
+                escaped = self._pending[1]
+                if escaped in self._SHORT_ESCAPES:
+                    decoded.append(self._SHORT_ESCAPES[escaped])
+                    self._pending.clear()
+                elif escaped != ord("u"):
+                    decoded.extend(self._pending)
+                    self._pending.clear()
+                continue
+            if len(self._pending) == 6:
+                escape = bytes(self._pending)
+                try:
+                    character = int(escape[4:6], 16)
+                except ValueError:
+                    character = 256
+                if escape[2:4] == b"00" and 0 <= character <= 127:
+                    decoded.append(character)
+                else:
+                    decoded.extend(escape)
+                self._pending.clear()
+        return bytes(decoded)
+
+    def finish(self) -> bytes:
+        pending = bytes(self._pending)
+        self._pending.clear()
+        return pending
 
 
 def _contains_sensitive_structured_response(value: bytes) -> bool:
@@ -359,13 +415,21 @@ def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, obje
 
 
 def _contains_sensitive_json_text(value: str) -> bool:
+    decoder = json.JSONDecoder(object_pairs_hook=_reject_duplicate_members)
+    index = 0
     try:
-        parsed = json.loads(value, object_pairs_hook=_reject_duplicate_members)
+        while True:
+            while index < len(value) and value[index].isspace():
+                index += 1
+            if index == len(value):
+                return False
+            parsed, index = decoder.raw_decode(value, index)
+            if contains_sensitive_json(parsed):
+                return True
     except _DuplicateJsonMember:
         return True
     except (json.JSONDecodeError, RecursionError):
         return False
-    return contains_sensitive_json(parsed)
 
 
 def _contains_sensitive_json_document(value: bytes) -> bool:
@@ -449,8 +513,10 @@ class LimitedTransport(httpx.AsyncBaseTransport):
             await response.aclose()
             raise EndpointPolicyError("sensitive upstream response header")
         reason_phrase = response.reason_phrase
-        if contains_obvious_secret(reason_phrase) or any(
-            forbidden in reason_phrase for forbidden in self._forbidden_response_values
+        if (
+            contains_obvious_secret(reason_phrase)
+            or any(forbidden in reason_phrase for forbidden in self._forbidden_response_values)
+            or _contains_sensitive_json_text(reason_phrase)
         ):
             self._mark_sensitive_response()
             await response.aclose()

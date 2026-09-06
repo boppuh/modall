@@ -421,6 +421,9 @@ def test_raw_structured_screen_handles_sse_and_invalid_utf8() -> None:
         b'{"token":"AbCdEfGhIjKlMnOpQrStUvWx"}\n'
         b'data: {"jsonrpc":"2.0","result":{"status":"safe"}}\n\n'
     )
+    assert _contains_sensitive_structured_response(
+        b'data: {"token"\r\ndata: :"AbCdEfGhIjKlMnOpQrStUvWx"}\r\n\r\n'
+    )
     assert not _contains_sensitive_structured_response(b'data: {"status":"ready"}\n\n')
     assert not _contains_sensitive_structured_response(b"\xff")
     assert _contains_sensitive_structured_response(
@@ -438,6 +441,7 @@ def test_url_secret_screen_handles_embedded_and_multiple_markers() -> None:
     )
     assert contains_sensitive_url("https://token-AbCdEfGhIjKlMnOpQrStUvWx@cdn.example/path")
     assert contains_sensitive_url("https://cdn.example/path?token-AbCdEfGhIjKlMnOpQrStUvWx")
+    assert contains_sensitive_url("https://cdn.example/path?token%3DAbCdEfGhIjKlMnOpQrStUvWx")
     assert _contains_sensitive_tool(
         {
             "name": "safe-tool",
@@ -703,6 +707,19 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
             with pytest.raises(EndpointPolicyError, match="response status"):
                 await client.get("https://example.test")
 
+        async def sensitive_json_status(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                request=request,
+                extensions={"reason_phrase": b'{"token":"AbCdEfGhIjKlMnOpQrStUvWx"}'},
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(sensitive_json_status), 100)
+        ) as client:
+            with pytest.raises(EndpointPolicyError, match="response status"):
+                await client.get("https://example.test")
+
         async def sensitive_header(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,
@@ -739,6 +756,21 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
 
         async with httpx.AsyncClient(
             transport=LimitedTransport(httpx.MockTransport(accepted_sensitive_body), 100)
+        ) as client:
+            request = client.build_request("POST", "https://example.test")
+            with pytest.raises(EndpointPolicyError, match="response body"):
+                await client.send(request, stream=True)
+
+        async def accepted_concatenated_body(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                202,
+                headers={"Content-Type": "application/json"},
+                content=b'{}\n{"token":"AbCdEfGhIjKlMnOpQrStUvWx"}',
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(accepted_concatenated_body), 100)
         ) as client:
             request = client.build_request("POST", "https://example.test")
             with pytest.raises(EndpointPolicyError, match="response body"):
@@ -785,6 +817,26 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
 
         async with httpx.AsyncClient(
             transport=LimitedTransport(httpx.MockTransport(sensitive_sse_tail), 100)
+        ) as client:
+            with pytest.raises(EndpointPolicyError, match="sensitive upstream response body"):
+                await client.get("https://example.test")
+
+        long_credential = "AbCd" * 1024
+
+        async def long_streamed_credential(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                stream=OneByteStream(long_credential.encode()),
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(
+                httpx.MockTransport(long_streamed_credential),
+                8192,
+                forbidden_response_values=(long_credential,),
+            )
         ) as client:
             with pytest.raises(EndpointPolicyError, match="sensitive upstream response body"):
                 await client.get("https://example.test")

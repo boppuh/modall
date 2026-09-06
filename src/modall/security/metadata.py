@@ -22,7 +22,7 @@ _OBVIOUS_SECRET = re.compile(
 _GENERIC_SECRET_VALUE = re.compile(
     r"(?:api[_-]?key|(?:(?:access|refresh|session|auth|bearer)[_-]?)?token|credential|"
     r"private[_-]?key|secret|password)"
-    r"(?:[=:/][\s\x00-\x1f\x7f-\x9f]*|\s+)"
+    r"[\"']?(?:[=:/][\s\x00-\x1f\x7f-\x9f]*|\s+)"
     r"[\"'`]?\s*(?P<value>[A-Za-z0-9._~+/=\-]{8,})",
     re.IGNORECASE,
 )
@@ -49,7 +49,7 @@ _SENSITIVE_PATH_MARKER = re.compile(
     r"(?:^|[!$&'()*,;:=@/])(?:api[-_]?key|"
     r"(?:(?:access|refresh|session|auth|bearer)[-_]?)?token|credential|"
     r"private[-_]?key|secret|password)"
-    r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,})(?=$|[!$&'()*,;:@])",
+    r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,}?)(?=$|[!$&'()*,;:=@])",
     re.IGNORECASE,
 )
 _URL_CANDIDATE = re.compile(r"https?://[^\s<>\[\]{}\"']+", re.IGNORECASE)
@@ -198,6 +198,8 @@ def contains_sensitive_url(value: str) -> bool:
             or contains_sensitive_url_path(decoded_path)
             or contains_sensitive_url_path(decoded_query)
             or contains_sensitive_url_path(decoded_fragment)
+            or contains_obvious_secret(decoded_query)
+            or contains_obvious_secret(decoded_fragment)
             or (
                 decoded_username is not None
                 and (
