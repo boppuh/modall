@@ -33,6 +33,7 @@ from modall.mcp_adapter.policy import (
 from modall.security.metadata import (
     contains_obvious_secret,
     contains_sensitive_json,
+    contains_sensitive_schema,
     contains_sensitive_url,
     validate_capability_scalars,
 )
@@ -96,6 +97,22 @@ def test_structured_secret_screen_recognizes_common_field_spellings(
 
 def test_structured_secret_screen_inspects_keys_beneath_sensitive_fields() -> None:
     assert contains_sensitive_json({"token": {"abcdefgh12345678": True}})
+    assert contains_sensitive_json({"token": {"value": "01234567890123456789"}})
+
+
+def test_schema_anchor_screen_ignores_anchors_in_instance_examples() -> None:
+    assert contains_sensitive_schema(
+        {
+            "$defs": {
+                "credential": {
+                    "$anchor": "target",
+                    "default": "AbCdEfGhIjKlMnOpQrStUvWx",
+                }
+            },
+            "examples": [{"$anchor": "target", "default": "safe"}],
+            "properties": {"password": {"$ref": "#target"}},
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -128,6 +145,7 @@ def test_structured_secret_screen_allows_authentication_status_metadata(
         "token AbCdEfGhIjKlMnOpQrStUvWx",
         'Use token: "AbCdEfGhIjKlMnOpQrStUvWx"',
         "token: 12345678901234567890",
+        "token=" + ("a" * 1000) + "=token=AbCdEfGhIjKlMnOpQrStUvWx",
     ),
 )
 def test_unstructured_secret_screen_recognizes_generic_markers(value: str) -> None:
@@ -443,6 +461,7 @@ def test_url_secret_screen_handles_embedded_and_multiple_markers() -> None:
     assert contains_sensitive_url("https://cdn.example/path?token-AbCdEfGhIjKlMnOpQrStUvWx")
     assert contains_sensitive_url("https://cdn.example/path?token%3DAbCdEfGhIjKlMnOpQrStUvWx")
     assert contains_sensitive_url("https://cdn.example/path/token%3DAbCdEfGhIjKlMnOpQrStUvWx")
+    assert contains_sensitive_url("https://bad_host.example/token-AbCdEfGhIjKlMnOpQrStUvWx")
     assert _contains_sensitive_tool(
         {
             "name": "safe-tool",
@@ -782,6 +801,21 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
 
         async with httpx.AsyncClient(
             transport=LimitedTransport(httpx.MockTransport(accepted_concatenated_body), 100)
+        ) as client:
+            request = client.build_request("POST", "https://example.test")
+            with pytest.raises(EndpointPolicyError, match="response body"):
+                await client.send(request, stream=True)
+
+        async def accepted_prefixed_body(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                202,
+                headers={"Content-Type": "application/json"},
+                content=b'x\n{"token":{"value":"AbCdEfGhIjKlMnOpQrStUvWx"}}',
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(accepted_prefixed_body), 100)
         ) as client:
             request = client.build_request("POST", "https://example.test")
             with pytest.raises(EndpointPolicyError, match="response body"):

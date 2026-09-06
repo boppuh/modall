@@ -26,6 +26,11 @@ _GENERIC_SECRET_VALUE = re.compile(
     r"[\"'`]?\s*(?P<value>[A-Za-z0-9._~+/=\-]{8,})",
     re.IGNORECASE,
 )
+_GENERIC_SECRET_MARKER = re.compile(
+    r"(?:api[_-]?key|(?:(?:access|refresh|session|auth|bearer)[_-]?)?token|credential|"
+    r"private[_-]?key|secret|password)",
+    re.IGNORECASE,
+)
 _AUTHORIZATION_VALUE = re.compile(
     r"(?:authorization|authentication)\s*[:=]\s*(?:bearer\s+)?"
     r"(?P<assigned>[A-Za-z0-9._~+/=\-]{8,})|"
@@ -46,10 +51,17 @@ _SENSITIVE_MARKER_PREFIX = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_PATH_MARKER = re.compile(
-    r"(?:^|[!$&'()*,;:=@/])(?:api[-_]?key|"
+    r"(?:^|[!$&'()*+,;:=@/])(?:api[-_]?key|"
     r"(?:(?:access|refresh|session|auth|bearer)[-_]?)?token|credential|"
     r"private[-_]?key|secret|password)"
     r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,}?)(?=$|[!$&'()*,;:=@])",
+    re.IGNORECASE,
+)
+_SENSITIVE_HOST_LABEL_MARKER = re.compile(
+    r"(?:^|.*-)(?:api[-_]?key|"
+    r"(?:(?:access|refresh|session|auth|bearer)[-_]?)?token|credential|"
+    r"private[-_]?key|secret|password)"
+    r"[-_](?P<value>[A-Za-z0-9_~+=\-]{8,})\Z",
     re.IGNORECASE,
 )
 _URL_CANDIDATE = re.compile(r"https?://[^\s<>\[\]{}\"']+", re.IGNORECASE)
@@ -94,11 +106,12 @@ def _is_sensitive_field(key: str) -> bool:
 def contains_obvious_secret(value: str) -> bool:
     if _OBVIOUS_SECRET.search(value) is not None:
         return True
-    if any(
-        _looks_like_secret_candidate(match.group("value"))
-        for match in _GENERIC_SECRET_VALUE.finditer(value)
-    ):
-        return True
+    marker_starts = [match.start() for match in _GENERIC_SECRET_MARKER.finditer(value)]
+    for index, start in enumerate(marker_starts):
+        end = marker_starts[index + 1] if index + 1 < len(marker_starts) else len(value)
+        match = _GENERIC_SECRET_VALUE.match(value, start, end)
+        if match is not None and _looks_like_secret_candidate(match.group("value")):
+            return True
     for match in _AUTHORIZATION_VALUE.finditer(value):
         candidate = match.group("assigned") or match.group("bearer")
         if match.group("assigned") is not None and _is_auth_mode(candidate):
@@ -159,7 +172,12 @@ def contains_sensitive_hostname(hostname: str) -> bool:
         and _looks_like_marker_suffix(match.group("value"))
         for label in labels
     )
-    return adjacent_value or cross_label_value or prefixed_value
+    internal_value = any(
+        (match := _SENSITIVE_HOST_LABEL_MARKER.fullmatch(label)) is not None
+        and _looks_like_marker_suffix(match.group("value"))
+        for label in labels
+    )
+    return adjacent_value or cross_label_value or prefixed_value or internal_value
 
 
 def contains_sensitive_url_path(path: str) -> bool:
@@ -181,6 +199,14 @@ def contains_sensitive_url(value: str) -> bool:
 
     for match in _URL_CANDIDATE.finditer(value):
         candidate = match.group().rstrip(".,;:!?)]")
+        try:
+            decoded_candidate = decode_safe_url_path(candidate)
+        except ValueError:
+            decoded_candidate = candidate
+        if contains_sensitive_url_path(decoded_candidate) or contains_obvious_secret(
+            decoded_candidate
+        ):
+            return True
         try:
             parsed = urlsplit(candidate)
             host = normalize_endpoint_host(parsed.hostname).value
@@ -310,7 +336,7 @@ def contains_sensitive_schema(value: object) -> bool:
                     sensitive_property
                     and key in annotation_keys
                     and isinstance(child, str)
-                    and (_looks_like_opaque_value(child) or contains_obvious_secret(child))
+                    and (_looks_like_secret_candidate(child) or contains_obvious_secret(child))
                 ):
                     return True
                 if key not in literal_keys and contains_sensitive_json({key: child}):
@@ -319,7 +345,7 @@ def contains_sensitive_schema(value: object) -> bool:
                     return True
         elif isinstance(current, str):
             if (
-                sensitive_property and _looks_like_opaque_value(current)
+                sensitive_property and _looks_like_secret_candidate(current)
             ) or contains_obvious_secret(current):
                 return True
         elif (
@@ -336,6 +362,21 @@ def _index_schema_anchors(root: object) -> dict[str, object]:
     anchors: dict[str, object] = {}
     candidates = [root]
     visited: set[int] = set()
+    schema_map_keys = {"$defs", "definitions", "dependentSchemas", "patternProperties"}
+    schema_keys = {
+        "additionalProperties",
+        "contains",
+        "contentSchema",
+        "else",
+        "if",
+        "items",
+        "not",
+        "propertyNames",
+        "then",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    }
+    schema_array_keys = {"allOf", "anyOf", "oneOf", "prefixItems"}
     while candidates:
         current = candidates.pop()
         identity = id(current)
@@ -347,9 +388,21 @@ def _index_schema_anchors(root: object) -> dict[str, object]:
                 anchor = current.get(keyword)
                 if isinstance(anchor, str):
                     anchors.setdefault(anchor, current)
-            candidates.extend(current.values())
-        elif isinstance(current, list):
-            candidates.extend(current)
+            properties = current.get("properties")
+            if isinstance(properties, dict):
+                candidates.extend(properties.values())
+            for key in schema_map_keys:
+                schemas = current.get(key)
+                if isinstance(schemas, dict):
+                    candidates.extend(schemas.values())
+            for key in schema_keys:
+                schema = current.get(key)
+                if isinstance(schema, (dict, bool)):
+                    candidates.append(schema)
+            for key in schema_array_keys:
+                schemas = current.get(key)
+                if isinstance(schemas, list):
+                    candidates.extend(schemas)
     return anchors
 
 
@@ -481,7 +534,7 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
         current, sensitive_context = stack.pop()
         if isinstance(current, dict):
             for key, child in current.items():
-                if sensitive_context and _looks_like_opaque_value(key):
+                if sensitive_context and _looks_like_secret_candidate(key):
                     return True
                 key_is_sensitive = _is_sensitive_field(key)
                 child_is_auth_mode = (
@@ -499,14 +552,14 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
                     key_is_sensitive
                     and isinstance(child, str)
                     and not child_is_auth_mode
-                    and _looks_like_opaque_value(child)
+                    and _looks_like_secret_candidate(child)
                 ):
                     return True
                 if sensitive_context and key in {"const", "default", "enum", "example", "examples"}:
                     literals = [child]
                     while literals:
                         literal = literals.pop()
-                        if isinstance(literal, str) and _looks_like_opaque_value(literal):
+                        if isinstance(literal, str) and _looks_like_secret_candidate(literal):
                             return True
                         if isinstance(literal, list):
                             literals.extend(literal)
@@ -526,7 +579,7 @@ def _contains_obvious_secret_in_json(value: object, *, initially_sensitive: bool
         ) or (
             isinstance(current, str)
             and (
-                (sensitive_context and _looks_like_opaque_value(current))
+                (sensitive_context and _looks_like_secret_candidate(current))
                 or contains_obvious_secret(current)
             )
         ):

@@ -428,19 +428,26 @@ def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, obje
 def _contains_sensitive_json_text(value: str) -> bool:
     decoder = json.JSONDecoder(object_pairs_hook=_reject_duplicate_members)
     index = 0
-    try:
-        while True:
-            while index < len(value) and value[index].isspace():
-                index += 1
-            if index == len(value):
-                return False
+    while True:
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if index == len(value):
+            return False
+        try:
             parsed, index = decoder.raw_decode(value, index)
             if contains_sensitive_json(parsed):
                 return True
-    except _DuplicateJsonMember:
-        return True
-    except (json.JSONDecodeError, RecursionError):
-        return False
+        except _DuplicateJsonMember:
+            return True
+        except RecursionError:
+            return False
+        except json.JSONDecodeError as exc:
+            next_object = value.find("{", max(index + 1, exc.pos + 1))
+            next_array = value.find("[", max(index + 1, exc.pos + 1))
+            candidates = [position for position in (next_object, next_array) if position >= 0]
+            if not candidates:
+                return False
+            index = min(candidates)
 
 
 def _contains_sensitive_json_document(value: bytes) -> bool:
