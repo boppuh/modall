@@ -98,6 +98,11 @@ def upgrade() -> None:
             "status <> 'succeeded' OR safe_error_code IS NULL",
             name="ck_run_success_has_no_error",
         ),
+        sa.CheckConstraint(
+            "status NOT IN ('failed', 'cancelled', 'timed_out', 'indeterminate') "
+            "OR safe_error_code IS NOT NULL",
+            name="ck_run_terminal_has_error",
+        ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["actor_user_id"], ["users.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(
@@ -130,6 +135,13 @@ def upgrade() -> None:
         ["arguments_expires_at", "id"],
         postgresql_where=sa.text("arguments IS NOT NULL"),
         sqlite_where=sa.text("arguments IS NOT NULL"),
+    )
+    op.create_index(
+        "ix_runs_terminal_expiry",
+        "runs",
+        ["terminal_at", "id"],
+        postgresql_where=sa.text("terminal_at IS NOT NULL"),
+        sqlite_where=sa.text("terminal_at IS NOT NULL"),
     )
 
     op.create_table(
@@ -172,6 +184,20 @@ def upgrade() -> None:
         sa.UniqueConstraint("run_id"),
     )
     op.create_index("ix_jobs_claim", "jobs", ["status", "available_at", "created_at"])
+    op.create_index(
+        "ix_jobs_deadline_reconciliation",
+        "jobs",
+        ["deadline", "id"],
+        postgresql_where=sa.text("status IN ('queued', 'leased')"),
+        sqlite_where=sa.text("status IN ('queued', 'leased')"),
+    )
+    op.create_index(
+        "ix_jobs_lease_reconciliation",
+        "jobs",
+        ["lease_expires_at", "id"],
+        postgresql_where=sa.text("status = 'leased'"),
+        sqlite_where=sa.text("status = 'leased'"),
+    )
 
     op.create_table(
         "run_attempts",
@@ -204,6 +230,11 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "status <> 'succeeded' OR safe_error_code IS NULL",
             name="ck_run_attempt_success_has_no_error",
+        ),
+        sa.CheckConstraint(
+            "status NOT IN ('failed', 'cancelled', 'timed_out', 'indeterminate') "
+            "OR safe_error_code IS NOT NULL",
+            name="ck_run_attempt_terminal_has_error",
         ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
@@ -243,6 +274,11 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "status <> 'succeeded' OR safe_error_code IS NULL",
             name="ck_run_event_success_has_no_error",
+        ),
+        sa.CheckConstraint(
+            "status NOT IN ('failed', 'cancelled', 'timed_out', 'indeterminate') "
+            "OR safe_error_code IS NOT NULL",
+            name="ck_run_event_terminal_has_error",
         ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
@@ -307,6 +343,7 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_idempotency_expiry", "idempotency_records", ["expires_at"])
+    op.create_index("ix_idempotency_key_version", "idempotency_records", ["key_version"])
 
     for table in ("run_events", "confirmation_nonces", "idempotency_records"):
         op.execute(
@@ -333,6 +370,7 @@ def downgrade() -> None:
     op.execute("DROP FUNCTION IF EXISTS modall_reject_terminal_execution_update()")
     for table in ("idempotency_records", "confirmation_nonces", "run_events"):
         op.execute(f"DROP TRIGGER IF EXISTS {table}_immutable ON {table}")
+    op.drop_index("ix_idempotency_key_version", table_name="idempotency_records")
     op.drop_index("ix_idempotency_expiry", table_name="idempotency_records")
     op.drop_table("idempotency_records")
     op.drop_table("confirmation_nonces")
@@ -340,8 +378,11 @@ def downgrade() -> None:
     op.drop_table("run_events")
     op.drop_index("uq_run_attempts_active", table_name="run_attempts")
     op.drop_table("run_attempts")
+    op.drop_index("ix_jobs_lease_reconciliation", table_name="jobs")
+    op.drop_index("ix_jobs_deadline_reconciliation", table_name="jobs")
     op.drop_index("ix_jobs_claim", table_name="jobs")
     op.drop_table("jobs")
+    op.drop_index("ix_runs_terminal_expiry", table_name="runs")
     op.drop_index("ix_runs_arguments_expiry", table_name="runs")
     op.drop_index("ix_runs_workspace_created", table_name="runs")
     op.drop_table("runs")

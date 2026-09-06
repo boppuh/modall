@@ -265,7 +265,9 @@ def test_preflight_creates_exact_lineage_and_idempotent_replays() -> None:
 
 def test_preflight_returns_the_exact_expiry_encoded_in_confirmation() -> None:
     async def scenario() -> None:
-        now = datetime(2026, 9, 6, 12, 0, 0, 987654, tzinfo=UTC)
+        # Deliberately differs from the process wall clock: JWT temporal claims
+        # must be evaluated against the same durable clock used to issue them.
+        now = datetime(2035, 9, 6, 12, 0, 0, 987654, tzinfo=UTC)
         async with database() as factory:
             user_id, workspace_id = await bootstrap(factory, subject="token-expiry")
             async with transaction(factory) as session:
@@ -283,6 +285,14 @@ def test_preflight_returns_the_exact_expiry_encoded_in_confirmation() -> None:
                 )
                 assert preflight.expires_at == datetime.fromtimestamp(claims["exp"], UTC)
                 assert preflight.expires_at.microsecond == 0
+                run = await service(session, now=now).create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "expiry"},
+                    confirmation_token=preflight.confirmation_token,
+                    idempotency_key="durable-clock",
+                )
+                assert run.status == RunStatus.QUEUED.value
 
     asyncio.run(scenario())
 
@@ -547,6 +557,9 @@ def test_restore_quarantine_fences_old_jobs_and_retention_erases_content() -> No
                     limits=limits,
                     system_authority=SYSTEM_AUTHORITY,
                 )
+                with pytest.raises(ExecutionError) as not_quarantined:
+                    await execution.clear_restore_quarantine()
+                assert not_quarantined.value.code == ExecutionFailureCode.INVALID_TRANSITION
                 token = await execution.preflight(
                     context=context,
                     capability_version_id=version.id,

@@ -92,6 +92,7 @@ class _ConfirmationClaims:
     argument_digest: str
     route: str
     nonce: str
+    issued_at: datetime
     expires_at: datetime
 
 
@@ -173,6 +174,9 @@ class ExecutionService:
         deadline: datetime | None = None,
         correlation_id: UUID | None = None,
     ) -> Run:
+        # Global execution state is always locked before workspace-scoped rows.
+        # Restore reconciliation uses the same order with an exclusive state lock.
+        state = await self._execution_state(lock="shared")
         await require_current_role(
             self._session,
             context,
@@ -188,6 +192,7 @@ class ExecutionService:
             context=context,
             capability_version_id=capability_version_id,
             argument_digest=argument_digest,
+            now=now,
         )
         requested_deadline = self._canonicalize_deadline(deadline)
         raw_key = self._validate_idempotency_key(idempotency_key)
@@ -267,7 +272,6 @@ class ExecutionService:
             raise ExecutionError(ExecutionFailureCode.INVALID_CONFIRMATION)
         await self._validate_normalized_arguments(normalized, target.version.input_schema)
 
-        state = await self._execution_state(lock="shared")
         if state.dispatch_quarantined:
             raise ExecutionError(ExecutionFailureCode.DISPATCH_QUARANTINED)
         run_id = uuid4()
@@ -654,6 +658,13 @@ class ExecutionService:
     async def clear_restore_quarantine(self) -> int:
         self._require_system_authority()
         state = await self._execution_state(lock="exclusive")
+        unreconciled_run = await self._session.scalar(
+            select(Run.id)
+            .where(Run.status.not_in([status.value for status in _TERMINAL_RUN_STATUSES]))
+            .limit(1)
+        )
+        if not state.dispatch_quarantined or unreconciled_run is not None:
+            raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
         state.dispatch_quarantined = False
         state.updated_at = await self._durable_now()
         await self._session.flush()
@@ -690,7 +701,13 @@ class ExecutionService:
                     event_type=RunEventType.CONTENT_EXPIRED,
                 )
             else:
-                await self._append_next_event(run, RunEventType.CONTENT_EXPIRED, status, now=now)
+                await self._append_next_event(
+                    run,
+                    RunEventType.CONTENT_EXPIRED,
+                    status,
+                    safe_error_code=run.safe_error_code,
+                    now=now,
+                )
             run.arguments = None
             run.updated_at = now
         await self._session.flush()
@@ -854,7 +871,11 @@ class ExecutionService:
                 algorithms=["HS256"],
                 audience=_TOKEN_AUDIENCE,
                 issuer=_TOKEN_ISSUER,
-                options={"verify_exp": False, "require": ["exp", "iat", "jti"]},
+                options={
+                    "verify_exp": False,
+                    "verify_iat": False,
+                    "require": ["exp", "iat", "jti"],
+                },
             )
             return _ConfirmationClaims(
                 workspace_id=UUID(payload["w"]),
@@ -866,6 +887,7 @@ class ExecutionService:
                 argument_digest=str(payload["ad"]),
                 route=str(payload["r"]),
                 nonce=str(payload["jti"]),
+                issued_at=datetime.fromtimestamp(int(payload["iat"]), UTC),
                 expires_at=datetime.fromtimestamp(int(payload["exp"]), UTC),
             )
         except ExecutionError:
@@ -880,6 +902,7 @@ class ExecutionService:
         context: WorkspaceContext,
         capability_version_id: UUID,
         argument_digest: str,
+        now: datetime,
     ) -> None:
         if (
             claims.workspace_id != context.workspace_id
@@ -888,6 +911,8 @@ class ExecutionService:
             or claims.argument_digest != argument_digest
             or claims.route != _RUN_ROUTE
             or not claims.nonce
+            or claims.issued_at > now
+            or claims.expires_at <= claims.issued_at
         ):
             raise ExecutionError(ExecutionFailureCode.INVALID_CONFIRMATION)
 
@@ -1026,6 +1051,7 @@ class ExecutionService:
         target: RunStatus,
         event_type: RunEventType,
     ) -> Run:
+        state = await self._execution_state(lock="shared")
         lineage = await self._session.execute(
             select(Job.workspace_id).where(
                 Job.id == lease.job_id,
@@ -1040,7 +1066,6 @@ class ExecutionService:
         )
         if workspace_id is None:
             raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
-        state = await self._execution_state(lock="shared")
         run, job = await self._locked_lease_lineage(lease)
         now = await self._durable_now()
         membership = await self._session.scalar(

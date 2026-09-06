@@ -713,6 +713,11 @@ class Run(Base):
             "status <> 'succeeded' OR safe_error_code IS NULL",
             name="ck_run_success_has_no_error",
         ),
+        CheckConstraint(
+            "status NOT IN ('failed', 'cancelled', 'timed_out', 'indeterminate') "
+            "OR safe_error_code IS NOT NULL",
+            name="ck_run_terminal_has_error",
+        ),
         ForeignKeyConstraint(
             ["workspace_id", "capability_id"],
             ["capabilities.workspace_id", "capabilities.id"],
@@ -740,6 +745,13 @@ class Run(Base):
             "id",
             postgresql_where=text("arguments IS NOT NULL"),
             sqlite_where=text("arguments IS NOT NULL"),
+        ),
+        Index(
+            "ix_runs_terminal_expiry",
+            "terminal_at",
+            "id",
+            postgresql_where=text("terminal_at IS NOT NULL"),
+            sqlite_where=text("terminal_at IS NOT NULL"),
         ),
     )
 
@@ -794,6 +806,20 @@ class Job(Base):
             ondelete="CASCADE",
         ),
         Index("ix_jobs_claim", "status", "available_at", "created_at"),
+        Index(
+            "ix_jobs_deadline_reconciliation",
+            "deadline",
+            "id",
+            postgresql_where=text("status IN ('queued', 'leased')"),
+            sqlite_where=text("status IN ('queued', 'leased')"),
+        ),
+        Index(
+            "ix_jobs_lease_reconciliation",
+            "lease_expires_at",
+            "id",
+            postgresql_where=text("status = 'leased'"),
+            sqlite_where=text("status = 'leased'"),
+        ),
     )
 
     id: Mapped[UuidPrimaryKey]
@@ -839,6 +865,11 @@ class RunAttempt(Base):
         CheckConstraint(
             "status <> 'succeeded' OR safe_error_code IS NULL",
             name="ck_run_attempt_success_has_no_error",
+        ),
+        CheckConstraint(
+            "status NOT IN ('failed', 'cancelled', 'timed_out', 'indeterminate') "
+            "OR safe_error_code IS NOT NULL",
+            name="ck_run_attempt_terminal_has_error",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "run_id"],
@@ -889,6 +920,11 @@ class RunEvent(Base):
         CheckConstraint(
             "status <> 'succeeded' OR safe_error_code IS NULL",
             name="ck_run_event_success_has_no_error",
+        ),
+        CheckConstraint(
+            "status NOT IN ('failed', 'cancelled', 'timed_out', 'indeterminate') "
+            "OR safe_error_code IS NOT NULL",
+            name="ck_run_event_terminal_has_error",
         ),
         ForeignKeyConstraint(
             ["workspace_id", "run_id"],
@@ -943,6 +979,7 @@ class IdempotencyRecord(Base):
         CheckConstraint("length(key_hmac) = 64", name="ck_idempotency_key_hmac"),
         CheckConstraint("length(request_hmac) = 64", name="ck_idempotency_request_hmac"),
         CheckConstraint("resource_type = 'run'", name="ck_idempotency_resource_type"),
+        Index("ix_idempotency_key_version", "key_version"),
         Index("ix_idempotency_expiry", "expires_at"),
     )
 
