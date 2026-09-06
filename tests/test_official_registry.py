@@ -481,6 +481,10 @@ def test_limit_configuration_rejects_nonpositive_and_overlong_cache_ttl() -> Non
         OfficialRegistryLimits(max_pages=0)
     with pytest.raises(ValueError):
         OfficialRegistryLimits(cache_ttl=timedelta(hours=1, microseconds=1))
+    with pytest.raises(ValueError):
+        OfficialRegistryLimits(max_workspace_cache_rows=0)
+    with pytest.raises(ValueError):
+        OfficialRegistryLimits(max_response_bytes=1024, max_workspace_cache_bytes=512)
     for timeout in (float("inf"), float("nan")):
         with pytest.raises(ValueError):
             OfficialRegistryLimits(total_timeout_seconds=timeout)
@@ -817,6 +821,36 @@ def test_repeated_hanging_scanners_are_killed_without_leaking_workers() -> None:
     asyncio.run(scenario())
 
 
+def test_scanner_process_concurrency_is_globally_bounded() -> None:
+    async def scenario() -> None:
+        adapter = OfficialRegistryAdapter(
+            limits=OfficialRegistryLimits(total_timeout_seconds=3),
+            query_scanner=scanner_blocks_briefly,
+        )
+        existing_children = {child.pid for child in multiprocessing.active_children()}
+        tasks = [
+            asyncio.create_task(adapter.screen_query(f"weather-{index}")) for index in range(8)
+        ]
+        maximum_new_children = 0
+        while not all(task.done() for task in tasks):
+            maximum_new_children = max(
+                maximum_new_children,
+                len(
+                    {
+                        child.pid
+                        for child in multiprocessing.active_children()
+                        if child.pid not in existing_children
+                    }
+                ),
+            )
+            await asyncio.sleep(0.005)
+        assert await asyncio.gather(*tasks) == [f"weather-{index}" for index in range(8)]
+        assert 1 <= maximum_new_children <= 4
+        assert {child.pid for child in multiprocessing.active_children()} == existing_children
+
+    asyncio.run(scenario())
+
+
 def test_scanner_policy_and_child_protocol_are_covered_in_process() -> None:
     safe_metadata = {
         "server": {
@@ -897,6 +931,158 @@ def test_normalized_cache_payload_must_fit_the_active_byte_limit() -> None:
     asyncio.run(scenario())
 
 
+def test_combined_paginated_metadata_must_fit_structural_limits() -> None:
+    async def scenario() -> None:
+        calls = 0
+
+        def server(page: int) -> dict[str, object]:
+            return {
+                "server": {
+                    "name": f"io.modall.fixture.structural-{page}",
+                    "version": "1.0.0",
+                    "values": [page] * 900,
+                }
+            }
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            page = calls
+            calls += 1
+            metadata: dict[str, object] = {"count": 1}
+            if page < 4:
+                metadata["nextCursor"] = f"page-{page + 1}"
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={
+                    "servers": [server(page)],
+                    "metadata": metadata,
+                },
+                request=request,
+            )
+
+        limits = OfficialRegistryLimits(total_timeout_seconds=10)
+        with pytest.raises(OfficialRegistryError) as cached_revalidation:
+            await OfficialRegistryAdapter(limits=limits).parse_cached_items(
+                [server(page) for page in range(5)]
+            )
+        assert cached_revalidation.value.code == OfficialRegistryFailureCode.RESPONSE_LIMIT
+
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="combined-structure")
+            async with (
+                httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client,
+                transaction(factory) as session,
+            ):
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                service = OfficialRegistryService(
+                    session,
+                    OfficialRegistryAdapter(
+                        transport=client._transport,
+                        limits=limits,
+                    ),
+                )
+                with pytest.raises(OfficialRegistryError) as raised:
+                    await service.search(context=context, query="structural")
+                assert raised.value.code == OfficialRegistryFailureCode.RESPONSE_LIMIT
+                assert (
+                    await session.scalar(select(func.count()).select_from(RegistrySearchCache)) == 0
+                )
+        assert calls == 5
+
+    asyncio.run(scenario())
+
+
+def test_workspace_cache_row_budget_rejects_additional_queries() -> None:
+    async def scenario() -> None:
+        calls = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={"servers": [], "metadata": {"count": 0}},
+                request=request,
+            )
+
+        limits = OfficialRegistryLimits(max_workspace_cache_rows=1)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="cache-row-budget")
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                adapter = OfficialRegistryAdapter(transport=client._transport, limits=limits)
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                    await OfficialRegistryService(session, adapter).search(
+                        context=context, query="first"
+                    )
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                    with pytest.raises(OfficialRegistryError) as raised:
+                        await OfficialRegistryService(session, adapter).search(
+                            context=context, query="second"
+                        )
+                    assert raised.value.code == OfficialRegistryFailureCode.RESPONSE_LIMIT
+                    assert (
+                        await session.scalar(select(func.count()).select_from(RegistrySearchCache))
+                        == 1
+                    )
+        assert calls == 2
+
+    asyncio.run(scenario())
+
+
+def test_workspace_cache_byte_budget_rejects_additional_queries() -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={
+                    "servers": [
+                        {
+                            "server": {
+                                "name": "io.modall.fixture.cache-budget",
+                                "version": "1.0.0",
+                                "description": "x" * 700,
+                            }
+                        }
+                    ],
+                    "metadata": {"count": 1},
+                },
+                request=request,
+            )
+
+        limits = OfficialRegistryLimits(
+            max_response_bytes=1024,
+            max_workspace_cache_bytes=1024,
+        )
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="cache-byte-budget")
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                adapter = OfficialRegistryAdapter(transport=client._transport, limits=limits)
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                    first = await OfficialRegistryService(session, adapter).search(
+                        context=context, query="first"
+                    )
+                    assert first.from_cache is False
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                    with pytest.raises(OfficialRegistryError) as raised:
+                        await OfficialRegistryService(session, adapter).search(
+                            context=context, query="second"
+                        )
+                    assert raised.value.code == OfficialRegistryFailureCode.RESPONSE_LIMIT
+                    assert (
+                        await session.scalar(select(func.count()).select_from(RegistrySearchCache))
+                        == 1
+                    )
+
+    asyncio.run(scenario())
+
+
 def test_import_purges_cache_rejected_by_the_active_scanner() -> None:
     async def scenario() -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -925,19 +1111,20 @@ def test_import_purges_cache_rejected_by_the_active_scanner() -> None:
                         ),
                     ).search(context=context, query="weather")
 
-                async with transaction(factory) as session:
-                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
-                    service = OfficialRegistryService(
-                        session, OfficialRegistryAdapter(transport=client._transport)
-                    )
-                    with pytest.raises(OfficialRegistryError) as raised:
+                with pytest.raises(OfficialRegistryError) as raised:
+                    async with transaction(factory) as session:
+                        context = await context_for(
+                            session, user_id=user_id, workspace_id=workspace_id
+                        )
+                        service = OfficialRegistryService(
+                            session, OfficialRegistryAdapter(transport=client._transport)
+                        )
                         await service.import_cached(
                             context=context,
                             cache_id=searched.cache_id,
                             provenance_digest=searched.items[0].provenance_digest,
                         )
-                    assert raised.value.code == OfficialRegistryFailureCode.UNSAFE_METADATA
-                    assert await session.get(RegistrySearchCache, searched.cache_id) is None
+                assert raised.value.code == OfficialRegistryFailureCode.UNSAFE_METADATA
 
                 async with transaction(factory) as session:
                     assert await session.get(RegistrySearchCache, searched.cache_id) is None

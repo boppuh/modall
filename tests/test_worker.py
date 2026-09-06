@@ -72,6 +72,10 @@ def test_worker_runs_global_registry_cache_cleanup(
     asyncio.run(scenario(cleanup_outcome="succeeds"))
     with caplog.at_level(logging.WARNING):
         asyncio.run(scenario(cleanup_outcome="fails"))
+    assert "registry_cache_cleanup_failed" in caplog.text
+    assert "database detail" not in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
         asyncio.run(scenario(cleanup_outcome="hangs"))
     assert "registry_cache_cleanup_failed" in caplog.text
     assert "database detail" not in caplog.text

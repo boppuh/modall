@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from modall.audit.types import AuditAction, ResourceType
 from modall.identity.repository import require_current_role
 from modall.identity.types import Role, WorkspaceContext
+from modall.persistence.database import register_after_rollback
 from modall.persistence.models import (
     AuditEvent,
     RegistryEntry,
@@ -64,6 +65,8 @@ _REGISTRY_LOGGER_NAMES = (
 _REGISTRY_LOG_LOCK = Lock()
 _REGISTRY_LOG_USERS = 0
 _SCANNER_PROCESS_CONTEXT = multiprocessing.get_context("spawn")
+_SCANNER_PROCESS_LIMIT = 4
+_SCANNER_PROCESS_SEMAPHORE = asyncio.Semaphore(_SCANNER_PROCESS_LIMIT)
 
 
 @contextmanager
@@ -110,6 +113,8 @@ class OfficialRegistryLimits:
     max_pages: int = 5
     max_items: int = 100
     max_response_bytes: int = 262_144
+    max_workspace_cache_rows: int = 100
+    max_workspace_cache_bytes: int = 4_194_304
     max_cursor_characters: int = 1024
     total_timeout_seconds: float = 5.0
     cache_ttl: timedelta = timedelta(hours=1)
@@ -120,6 +125,8 @@ class OfficialRegistryLimits:
             or self.max_pages <= 0
             or self.max_items <= 0
             or self.max_response_bytes <= 0
+            or self.max_workspace_cache_rows <= 0
+            or self.max_workspace_cache_bytes < self.max_response_bytes
             or self.max_cursor_characters <= 0
             or self.total_timeout_seconds <= 0
             or not math.isfinite(self.total_timeout_seconds)
@@ -323,6 +330,7 @@ class OfficialRegistryAdapter:
     async def search(self, query: str) -> tuple[OfficialRegistryItem, ...]:
         async with httpx.AsyncClient(
             transport=self._transport,
+            auth=None,
             trust_env=False,
             follow_redirects=False,
         ) as client:
@@ -357,7 +365,6 @@ class OfficialRegistryAdapter:
                     with _suppress_registry_request_logs():
                         response = await client.send(
                             request,
-                            auth=None,
                             follow_redirects=False,
                             stream=True,
                         )
@@ -446,6 +453,8 @@ class OfficialRegistryAdapter:
     async def parse_cached_items(self, values: object) -> tuple[OfficialRegistryItem, ...]:
         if not isinstance(values, list) or len(values) > self._limits.max_items:
             raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
+        if not _is_bounded_json(values):
+            raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT)
         await self._screen(values)
         return self._normalize_items(values)
 
@@ -623,9 +632,34 @@ class OfficialRegistryService:
             json.loads(_canonical_json([item.normalized_metadata for item in items])),
         )
         normalized_bytes = _canonical_json(normalized_results)
-        if len(normalized_bytes) > self._limits.max_response_bytes:
+        if len(normalized_bytes) > self._limits.max_response_bytes or not _is_bounded_json(
+            normalized_results
+        ):
             raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT)
         fetched_at = self._utc_now()
+        await require_current_role(
+            self._session,
+            context,
+            Role.ADMIN,
+            Role.OPERATOR,
+            serialize_workspace=True,
+        )
+        await _purge_expired_workspace_cache(
+            self._session, workspace_id=context.workspace_id, now=fetched_at
+        )
+        cache_usage = (
+            await self._session.execute(
+                select(
+                    func.count(RegistrySearchCache.id),
+                    func.coalesce(func.sum(RegistrySearchCache.byte_count), 0),
+                ).where(RegistrySearchCache.workspace_id == context.workspace_id)
+            )
+        ).one()
+        if (
+            cache_usage[0] >= self._limits.max_workspace_cache_rows
+            or cache_usage[1] + len(normalized_bytes) > self._limits.max_workspace_cache_bytes
+        ):
+            raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT)
         cache = RegistrySearchCache(
             workspace_id=context.workspace_id,
             provider=OFFICIAL_REGISTRY_PROVIDER,
@@ -683,6 +717,16 @@ class OfficialRegistryService:
         try:
             items = await self._adapter.parse_cached_items(cache.normalized_results)
         except OfficialRegistryError:
+
+            async def purge_after_rollback(cleanup_session: AsyncSession) -> None:
+                await cleanup_session.execute(
+                    delete(RegistrySearchCache).where(
+                        RegistrySearchCache.id == cache_id,
+                        RegistrySearchCache.workspace_id == context.workspace_id,
+                    )
+                )
+
+            register_after_rollback(self._session, purge_after_rollback)
             await self._session.delete(cache)
             await self._session.flush()
             raise
@@ -807,6 +851,7 @@ async def _run_scanner(
     timeout_seconds: float,
     timeout_code: OfficialRegistryFailureCode,
 ) -> bool:
+    permit_acquired = False
     receiver, sender = _SCANNER_PROCESS_CONTEXT.Pipe(duplex=False)
     process = _SCANNER_PROCESS_CONTEXT.Process(
         target=_scanner_process_main,
@@ -814,17 +859,19 @@ async def _run_scanner(
         daemon=True,
     )
     try:
-        process.start()
-        sender.close()
-        loop = asyncio.get_running_loop()
-        ready: asyncio.Future[None] = loop.create_future()
-
-        def mark_ready() -> None:
-            if not ready.done():
-                ready.set_result(None)
-
-        loop.add_reader(receiver.fileno(), mark_ready)
         async with asyncio.timeout(timeout_seconds):
+            await _SCANNER_PROCESS_SEMAPHORE.acquire()
+            permit_acquired = True
+            process.start()
+            sender.close()
+            loop = asyncio.get_running_loop()
+            ready: asyncio.Future[None] = loop.create_future()
+
+            def mark_ready() -> None:
+                if not ready.done():
+                    ready.set_result(None)
+
+            loop.add_reader(receiver.fileno(), mark_ready)
             await ready
         loop.remove_reader(receiver.fileno())
         try:
@@ -850,6 +897,8 @@ async def _run_scanner(
                 process.kill()
             process.join()
             process.close()
+        if permit_acquired:
+            _SCANNER_PROCESS_SEMAPHORE.release()
 
 
 async def purge_expired_registry_cache(
