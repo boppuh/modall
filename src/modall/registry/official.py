@@ -5,11 +5,13 @@ import hashlib
 import json
 import logging
 import math
+import multiprocessing
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from multiprocessing.connection import Connection
 from threading import Lock
 from typing import cast
 from urllib.parse import unquote
@@ -61,6 +63,7 @@ _REGISTRY_LOGGER_NAMES = (
 )
 _REGISTRY_LOG_LOCK = Lock()
 _REGISTRY_LOG_USERS = 0
+_SCANNER_PROCESS_CONTEXT = multiprocessing.get_context("spawn")
 
 
 @contextmanager
@@ -238,6 +241,19 @@ def _default_metadata_scanner(value: object) -> bool:
         ):
             return True
     return False
+
+
+def _scanner_process_main(scanner: Callable[[object], bool], value: object, sender: object) -> None:
+    """Run an untrusted scanner where the parent can forcibly stop it."""
+
+    connection = cast(Connection, sender)
+    try:
+        connection.send((True, bool(scanner(value))))
+    except BaseException:
+        with suppress(BrokenPipeError, EOFError, OSError):
+            connection.send((False, False))
+    finally:
+        connection.close()
 
 
 class OfficialRegistryAdapter:
@@ -571,6 +587,8 @@ class OfficialRegistryService:
             json.loads(_canonical_json([item.normalized_metadata for item in items])),
         )
         normalized_bytes = _canonical_json(normalized_results)
+        if len(normalized_bytes) > self._limits.max_response_bytes:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT)
         fetched_at = self._utc_now()
         cache = RegistrySearchCache(
             workspace_id=context.workspace_id,
@@ -750,15 +768,49 @@ async def _run_scanner(
     timeout_seconds: float,
     timeout_code: OfficialRegistryFailureCode,
 ) -> bool:
+    receiver, sender = _SCANNER_PROCESS_CONTEXT.Pipe(duplex=False)
+    process = _SCANNER_PROCESS_CONTEXT.Process(
+        target=_scanner_process_main,
+        args=(scanner, value, sender),
+        daemon=True,
+    )
     try:
+        process.start()
+        sender.close()
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future[None] = loop.create_future()
+
+        def mark_ready() -> None:
+            if not ready.done():
+                ready.set_result(None)
+
+        loop.add_reader(receiver.fileno(), mark_ready)
         async with asyncio.timeout(timeout_seconds):
-            return await asyncio.to_thread(scanner, value)
+            await ready
+        loop.remove_reader(receiver.fileno())
+        try:
+            succeeded, result = cast(tuple[bool, bool], receiver.recv())
+        except (EOFError, OSError, TypeError, ValueError) as exc:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from exc
+        if not succeeded:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED)
+        return result
     except TimeoutError as exc:
         raise OfficialRegistryError(timeout_code) from exc
     except OfficialRegistryError:
         raise
     except Exception as exc:
         raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from exc
+    finally:
+        if "loop" in locals() and "ready" in locals():
+            loop.remove_reader(receiver.fileno())
+        sender.close()
+        receiver.close()
+        if process.pid is not None:
+            if process.is_alive():
+                process.kill()
+            process.join()
+            process.close()
 
 
 async def purge_expired_registry_cache(
