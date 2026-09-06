@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from multiprocessing.connection import Connection
 from multiprocessing.context import SpawnProcess
+from multiprocessing.reduction import ForkingPickler
 from threading import Lock
 from typing import cast
 from urllib.parse import unquote
@@ -69,6 +70,7 @@ _REGISTRY_LOG_LOCK = Lock()
 _REGISTRY_LOG_USERS = 0
 _SCANNER_PROCESS_CONTEXT = multiprocessing.get_context("spawn")
 _SCANNER_PROCESS_LIMIT = 4
+_CACHE_CLEANUP_BATCH_SIZE = 500
 
 
 def _scanner_process_semaphore() -> asyncio.Semaphore:
@@ -346,7 +348,12 @@ class _BorrowedAsyncTransport(httpx.AsyncBaseTransport):
 
 
 class OfficialRegistryAdapter:
-    """One fixed-origin, no-redirect adapter for the public Registry API."""
+    """One fixed-origin, no-redirect adapter for the public Registry API.
+
+    Scanner callables cross a spawned-process boundary and must therefore be
+    importable and picklable. Invalid scanner configuration fails at startup,
+    before a request can be admitted.
+    """
 
     def __init__(
         self,
@@ -356,6 +363,8 @@ class OfficialRegistryAdapter:
         query_scanner: Callable[[object], bool] = _default_metadata_scanner,
         metadata_scanner: Callable[[object], bool] = _default_metadata_scanner,
     ) -> None:
+        _require_picklable_scanner(query_scanner)
+        _require_picklable_scanner(metadata_scanner)
         self._transport = transport
         self._limits = limits or OfficialRegistryLimits()
         self._query_scanner = query_scanner
@@ -688,6 +697,7 @@ class OfficialRegistryService:
             workspace_id=context.workspace_id,
             now=fetched_at,
             cache_ttl=self._limits.cache_ttl,
+            max_response_bytes=self._limits.max_response_bytes,
         )
         cached_result, rejected_cache = await self._read_cache(
             context=context, query_digest=query_digest, now=fetched_at
@@ -782,6 +792,7 @@ class OfficialRegistryService:
             workspace_id=context.workspace_id,
             now=now,
             cache_ttl=self._limits.cache_ttl,
+            max_response_bytes=self._limits.max_response_bytes,
         )
         cache = await self._session.scalar(
             select(RegistrySearchCache).where(
@@ -938,6 +949,13 @@ async def _screen_query(
     return normalized
 
 
+def _require_picklable_scanner(scanner: Callable[[object], bool]) -> None:
+    try:
+        ForkingPickler.dumps(scanner)
+    except Exception:
+        raise ValueError("official Registry scanners must be importable and picklable") from None
+
+
 async def _flush_registry_payload(session: AsyncSession) -> bool:
     try:
         await session.flush()
@@ -1013,15 +1031,27 @@ async def _run_scanner(
 
 
 async def purge_expired_registry_cache(
-    session: AsyncSession, *, now: datetime | None = None
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    batch_size: int = _CACHE_CLEANUP_BATCH_SIZE,
 ) -> None:
-    """Delete expired public catalog cache rows across all workspaces."""
+    """Delete one bounded batch of expired public catalog cache rows."""
 
     cutoff = now or datetime.now(UTC)
     if cutoff.tzinfo is None or cutoff.utcoffset() is None:
         raise ValueError("official Registry cleanup clock must be timezone-aware")
+    if batch_size <= 0 or batch_size > _CACHE_CLEANUP_BATCH_SIZE:
+        raise ValueError("official Registry cleanup batch size is out of bounds")
+    expired_ids = (
+        select(RegistrySearchCache.id)
+        .where(RegistrySearchCache.expires_at <= cutoff.astimezone(UTC))
+        .order_by(RegistrySearchCache.expires_at, RegistrySearchCache.id)
+        .limit(batch_size)
+        .with_for_update(skip_locked=True)
+    )
     await session.execute(
-        delete(RegistrySearchCache).where(RegistrySearchCache.expires_at <= cutoff.astimezone(UTC))
+        delete(RegistrySearchCache).where(RegistrySearchCache.id.in_(expired_ids))
     )
 
 
@@ -1031,10 +1061,13 @@ async def _purge_expired_workspace_cache(
     workspace_id: UUID,
     now: datetime,
     cache_ttl: timedelta | None = None,
+    max_response_bytes: int | None = None,
 ) -> None:
     expiry_predicates = [RegistrySearchCache.expires_at <= now]
     if cache_ttl is not None:
         expiry_predicates.append(RegistrySearchCache.fetched_at <= now - cache_ttl)
+    if max_response_bytes is not None:
+        expiry_predicates.append(RegistrySearchCache.byte_count > max_response_bytes)
     await session.execute(
         delete(RegistrySearchCache).where(
             RegistrySearchCache.workspace_id == workspace_id,

@@ -510,6 +510,56 @@ def test_limit_configuration_rejects_nonpositive_and_overlong_cache_ttl() -> Non
             OfficialRegistryLimits(total_timeout_seconds=timeout)
 
 
+def test_adapter_rejects_non_picklable_scanners_at_construction() -> None:
+    scanner = lambda value: bool(value)  # noqa: E731
+    with pytest.raises(ValueError, match="importable and picklable"):
+        OfficialRegistryAdapter(query_scanner=scanner)
+    with pytest.raises(ValueError, match="importable and picklable"):
+        OfficialRegistryAdapter(metadata_scanner=scanner)
+
+
+def test_global_cache_cleanup_deletes_bounded_batches() -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={"servers": [], "metadata": {"count": 0}},
+                request=request,
+            )
+
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="bounded-cleanup")
+            adapter = OfficialRegistryAdapter(transport=httpx.MockTransport(handler))
+            for query in ("first", "second", "third"):
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                    await OfficialRegistryService(session, adapter, now=lambda: now).search(
+                        context=context, query=query
+                    )
+
+            async with transaction(factory) as session:
+                await purge_expired_registry_cache(
+                    session, now=now + timedelta(hours=1), batch_size=2
+                )
+                assert (
+                    await session.scalar(select(func.count()).select_from(RegistrySearchCache)) == 1
+                )
+            async with transaction(factory) as session:
+                await purge_expired_registry_cache(
+                    session, now=now + timedelta(hours=1), batch_size=2
+                )
+                assert (
+                    await session.scalar(select(func.count()).select_from(RegistrySearchCache)) == 0
+                )
+                with pytest.raises(ValueError, match="batch size"):
+                    await purge_expired_registry_cache(session, batch_size=0)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     ("responder", "expected_code"),
     [
@@ -1319,6 +1369,13 @@ def test_cache_reuse_and_import_respect_a_stricter_rolling_byte_policy() -> None
         async def handler(request: httpx.Request) -> httpx.Response:
             nonlocal calls
             calls += 1
+            if calls >= 3:
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "application/json"},
+                    json={"servers": [], "metadata": {"count": 0}},
+                    request=request,
+                )
             if "cursor" in request.url.params:
                 return httpx.Response(
                     200,
@@ -1340,15 +1397,15 @@ def test_cache_reuse_and_import_respect_a_stricter_rolling_byte_policy() -> None
                     assert cache is not None
                     assert cache.byte_count > 100
 
-                strict = OfficialRegistryLimits(max_response_bytes=100)
+                strict = OfficialRegistryLimits(max_response_bytes=100, max_workspace_cache_rows=1)
                 async with transaction(factory) as session:
                     context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
                     service = OfficialRegistryService(
                         session, OfficialRegistryAdapter(transport=client._transport, limits=strict)
                     )
-                    with pytest.raises(OfficialRegistryError) as limited:
-                        await service.search(context=context, query="inference")
-                    assert limited.value.code == OfficialRegistryFailureCode.RESPONSE_LIMIT
+                    replacement = await service.search(context=context, query="inference")
+                    assert replacement.from_cache is False
+                    assert replacement.cache_id != original.cache_id
                     with pytest.raises(OfficialRegistryError) as import_miss:
                         await service.import_cached(
                             context=context,
@@ -1356,7 +1413,7 @@ def test_cache_reuse_and_import_respect_a_stricter_rolling_byte_policy() -> None
                             provenance_digest=original.items[0].provenance_digest,
                         )
                     assert import_miss.value.code == OfficialRegistryFailureCode.CACHE_MISS
-                    assert await session.get(RegistrySearchCache, original.cache_id) is not None
+                    assert await session.get(RegistrySearchCache, original.cache_id) is None
                 assert calls == 3
 
     asyncio.run(scenario())
