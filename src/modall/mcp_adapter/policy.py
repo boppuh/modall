@@ -246,6 +246,7 @@ class LimitedByteStream(httpx.AsyncByteStream):
         self._mark_jsonrpc_error = mark_jsonrpc_error
         self._expected_response_id = expected_response_id
         self._response_marked = False
+        self._pending_sensitive_response = False
         self._forbidden_matcher = _IncrementalByteMatcher(forbidden_values)
         self._decoded_forbidden_matcher = _IncrementalByteMatcher(forbidden_values)
         self._escape_decoder = _IncrementalJsonEscapeDecoder()
@@ -259,43 +260,42 @@ class LimitedByteStream(httpx.AsyncByteStream):
             self._budget.consume(len(chunk))
             decoded_chunk = self._escape_decoder.feed(chunk)
             generic_window = self._generic_tail + decoded_chunk
+            self._generic_tail = generic_window[-256:]
+            self._structured_buffer.extend(chunk)
+            if not self._buffer_json_document:
+                self._screen_completed_sse_events()
             if (
                 self._forbidden_matcher.feed(chunk)
                 or self._decoded_forbidden_matcher.feed(decoded_chunk)
                 or contains_obvious_secret(generic_window.decode("utf-8", errors="ignore"))
             ):
-                self._reject_sensitive_body()
-            self._generic_tail = generic_window[-256:]
-            self._structured_buffer.extend(chunk)
+                self._mark_sensitive_response()
+                self._pending_sensitive_response = True
             if self._buffer_json_document:
                 continue
-            self._screen_completed_sse_events()
             yield chunk
         decoded_tail = self._escape_decoder.finish()
         if self._decoded_forbidden_matcher.feed(decoded_tail) or contains_obvious_secret(
             (self._generic_tail + decoded_tail).decode("utf-8", errors="ignore")
         ):
-            self._reject_sensitive_body()
+            self._mark_sensitive_response()
+            self._pending_sensitive_response = True
         if self._buffer_json_document:
             body = bytes(self._structured_buffer)
-            if _contains_sensitive_json_document(body):
-                self._reject_sensitive_body()
-            if body:
-                yield body
-        elif self._structured_buffer and _contains_sensitive_sse_event(
-            bytes(self._structured_buffer)
-        ):
-            self._reject_sensitive_body()
-        # EOF proves a bounded JSON document was received. For SSE, only a
-        # completed event carrying the matching JSON-RPC id proves that the
-        # invocation outcome is definitive; a closed response-less stream is
-        # still indeterminate.
-        if self._buffer_json_document:
             response = _jsonrpc_response(body, self._expected_response_id)
             if response is None or response[0]:
                 self._mark_complete_once()
                 if response is not None and response[1]:
                     self._mark_jsonrpc_error()
+            if self._pending_sensitive_response or _contains_sensitive_json_document(body):
+                self._reject_sensitive_body()
+            if body:
+                yield body
+        elif self._pending_sensitive_response or (
+            self._structured_buffer
+            and _contains_sensitive_sse_event(bytes(self._structured_buffer))
+        ):
+            self._reject_sensitive_body()
 
     def _screen_completed_sse_events(self) -> None:
         consumed = 0
@@ -305,13 +305,13 @@ class LimitedByteStream(httpx.AsyncByteStream):
             event = bytes(self._structured_buffer[consumed : match.start()])
             consumed = match.end()
             self._sse_scan_from = consumed
-            if _contains_sensitive_sse_event(event):
-                self._reject_sensitive_body()
             is_response, is_error = _sse_jsonrpc_response(event, self._expected_response_id)
             if is_response:
                 self._mark_complete_once()
                 if is_error:
                     self._mark_jsonrpc_error()
+            if self._pending_sensitive_response or _contains_sensitive_sse_event(event):
+                self._reject_sensitive_body()
         if consumed:
             del self._structured_buffer[:consumed]
         self._sse_scan_from = max(0, len(self._structured_buffer) - 3)

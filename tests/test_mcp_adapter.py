@@ -361,6 +361,20 @@ def test_adapter_invokes_once_between_fences_and_normalizes_safe_results() -> No
             )
         assert incomplete.value.dispatched is True
 
+        for profile in ("sensitive-complete-call", "sensitive-complete-sse-call"):
+            sensitive_complete, sensitive_complete_endpoint = adapter_for(profile)
+            with pytest.raises(InvocationError) as complete:
+                await sensitive_complete.invoke(
+                    sensitive_complete_endpoint,
+                    tool_name="status",
+                    arguments={},
+                    output_schema=None,
+                    before_session=session_fence,
+                    before_dispatch=dispatch_fence,
+                )
+            assert type(complete.value) is InvocationError
+            assert complete.value.code == InvocationFailureCode.SENSITIVE_RESULT
+
         teardown, teardown_endpoint = adapter_for(
             "teardown-timeout", limits=TransportLimits(read_seconds=0.2, total_seconds=0.05)
         )

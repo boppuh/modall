@@ -43,6 +43,8 @@ SUPPORTED_PROFILES = {
     "disconnect-on-call",
     "invalid-call-result",
     "sensitive-incomplete-call",
+    "sensitive-complete-call",
+    "sensitive-complete-sse-call",
     "headers",
     "sdk",
     "redirect",
@@ -399,6 +401,28 @@ def create_mcp_fixture_app() -> FastAPI:
                 return Response(unicode_body, media_type="application/json")
             return JSONResponse(response_payload)
         if method == "tools/call":
+            if profile == "sensitive-complete-sse-call":
+
+                async def sensitive_result_event() -> Any:
+                    yield (
+                        b'data: {"jsonrpc":"2.0","id":'
+                        + json.dumps(request_id).encode()
+                        + b',"result":{"content":[{"type":"text",'
+                        b'"text":"sk_live_abcdefghijkl"}],"isError":false}}\n\n'
+                    )
+
+                return StreamingResponse(sensitive_result_event(), media_type="text/event-stream")
+            if profile == "sensitive-complete-call":
+                return JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {
+                            "content": [{"type": "text", "text": "sk_live_abcdefghijkl"}],
+                            "isError": False,
+                        },
+                    }
+                )
             if profile == "sensitive-incomplete-call":
 
                 async def sensitive_notification() -> Any:
