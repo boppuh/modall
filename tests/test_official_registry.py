@@ -201,6 +201,10 @@ def test_search_cache_and_import_preserve_provenance_without_connection_trust() 
     ("query", "expected_code"),
     [
         ("token=AbCdEfGhIjKlMnOpQrStUvWx", OfficialRegistryFailureCode.UNSAFE_QUERY),
+        (
+            "token%2525253DAbCdEfGhIjKlMnOpQrStUvWx",
+            OfficialRegistryFailureCode.UNSAFE_QUERY,
+        ),
         ("\x00weather", OfficialRegistryFailureCode.INVALID_QUERY),
         ("x" * 257, OfficialRegistryFailureCode.INVALID_QUERY),
     ],
@@ -243,7 +247,9 @@ def test_scanner_failure_and_unsafe_metadata_write_no_cache() -> None:
             nonlocal calls
             calls += 1
             payload = json.loads((FIXTURES / "search_page_1.json").read_text())
-            payload["servers"][0]["server"]["description"] = "token=AbCdEfGhIjKlMnOpQrStUvWx"
+            payload["servers"][0]["server"]["description"] = (
+                "token%2525253DAbCdEfGhIjKlMnOpQrStUvWx"
+            )
             return httpx.Response(
                 200,
                 headers={"Content-Type": "application/json"},
@@ -403,6 +409,9 @@ def test_limit_configuration_rejects_nonpositive_and_overlong_cache_ttl() -> Non
         OfficialRegistryLimits(max_pages=0)
     with pytest.raises(ValueError):
         OfficialRegistryLimits(cache_ttl=timedelta(hours=1, microseconds=1))
+    for timeout in (float("inf"), float("nan")):
+        with pytest.raises(ValueError):
+            OfficialRegistryLimits(total_timeout_seconds=timeout)
 
 
 @pytest.mark.parametrize(
@@ -618,6 +627,7 @@ def test_registry_request_strips_ambient_credentials_and_suppresses_query_logs(
         async def handler(request: httpx.Request) -> httpx.Response:
             assert "Authorization" not in request.headers
             assert "Cookie" not in request.headers
+            logging.getLogger("httpx").info("unrelated outbound request")
             return httpx.Response(
                 200,
                 headers={"Content-Type": "application/json"},
@@ -636,6 +646,7 @@ def test_registry_request_strips_ambient_credentials_and_suppresses_query_logs(
     asyncio.run(scenario())
     assert "private operator search" not in caplog.text
     assert "ambient-secret" not in caplog.text
+    assert "unrelated outbound request" in caplog.text
 
 
 def test_scanning_runs_off_loop_under_the_configured_deadline() -> None:

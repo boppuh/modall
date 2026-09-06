@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -42,12 +43,22 @@ OFFICIAL_REGISTRY_SERVERS_URL = "https://registry.modelcontextprotocol.io/v0.1/s
 
 class _SuppressRegistryRequestLogs(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        del record
-        return False
+        try:
+            message = record.getMessage()
+        except Exception:
+            return False
+        return "registry.modelcontextprotocol.io" not in message and "/v0.1/servers?" not in message
 
 
 _REGISTRY_LOG_FILTER = _SuppressRegistryRequestLogs()
-_REGISTRY_LOGGER_NAMES = ("httpx", "httpcore")
+_REGISTRY_LOGGER_NAMES = (
+    "httpx",
+    "httpcore",
+    "httpcore.connection",
+    "httpcore.http11",
+    "httpcore.http2",
+    "httpcore.proxy",
+)
 _REGISTRY_LOG_LOCK = Lock()
 _REGISTRY_LOG_USERS = 0
 
@@ -108,6 +119,7 @@ class OfficialRegistryLimits:
             or self.max_response_bytes <= 0
             or self.max_cursor_characters <= 0
             or self.total_timeout_seconds <= 0
+            or not math.isfinite(self.total_timeout_seconds)
             or self.cache_ttl <= timedelta(0)
             or self.cache_ttl > timedelta(hours=1)
         ):
@@ -171,15 +183,14 @@ def _digest(value: object) -> str:
 
 def _decoded(value: str) -> str:
     decoded = value
-    for _ in range(3):
+    while True:
         try:
             next_value = unquote(decoded, errors="strict")
         except UnicodeError as exc:
             raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from exc
         if next_value == decoded:
-            break
+            return decoded
         decoded = next_value
-    return decoded
 
 
 def _decoded_metadata(value: object) -> object:

@@ -48,11 +48,6 @@ def upgrade() -> None:
         ["id"],
         ondelete="RESTRICT",
     )
-    op.create_unique_constraint(
-        "uq_registry_entry_version_provenance",
-        "registry_entry_versions",
-        ["registry_entry_id", "provenance_digest"],
-    )
     op.create_table(
         "registry_search_cache",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -74,16 +69,15 @@ def upgrade() -> None:
         "registry_search_cache",
         ["workspace_id", "provider", "query_digest", "expires_at"],
     )
+    op.create_index("ix_registry_search_cache_expiry", "registry_search_cache", ["expires_at"])
 
 
 def downgrade() -> None:
+    op.drop_index("ix_registry_search_cache_expiry", table_name="registry_search_cache")
     op.drop_index("ix_registry_search_cache_lookup", table_name="registry_search_cache")
     op.drop_table("registry_search_cache")
     op.drop_constraint(
         "fk_registry_entry_version_imported_by", "registry_entry_versions", type_="foreignkey"
-    )
-    op.drop_constraint(
-        "uq_registry_entry_version_provenance", "registry_entry_versions", type_="unique"
     )
     op.drop_column("registry_entry_versions", "imported_by_user_id")
     op.drop_column("registry_entry_versions", "normalized_metadata")

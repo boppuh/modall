@@ -187,7 +187,6 @@ class RegistryEntryVersion(Base):
         UniqueConstraint("workspace_id", "id"),
         UniqueConstraint("registry_entry_id", "id"),
         UniqueConstraint("registry_entry_id", "sequence"),
-        UniqueConstraint("registry_entry_id", "provenance_digest"),
     )
 
     id: Mapped[UuidPrimaryKey]
@@ -218,6 +217,7 @@ class RegistrySearchCache(Base):
             "query_digest",
             "expires_at",
         ),
+        Index("ix_registry_search_cache_expiry", "expires_at"),
     )
 
     id: Mapped[UuidPrimaryKey]
