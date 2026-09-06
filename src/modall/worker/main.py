@@ -12,8 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from modall.config import Settings, get_settings
 from modall.execution.runner import ExecutionServiceFactory, InvocationRunner
+from modall.execution.runtime import build_execution_keyrings
 from modall.execution.service import ExecutionService
-from modall.execution.types import ExecutionLimits, HmacKeyVersion
+from modall.execution.types import ExecutionLimits
 from modall.mcp_adapter.client import McpClientAdapter
 from modall.mcp_adapter.policy import EndpointPolicy, TransportLimits
 from modall.persistence.database import (
@@ -23,10 +24,8 @@ from modall.persistence.database import (
     transaction,
 )
 from modall.registry.official import purge_expired_registry_cache
-from modall.secrets.provider import SecretProvider, SecretReference, build_secret_provider
+from modall.secrets.provider import build_secret_provider
 
-_CONFIRMATION_KEY_REFERENCE = "system-confirmation-hmac"
-_IDEMPOTENCY_KEY_REFERENCE = "system-idempotency-hmac"
 _INVOCATION_PROTOCOL_OVERHEAD_BYTES = 65_536
 _MAX_JSON_ESCAPE_EXPANSION = 6
 
@@ -120,37 +119,8 @@ def build_execution_runtime(
 ) -> tuple[InvocationRunner, ExecutionServiceFactory]:
     """Build one worker-scoped invocation runtime from secret-backed keyrings."""
 
-    fixture_values: dict[tuple[str, str], bytes] | None = None
-    if settings.environment in {"local", "test"} and settings.secret_provider == "fixture":
-        fixture_values = {
-            (
-                _CONFIRMATION_KEY_REFERENCE,
-                version,
-            ): f"local-confirmation-{version}-key-material".encode()
-            for version in settings.confirmation_hmac_key_versions
-        }
-        fixture_values.update(
-            {
-                (
-                    _IDEMPOTENCY_KEY_REFERENCE,
-                    version,
-                ): f"local-idempotency-{version}-key-material".encode()
-                for version in settings.idempotency_hmac_key_versions
-            }
-        )
-    secret_provider = build_secret_provider(settings, fixture_values=fixture_values)
-    confirmation_keys = _load_keyring(
-        secret_provider,
-        settings.secret_provider,
-        _CONFIRMATION_KEY_REFERENCE,
-        settings.confirmation_hmac_key_versions,
-    )
-    idempotency_keys = _load_keyring(
-        secret_provider,
-        settings.secret_provider,
-        _IDEMPOTENCY_KEY_REFERENCE,
-        settings.idempotency_hmac_key_versions,
-    )
+    secret_provider = build_secret_provider(settings)
+    confirmation_keys, idempotency_keys = build_execution_keyrings(settings)
     limits = ExecutionLimits()
 
     def execution_service_factory(session: AsyncSession) -> ExecutionService:
@@ -192,27 +162,6 @@ def _invocation_transport_limits(limits: ExecutionLimits) -> TransportLimits:
             + _INVOCATION_PROTOCOL_OVERHEAD_BYTES
         )
     )
-
-
-def _load_keyring(
-    provider: SecretProvider,
-    provider_name: str,
-    reference: str,
-    versions: tuple[str, ...],
-) -> tuple[HmacKeyVersion, ...]:
-    keys: list[HmacKeyVersion] = []
-    for version in versions:
-        with provider.retrieve(
-            SecretReference(
-                provider=provider_name,
-                external_reference=reference,
-                version=version,
-            )
-        ) as secret:
-            if len(secret) < 32:
-                raise ValueError("HMAC key material is too short")
-            keys.append(HmacKeyVersion(version=version, secret=bytes(secret)))
-    return tuple(keys)
 
 
 def run() -> None:
