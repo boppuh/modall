@@ -694,6 +694,9 @@ def test_concurrent_workers_claim_each_job_once() -> None:
         now = datetime(2026, 9, 6, tzinfo=UTC)
         try:
             async with transaction(factory) as session:
+                # Worker selection is installation-wide, so isolate the queue from
+                # runs intentionally retained by earlier integration tests.
+                await session.execute(delete(Run))
                 identity = IdentityService(session)
                 operator = await identity.resolve_user(
                     Principal("issuer", f"execution-claims-{suffix}", None)
