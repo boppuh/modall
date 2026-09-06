@@ -61,6 +61,7 @@ function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
     listConnections: vi.fn().mockResolvedValue([connection]),
     getConnection: vi.fn().mockResolvedValue({ ...connection, versions: [{ id: versionId, sequence: 1, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http", created_at: timestamp }], versions_truncated: false }),
     createConnection: vi.fn().mockResolvedValue(connection),
+    appendConnectionVersion: vi.fn().mockResolvedValue({ id: versionId, sequence: 2, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http", created_at: timestamp }),
     connectionAction: vi.fn().mockResolvedValue(undefined),
     searchRegistry: vi.fn().mockResolvedValue({ cache_id: connectionId, fetched_at: timestamp, expires_at: timestamp, from_cache: false, items: [{ external_id: "io.modall/search", source_version: "1.2.0", name: "Public search", description: "Search public records", advertised_urls: ["https://mcp.example/tools"], provenance_digest: "a".repeat(64) }] }),
     importRegistry: vi.fn().mockResolvedValue({ id: connectionId, source: "official", external_id: "io.modall/search", current_version_id: versionId, name: "Public search", description: "Search public records", created_at: timestamp }),
@@ -78,12 +79,13 @@ function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
   };
 }
 
-function renderApp(api: ControlPlane, authenticated = true) {
+function renderApp(api: ControlPlane, authenticated = true, role: WorkspaceSession["role"] = "admin") {
   if (authenticated) {
     const session: WorkspaceSession = {
       identityId: "pilot-reviewer",
       workspaceId,
       workspaceLabel: "iOS pilot",
+      role,
     };
     saveSession(session);
   }
@@ -98,6 +100,7 @@ function renderApp(api: ControlPlane, authenticated = true) {
 describe("App", () => {
   beforeEach(() => {
     localStorage.clear();
+    window.history.replaceState({}, "", "/");
     vi.restoreAllMocks();
   });
 
@@ -178,7 +181,7 @@ describe("App", () => {
     expect(await screen.findByText("Search public records")).toBeTruthy();
     expect(screen.getByText(/"type": "object"/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Disable version" }));
-    await waitFor(() => expect(api.capabilityAction).toHaveBeenCalledWith(versionId, "disable"));
+    await waitFor(() => expect(api.capabilityAction).toHaveBeenCalledWith(versionId, "disable", expect.any(String)));
   });
 
   it("preflights, confirms, follows, and cancels a run", async () => {
@@ -187,6 +190,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Runs$/ }));
     expect(await screen.findByRole("heading", { name: "Runs" })).toBeTruthy();
 
+    await screen.findByRole("option", { name: "tools/search" });
     fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
     fireEvent.change(screen.getByLabelText("Arguments"), { target: { value: "[]" } });
     fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
@@ -201,7 +205,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Execution timeline" })).toBeTruthy();
     expect(screen.getByText("admitted")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Request cancellation" }));
-    await waitFor(() => expect(api.cancelRun).toHaveBeenCalledWith(runId));
+    await waitFor(() => expect(api.cancelRun).toHaveBeenCalledWith(runId, expect.any(String)));
   });
 
   it("renders useful empty and failure states", async () => {
@@ -224,5 +228,88 @@ describe("App", () => {
     renderApp(empty);
     expect(await screen.findByText("No servers connected")).toBeTruthy();
     expect(screen.getAllByText("00")).toHaveLength(3);
+  });
+
+  it("keeps selections in browser history and restores deep links", async () => {
+    window.history.replaceState({}, "", `/runs/${runId}`);
+    const api = fakeApi();
+    renderApp(api);
+    expect(await screen.findByRole("heading", { name: "Execution timeline" })).toBeTruthy();
+    expect(window.location.pathname).toBe(`/runs/${runId}`);
+
+    window.history.pushState({}, "", `/capabilities/${capabilityId}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(await screen.findByText("Search public records")).toBeTruthy();
+  });
+
+  it("makes viewer sessions read-only", async () => {
+    const api = fakeApi();
+    renderApp(api, true, "viewer");
+    fireEvent.click(screen.getByRole("button", { name: /Registry/ }));
+    expect(await screen.findByRole("heading", { name: "Server registry" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Add manually" })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Disable" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
+    expect(await screen.findByRole("button", { name: "Disable version" })).toHaveProperty("disabled", true);
+
+    fireEvent.click(screen.getByRole("button", { name: /Runs$/ }));
+    expect(await screen.findByRole("button", { name: "Review invocation" })).toHaveProperty("disabled", true);
+    fireEvent.click(await screen.findByRole("button", { name: /55555555/ }));
+    expect(await screen.findByRole("heading", { name: "Execution timeline" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Request cancellation" })).toBeNull();
+  });
+
+  it("hides refresh on disabled connections and reserves re-enable for admins", async () => {
+    const disabled = { ...connection, lifecycle: "disabled" as const };
+    const api = fakeApi({
+      listConnections: vi.fn().mockResolvedValue([disabled]),
+      getConnection: vi.fn().mockResolvedValue({ ...disabled, versions: [], versions_truncated: false }),
+    });
+    renderApp(api);
+    fireEvent.click(screen.getByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    expect(await screen.findByRole("button", { name: "Re-enable" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull();
+  });
+
+  it("applies operator and immutable-version action boundaries", async () => {
+    const historicalId = "66666666-6666-4666-8666-666666666666";
+    const api = fakeApi({
+      getCapability: vi.fn().mockResolvedValue({
+        ...capability,
+        versions: [
+          { id: versionId, capability_id: capabilityId, sequence: 2, display_name: "Search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp },
+          { id: historicalId, capability_id: capabilityId, sequence: 1, display_name: "Old search", description: null, input_schema: {}, output_schema: null, metadata_digest: "d".repeat(64), schema_supported: true, created_at: timestamp },
+        ],
+        versions_truncated: false,
+      }),
+    });
+    renderApp(api, true, "operator");
+    fireEvent.click(screen.getByRole("button", { name: /Registry/ }));
+    expect(await screen.findByRole("heading", { name: "Server registry" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Add manually" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Registry search"), { target: { value: "search" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    expect(await screen.findByRole("button", { name: "Import" })).toHaveProperty("disabled", false);
+
+    fireEvent.click(screen.getByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
+    expect(await screen.findByRole("button", { name: "Historical version" })).toHaveProperty("disabled", true);
+  });
+
+  it("requires a fresh preflight after a definitive confirmation failure", async () => {
+    const api = fakeApi({ createRun: vi.fn().mockRejectedValue(new ApiFailure("confirmation_expired", "Confirmation expired.")) });
+    renderApp(api);
+    fireEvent.click(screen.getByRole("button", { name: /Runs$/ }));
+    await screen.findByRole("option", { name: "tools/search" });
+    fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
+    fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm and run" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Run preflight again");
+    expect(screen.queryByRole("heading", { name: "Confirm exact invocation" })).toBeNull();
   });
 });

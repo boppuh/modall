@@ -1,4 +1,4 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -46,7 +46,27 @@ function shortId(value: string): string {
 }
 
 function terminal(status: string): boolean {
-  return ["succeeded", "failed", "cancelled", "expired"].includes(status);
+  return ["succeeded", "failed", "cancelled", "timed_out", "indeterminate"].includes(status);
+}
+
+function mutationId(): string { return crypto.randomUUID(); }
+function canOperate(role: WorkspaceSession["role"]): boolean { return role !== "viewer"; }
+function isAdmin(role: WorkspaceSession["role"]): boolean { return role === "admin"; }
+
+type Route = { view: View; selectedId: string | null };
+function readRoute(): Route {
+  const parts = window.location.pathname.split("/").filter(Boolean);
+  if (parts[0] === "connections") return { view: "registry", selectedId: parts[1] ?? null };
+  if (parts[0] === "capabilities") return { view: "capabilities", selectedId: parts[1] ?? null };
+  if (parts[0] === "runs") return { view: "runs", selectedId: parts[1] ?? null };
+  if (parts[0] === "registry") return { view: "registry", selectedId: null };
+  return { view: "overview", selectedId: null };
+}
+
+function routePath(view: View, selectedId: string | null = null): string {
+  if (view === "overview") return "/";
+  if (view === "registry") return selectedId ? `/connections/${selectedId}` : "/registry";
+  return selectedId ? `/${view}/${selectedId}` : `/${view}`;
 }
 
 function failureMessage(error: unknown): string {
@@ -72,6 +92,7 @@ function SignIn({ onSignIn }: { onSignIn: (session: WorkspaceSession) => void })
   const [workspaceId, setWorkspaceId] = useState(configuredWorkspace ?? "");
   const [workspaceLabel, setWorkspaceLabel] = useState("Pilot workspace");
   const [accessToken, setAccessToken] = useState("");
+  const [role, setRole] = useState<WorkspaceSession["role"]>("admin");
   const [error, setError] = useState("");
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -84,6 +105,7 @@ function SignIn({ onSignIn }: { onSignIn: (session: WorkspaceSession) => void })
       identityId: newIdentityId(),
       workspaceId: workspaceId.trim(),
       workspaceLabel: workspaceLabel.trim() || "Workspace",
+      role,
       ...(accessToken.trim() ? { accessToken: accessToken.trim() } : {}),
     };
     saveSession(session);
@@ -111,6 +133,12 @@ function SignIn({ onSignIn }: { onSignIn: (session: WorkspaceSession) => void })
           <p>Use the identifier from the workspace bootstrap output.</p>
         </div>
         <form onSubmit={submit} noValidate>
+          <label>
+            Pilot role
+            <select value={role} onChange={(event) => setRole(event.target.value as WorkspaceSession["role"])}>
+              <option value="admin">Admin</option><option value="operator">Operator</option><option value="viewer">Viewer</option>
+            </select>
+          </label>
           <label>
             Workspace label
             <input
@@ -285,22 +313,30 @@ function Overview({ api, open, scope }: { api: ControlPlane; open: (view: View) 
   );
 }
 
-function Registry({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
+function Registry({ api, scope, role, selectedId, select }: { api: ControlPlane; scope: QueryScope; role: WorkspaceSession["role"]; selectedId: string | null; select: (id: string | null) => void }) {
   const queryClient = useQueryClient();
+  const mutationKeys = useRef(new Map<string, string>());
+  const keyFor = (operation: string) => {
+    const existing = mutationKeys.current.get(operation);
+    if (existing) return existing;
+    const key = mutationId(); mutationKeys.current.set(operation, key); return key;
+  };
   const connections = useQuery({
     queryKey: queryKey(scope, "connections"),
     queryFn: () => api.listConnections(),
+    refetchInterval: selectedId ? 5000 : false,
   });
   const entries = useQuery({ queryKey: queryKey(scope, "registry-entries"), queryFn: () => api.listRegistryEntries() });
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const detail = useQuery({
     queryKey: queryKey(scope, "connection", selectedId),
     queryFn: () => api.getConnection(selectedId as string),
     enabled: selectedId !== null,
+    refetchInterval: selectedId ? 2000 : false,
   });
   const [searchResult, setSearchResult] = useState<RegistrySearch | null>(null);
   const search = useMutation({
     mutationFn: (query: string) => api.searchRegistry(query),
+    onMutate: () => setSearchResult(null),
     onSuccess: setSearchResult,
   });
   const refreshLists = () =>
@@ -310,24 +346,35 @@ function Registry({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
       queryClient.invalidateQueries({ queryKey: queryKey(scope, "overview") }),
     ]);
   const create = useMutation({
-    mutationFn: (input: { name: string; endpointUrl: string }) => api.createConnection(input),
-    onSuccess: async (created) => {
-      setSelectedId(created.id);
+    mutationFn: ({ input, key }: { input: { name: string; endpointUrl: string; secretBindingId?: string }; key: string; operation: string }) => api.createConnection(input, key),
+    onSuccess: async (created, variables) => {
+      mutationKeys.current.delete(variables.operation);
+      select(created.id);
       await refreshLists();
     },
   });
   const action = useMutation({
-    mutationFn: ({ id, verb }: { id: string; verb: "verify" | "refresh" | "enable" | "disable" }) =>
-      api.connectionAction(id, verb),
-    onSuccess: async () => {
+    mutationFn: ({ id, verb, key }: { id: string; verb: "verify" | "refresh" | "enable" | "disable"; key: string }) =>
+      api.connectionAction(id, verb, key),
+    onSuccess: async (_data, variables) => {
+      mutationKeys.current.delete(`connection:${variables.id}:${variables.verb}`);
       await refreshLists();
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "connection", selectedId) });
     },
   });
   const importEntry = useMutation({
-    mutationFn: ({ cacheId, digest }: { cacheId: string; digest: string }) =>
-      api.importRegistry(cacheId, digest),
-    onSuccess: refreshLists,
+    mutationFn: ({ cacheId, digest, key }: { cacheId: string; digest: string; key: string }) =>
+      api.importRegistry(cacheId, digest, key),
+    onSuccess: async (_data, variables) => { mutationKeys.current.delete(`import:${variables.digest}`); await refreshLists(); },
+  });
+  const append = useMutation({
+    mutationFn: ({ endpointUrl, secretBindingId, key }: { endpointUrl: string; secretBindingId?: string; key: string; operation: string }) =>
+      api.appendConnectionVersion(selectedId as string, { endpointUrl, secretBindingId }, key),
+    onSuccess: async (_data, variables) => {
+      mutationKeys.current.delete(variables.operation);
+      await refreshLists();
+      await queryClient.invalidateQueries({ queryKey: queryKey(scope, "connection", selectedId) });
+    },
   });
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
@@ -340,10 +387,22 @@ function Registry({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
   function submitConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    create.mutate({
+    const input = {
       name: formValue(data, "name"),
       endpointUrl: formValue(data, "endpoint"),
-    });
+      ...(formValue(data, "secret-binding") ? { secretBindingId: formValue(data, "secret-binding") } : {}),
+    };
+    const operation = `create:${JSON.stringify(input)}`;
+    create.mutate({ input, operation, key: keyFor(operation) });
+  }
+
+  function submitVersion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const secretBindingId = formValue(data, "version-secret-binding");
+    const input = { endpointUrl: formValue(data, "version-endpoint"), ...(secretBindingId ? { secretBindingId } : {}) };
+    const operation = `append:${selectedId}:${JSON.stringify(input)}`;
+    append.mutate({ ...input, operation, key: keyFor(operation) });
   }
 
   return (
@@ -368,6 +427,7 @@ function Registry({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
             </button>
           </form>
           {search.isError && <QueryFailure error={search.error} retry={() => search.reset()} />}
+          {importEntry.isError && <p className="field-error" role="alert">{failureMessage(importEntry.error)}</p>}
           {searchResult && (
             <div className="search-results" aria-live="polite">
               <p>{searchResult.items.length} screened results</p>
@@ -381,8 +441,8 @@ function Registry({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
                       <button
                         className="text-action"
                         type="button"
-                        disabled={importEntry.isPending}
-                        onClick={() => importEntry.mutate({ cacheId: searchResult.cache_id, digest: item.provenance_digest })}
+                        disabled={!canOperate(role) || importEntry.isPending}
+                        onClick={() => importEntry.mutate({ cacheId: searchResult.cache_id, digest: item.provenance_digest, key: keyFor(`import:${item.provenance_digest}`) })}
                       >
                         Import
                       </button>
@@ -393,17 +453,18 @@ function Registry({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
             </div>
           )}
         </div>
-        <div className="section-block manual-block">
+        {isAdmin(role) && <div className="section-block manual-block">
           <div className="section-heading"><div><span className="index">Direct endpoint / 02</span><h2>Add manually</h2></div></div>
           <form className="stacked-form" onSubmit={submitConnection}>
             <label>Name<input name="name" placeholder="Internal developer tools" required maxLength={128} /></label>
             <label>HTTPS endpoint<input name="endpoint" type="url" placeholder="https://mcp.example.com/tools" required /></label>
+            <label>Secret binding UUID <span>optional</span><input name="secret-binding" pattern="[0-9a-fA-F-]{36}" placeholder="Opaque binding identifier" /></label>
             {create.isError && <p className="field-error" role="alert">{failureMessage(create.error)}</p>}
             <button className="primary-action" disabled={create.isPending} type="submit">
               {create.isPending ? "Adding…" : "Add and verify"}
             </button>
           </form>
-        </div>
+        </div>}
       </section>
       <section className="split-detail">
         <div className="section-block">
@@ -416,7 +477,7 @@ function Registry({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
             <ul className="select-list">
               {connections.data.map((connection) => (
                 <li key={connection.id}>
-                  <button className={selectedId === connection.id ? "selected" : ""} type="button" onClick={() => setSelectedId(connection.id)}>
+                  <button className={selectedId === connection.id ? "selected" : ""} type="button" onClick={() => select(connection.id)}>
                     <span><strong>{connection.name}</strong><small>{shortId(connection.id)}</small></span>
                     <StatusMark value={connection.lifecycle} />
                   </button>
@@ -440,13 +501,22 @@ function Registry({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
                 <div><dt>Last refresh</dt><dd>{formatTime(detail.data.last_refresh_at)}</dd></div>
               </dl>
               {detail.data.last_refresh_error_code && <p className="incident-note">Last refresh: {detail.data.last_refresh_error_code}</p>}
+              {action.isError && <p className="field-error" role="alert">{failureMessage(action.error)}</p>}
               <div className="action-strip">
-                {detail.data.pending_version_id && <button type="button" onClick={() => action.mutate({ id: detail.data.id, verb: "verify" })}>Verify pending</button>}
-                <button type="button" onClick={() => action.mutate({ id: detail.data.id, verb: "refresh" })}>Refresh</button>
-                <button type="button" onClick={() => action.mutate({ id: detail.data.id, verb: detail.data.lifecycle === "disabled" ? "enable" : "disable" })}>
+                {canOperate(role) && detail.data.pending_version_id && <button type="button" onClick={() => action.mutate({ id: detail.data.id, verb: "verify", key: keyFor(`connection:${detail.data.id}:verify`) })}>Verify pending</button>}
+                {canOperate(role) && detail.data.lifecycle !== "disabled" && <button type="button" onClick={() => action.mutate({ id: detail.data.id, verb: "refresh", key: keyFor(`connection:${detail.data.id}:refresh`) })}>Refresh</button>}
+                {canOperate(role) && detail.data.lifecycle !== "disabled" && <button type="button" onClick={() => action.mutate({ id: detail.data.id, verb: "disable", key: keyFor(`connection:${detail.data.id}:disable`) })}>Disable</button>}
+                {isAdmin(role) && detail.data.lifecycle === "disabled" && <button type="button" onClick={() => action.mutate({ id: detail.data.id, verb: "enable", key: keyFor(`connection:${detail.data.id}:enable`) })}>
                   {detail.data.lifecycle === "disabled" ? "Re-enable" : "Disable"}
-                </button>
+                </button>}
               </div>
+              {isAdmin(role) && <form key={detail.data.id} className="stacked-form version-form" onSubmit={submitVersion}>
+                <h3>Append immutable version</h3>
+                <label>HTTPS endpoint<input name="version-endpoint" type="url" required defaultValue={detail.data.versions[0]?.endpoint_url} /></label>
+                <label>Secret binding UUID <span>optional</span><input name="version-secret-binding" pattern="[0-9a-fA-F-]{36}" placeholder="Opaque binding identifier" /></label>
+                {append.isError && <p className="field-error" role="alert">{failureMessage(append.error)}</p>}
+                <button className="secondary-action" disabled={append.isPending} type="submit">{append.isPending ? "Appending…" : "Append version"}</button>
+              </form>}
               <ol className="version-list">
                 {detail.data.versions.map((version) => <li key={version.id}><span>v{version.sequence}</span><code>{version.endpoint_url}</code><small>{version.transport}</small></li>)}
               </ol>
@@ -459,18 +529,20 @@ function Registry({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
   );
 }
 
-function Capabilities({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
+function Capabilities({ api, scope, role, selectedId, select }: { api: ControlPlane; scope: QueryScope; role: WorkspaceSession["role"]; selectedId: string | null; select: (id: string | null) => void }) {
   const queryClient = useQueryClient();
+  const mutationKeys = useRef(new Map<string, string>());
+  const keyFor = (operation: string) => mutationKeys.current.get(operation) ?? (() => { const key = mutationId(); mutationKeys.current.set(operation, key); return key; })();
   const capabilities = useQuery({ queryKey: queryKey(scope, "capabilities"), queryFn: () => api.listCapabilities() });
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const detail = useQuery({
     queryKey: queryKey(scope, "capability", selectedId),
     queryFn: () => api.getCapability(selectedId as string),
     enabled: selectedId !== null,
   });
   const action = useMutation({
-    mutationFn: ({ versionId, verb }: { versionId: string; verb: "enable" | "disable" }) => api.capabilityAction(versionId, verb),
-    onSuccess: async () => {
+    mutationFn: ({ versionId, verb, key }: { versionId: string; verb: "enable" | "disable"; key: string }) => api.capabilityAction(versionId, verb, key),
+    onSuccess: async (_data, variables) => {
+      mutationKeys.current.delete(`capability:${variables.versionId}:${variables.verb}`);
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "capabilities") });
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "capability", selectedId) });
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "overview") });
@@ -489,7 +561,7 @@ function Capabilities({ api, scope }: { api: ControlPlane; scope: QueryScope }) 
           ) : (
             <ul className="select-list">
               {capabilities.data.map((capability) => (
-                <li key={capability.id}><button className={selectedId === capability.id ? "selected" : ""} type="button" onClick={() => setSelectedId(capability.id)}><span><strong>{capability.tool_identity}</strong><small>epoch {capability.status_epoch}</small></span><StatusMark value={capability.status} /></button></li>
+                <li key={capability.id}><button className={selectedId === capability.id ? "selected" : ""} type="button" onClick={() => select(capability.id)}><span><strong>{capability.tool_identity}</strong><small>epoch {capability.status_epoch}</small></span><StatusMark value={capability.status} /></button></li>
               ))}
             </ul>
           )}
@@ -501,22 +573,27 @@ function Capabilities({ api, scope }: { api: ControlPlane; scope: QueryScope }) 
             <>
               <span className="index">Immutable capability</span>
               <div className="detail-title"><h2>{detail.data.tool_identity}</h2><StatusMark value={detail.data.status} /></div>
-              {detail.data.versions.map((version, index) => (
+              {action.isError && <p className="field-error" role="alert">{failureMessage(action.error)}</p>}
+              {detail.data.versions.map((version, index) => {
+                const enabled = detail.data.enabled_version_id === version.id;
+                const actionable = enabled || detail.data.pending_version_id === version.id;
+                const verb = enabled ? "disable" : "enable";
+                return (
                 <article className="schema-version" key={version.id}>
                   <header><div><span>Version {version.sequence}</span><h3>{version.display_name}</h3></div>{index === 0 && <small>Latest observed</small>}</header>
                   <p>{version.description ?? "No description supplied."}</p>
                   <div className="digest-line"><span>metadata</span><code>{version.metadata_digest}</code></div>
                   <details><summary>Input schema</summary><pre>{JSON.stringify(version.input_schema, null, 2)}</pre></details>
                   <button
-                    className={detail.data.enabled_version_id === version.id ? "danger-action" : "secondary-action"}
+                    className={enabled ? "danger-action" : "secondary-action"}
                     type="button"
-                    disabled={!version.schema_supported || action.isPending}
-                    onClick={() => action.mutate({ versionId: version.id, verb: detail.data.enabled_version_id === version.id ? "disable" : "enable" })}
+                    disabled={!canOperate(role) || !actionable || !version.schema_supported || action.isPending}
+                    onClick={() => action.mutate({ versionId: version.id, verb, key: keyFor(`capability:${version.id}:${verb}`) })}
                   >
-                    {detail.data.enabled_version_id === version.id ? "Disable version" : "Enable exact version"}
+                    {!actionable ? "Historical version" : enabled ? "Disable version" : "Enable exact version"}
                   </button>
                 </article>
-              ))}
+              );})}
               {detail.data.versions_truncated && <p className="field-help">Older versions are retained but omitted from this response.</p>}
             </>
           )}
@@ -526,11 +603,13 @@ function Capabilities({ api, scope }: { api: ControlPlane; scope: QueryScope }) 
   );
 }
 
-function Runs({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
+function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; scope: QueryScope; role: WorkspaceSession["role"]; selectedId: string | null; select: (id: string | null) => void }) {
   const queryClient = useQueryClient();
+  const [selectedVersionId, setSelectedVersionId] = useState("");
+  const runKey = useRef(mutationId());
+  const cancelKeys = useRef(new Map<string, string>());
   const runs = useQuery({ queryKey: queryKey(scope, "runs"), queryFn: () => api.listRuns(), refetchInterval: 5000 });
   const capabilities = useQuery({ queryKey: queryKey(scope, "capabilities"), queryFn: () => api.listCapabilities() });
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [argumentsText, setArgumentsText] = useState("{\n  \"query\": \"status\"\n}");
   const [argumentsError, setArgumentsError] = useState("");
   const [pendingArguments, setPendingArguments] = useState<Record<string, unknown> | null>(null);
@@ -552,26 +631,41 @@ function Runs({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
     onSuccess: setPreflight,
   });
   const invoke = useMutation({
-    mutationFn: ({ prepared, args }: { prepared: RunPreflight; args: Record<string, unknown> }) => api.createRun(prepared, args),
+    mutationFn: ({ prepared, args }: { prepared: RunPreflight; args: Record<string, unknown> }) => api.createRun(prepared, args, runKey.current),
     onSuccess: async (run) => {
-      setSelectedId(run.id);
+      runKey.current = mutationId();
+      select(run.id);
       setPreflight(null);
       setPendingArguments(null);
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "runs") });
     },
+    onError: (error) => {
+      if (error instanceof ApiFailure && ["invalid_confirmation", "confirmation_expired", "confirmation_replayed"].includes(error.code)) {
+        setPreflight(null); setPendingArguments(null); runKey.current = mutationId();
+      }
+    },
   });
   const cancel = useMutation({
-    mutationFn: (id: string) => api.cancelRun(id),
-    onSuccess: async () => {
+    mutationFn: ({ id, key }: { id: string; key: string }) => api.cancelRun(id, key),
+    onSuccess: async (_data, variables) => {
+      cancelKeys.current.delete(variables.id);
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "run", selectedId) });
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "runs") });
     },
   });
-  const enabledCapabilities = (capabilities.data ?? []).filter((item) => item.enabled_version_id);
+  const enabledCapabilities = (capabilities.data ?? []).filter((item) => item.status === "enabled" && item.enabled_version_id);
+
+  function invalidatePreparedRun() {
+    setPreflight(null); setPendingArguments(null); prepare.reset(); invoke.reset(); runKey.current = mutationId();
+  }
 
   function submitPreflight(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const versionId = formValue(new FormData(event.currentTarget), "capability");
+    const versionId = selectedVersionId;
+    if (!versionId) {
+      setArgumentsError("Select an enabled capability.");
+      return;
+    }
     try {
       const parsed = JSON.parse(argumentsText) as unknown;
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error();
@@ -589,36 +683,43 @@ function Runs({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
       <section className="run-grid">
         <div className="section-block playground">
           <div className="section-heading"><div><span className="index">Playground / 01</span><h2>Prepare a run</h2></div></div>
-          <form className="stacked-form" onSubmit={submitPreflight}>
-            <label>Enabled capability<select name="capability" required defaultValue=""><option value="" disabled>Select a capability</option>{enabledCapabilities.map((item) => <option key={item.id} value={item.enabled_version_id ?? ""}>{item.tool_identity}</option>)}</select></label>
-            <label>Arguments<textarea value={argumentsText} onChange={(event) => setArgumentsText(event.target.value)} rows={8} spellCheck={false} aria-invalid={Boolean(argumentsError)} /></label>
+          <form className="stacked-form" onSubmit={submitPreflight} noValidate>
+            <label>Enabled capability<select name="capability" required value={selectedVersionId} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(); setSelectedVersionId(event.target.value); }}><option value="" disabled>Select a capability</option>{enabledCapabilities.map((item) => <option key={item.id} value={item.enabled_version_id ?? ""}>{item.tool_identity}</option>)}</select></label>
+            <label>Arguments<textarea value={argumentsText} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(); setArgumentsText(event.target.value); }} rows={8} spellCheck={false} aria-invalid={Boolean(argumentsError)} /></label>
+            <p className="incident-note">Only public, synthetic, or explicitly non-confidential data.</p>
             {argumentsError && <p className="field-error" role="alert">{argumentsError}</p>}
             {prepare.isError && <p className="field-error" role="alert">{failureMessage(prepare.error)}</p>}
-            <button className="primary-action" disabled={prepare.isPending || enabledCapabilities.length === 0} type="submit">{prepare.isPending ? "Checking…" : "Review invocation"}</button>
+            <button className="primary-action" disabled={!canOperate(role) || prepare.isPending || enabledCapabilities.length === 0} type="submit">{prepare.isPending ? "Checking…" : "Review invocation"}</button>
           </form>
           {enabledCapabilities.length === 0 && <p className="field-help">Enable a capability version before opening a run.</p>}
         </div>
         <div className="section-block run-inventory">
           <div className="section-heading"><div><span className="index">Ledger / 02</span><h2>Recent runs</h2></div></div>
           {runs.isPending ? <LoadingState label="Loading runs" /> : runs.isError ? <QueryFailure error={runs.error} retry={() => void runs.refetch()} /> : runs.data.length === 0 ? <EmptyState title="No runs retained" copy="Completed and in-flight work will appear here." /> : (
-            <ul className="select-list">{runs.data.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => setSelectedId(run.id)}><span><strong>{shortId(run.id)}</strong><small>{formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
+            <ul className="select-list">{runs.data.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{shortId(run.id)}</strong><small>{formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
           )}
         </div>
       </section>
       {preflight && pendingArguments && (
         <section className="confirmation-panel" aria-labelledby="confirmation-title">
           <div><span className="index">One-time confirmation</span><h2 id="confirmation-title">Confirm exact invocation</h2><p>This token expires {formatTime(preflight.expires_at)} and cannot move to another request.</p></div>
+          <p className="incident-note">Only public, synthetic, or explicitly non-confidential data.</p>
           <dl><div><dt>Capability version</dt><dd><code>{shortId(preflight.capability_version_id)}</code></dd></div><div><dt>Argument digest</dt><dd><code>{shortId(preflight.argument_digest)}</code></dd></div></dl>
-          <div className="action-strip"><button type="button" onClick={() => { setPreflight(null); setPendingArguments(null); }}>Back</button><button className="primary-action" type="button" disabled={invoke.isPending} onClick={() => invoke.mutate({ prepared: preflight, args: pendingArguments })}>{invoke.isPending ? "Submitting…" : "Confirm and run"}</button></div>
+          <details open><summary>Exact prepared arguments</summary><pre>{JSON.stringify(pendingArguments, null, 2)}</pre></details>
+          {invoke.isError && <p className="field-error" role="alert">{failureMessage(invoke.error)}{invoke.error instanceof ApiFailure && ["invalid_confirmation", "confirmation_expired", "confirmation_replayed"].includes(invoke.error.code) ? " Run preflight again." : " Retry to safely reuse this request."}</p>}
+          <div className="action-strip"><button type="button" onClick={invalidatePreparedRun}>Back</button><button className="primary-action" type="button" disabled={invoke.isPending} onClick={() => invoke.mutate({ prepared: preflight, args: pendingArguments })}>{invoke.isPending ? "Submitting…" : "Confirm and run"}</button></div>
         </section>
       )}
+      {invoke.isError && !preflight && <p className="field-error" role="alert">{failureMessage(invoke.error)} Run preflight again.</p>}
       <section className="detail-panel run-detail">
         {selectedId === null ? <EmptyState title="Select a run" copy="Inspect lineage, safe output, and status events." /> : runDetail.isPending || events.isPending ? <LoadingState label="Loading run timeline" /> : runDetail.isError ? <QueryFailure error={runDetail.error} retry={() => void runDetail.refetch()} /> : events.isError ? <QueryFailure error={events.error} retry={() => void events.refetch()} /> : (
           <>
             <div className="detail-title"><div><span className="index">Run {shortId(runDetail.data.id)}</span><h2>Execution timeline</h2></div><StatusMark value={runDetail.data.status} /></div>
-            <dl className="detail-facts"><div><dt>Capability</dt><dd>{shortId(runDetail.data.capability_version_id)}</dd></div><div><dt>Deadline</dt><dd>{formatTime(runDetail.data.deadline)}</dd></div><div><dt>Updated</dt><dd>{formatTime(runDetail.data.updated_at)}</dd></div></dl>
-            {!terminal(runDetail.data.status) && <button className="danger-action" disabled={cancel.isPending} type="button" onClick={() => cancel.mutate(runDetail.data.id)}>Request cancellation</button>}
+            <dl className="detail-facts"><div><dt>Capability</dt><dd>{shortId(runDetail.data.capability_version_id)}</dd></div><div><dt>Connection version</dt><dd>{shortId(runDetail.data.connection_version_id)}</dd></div><div><dt>Deadline</dt><dd>{formatTime(runDetail.data.deadline)}</dd></div><div><dt>Updated</dt><dd>{formatTime(runDetail.data.updated_at)}</dd></div></dl>
+            {canOperate(role) && !terminal(runDetail.data.status) && <button className="danger-action" disabled={cancel.isPending} type="button" onClick={() => { const key = cancelKeys.current.get(runDetail.data.id) ?? mutationId(); cancelKeys.current.set(runDetail.data.id, key); cancel.mutate({ id: runDetail.data.id, key }); }}>Request cancellation</button>}
+            {cancel.isError && <p className="field-error" role="alert">{failureMessage(cancel.error)}</p>}
             <ol className="timeline">{events.data.map((event) => <li key={event.id}><span aria-hidden="true" /><div><strong>{event.event_type.replaceAll("_", " ")}</strong><small>{formatTime(event.occurred_at)} · {event.status}</small>{event.safe_error_code && <code>{event.safe_error_code}</code>}</div></li>)}</ol>
+            <details><summary>Retained arguments</summary><pre>{JSON.stringify(runDetail.data.arguments, null, 2)}</pre></details>
             {runDetail.data.result && <details open><summary>Validated result</summary><pre>{JSON.stringify(runDetail.data.result, null, 2)}</pre></details>}
             {runDetail.data.safe_error_code && <p className="incident-note">Run ended with {runDetail.data.safe_error_code}.</p>}
           </>
@@ -629,21 +730,31 @@ function Runs({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
 }
 
 function WorkspaceApp({ session, api, onLogout }: { session: WorkspaceSession; api: ControlPlane; onLogout: () => void }) {
-  const [view, setView] = useState<View>("overview");
+  const [route, setRoute] = useState<Route>(() => readRoute());
+  useEffect(() => {
+    const handlePopState = () => setRoute(readRoute());
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+  function navigate(view: View, selectedId: string | null = null) {
+    window.history.pushState({}, "", routePath(view, selectedId));
+    setRoute({ view, selectedId });
+  }
+  const view = route.view;
   const scope: QueryScope = ["workspace", session.identityId, session.workspaceId];
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to content</a>
       <header className="topbar">
-        <button className="brand" type="button" onClick={() => setView("overview")} aria-label="Modall overview"><span>m</span><strong>modall</strong></button>
-        <nav aria-label="Primary navigation">{navItems.map((item) => <button key={item.id} className={view === item.id ? "active" : ""} type="button" onClick={() => setView(item.id)} aria-current={view === item.id ? "page" : undefined}><span>{item.marker}</span>{item.label}</button>)}</nav>
-        <div className="workspace-menu"><div><span>{session.workspaceLabel}</span><code>{shortId(session.workspaceId)}</code></div><button className="text-action" type="button" onClick={onLogout}>Log out</button></div>
+        <button className="brand" type="button" onClick={() => navigate("overview")} aria-label="Modall overview"><span>m</span><strong>modall</strong></button>
+        <nav aria-label="Primary navigation">{navItems.map((item) => <button key={item.id} className={view === item.id ? "active" : ""} type="button" onClick={() => navigate(item.id)} aria-current={view === item.id ? "page" : undefined}><span>{item.marker}</span>{item.label}</button>)}</nav>
+        <div className="workspace-menu"><div><span>{session.workspaceLabel} · {session.role}</span><code>{shortId(session.workspaceId)}</code></div><button className="text-action" type="button" onClick={onLogout}>Log out</button></div>
       </header>
       <main id="main-content" tabIndex={-1}>
-        {view === "overview" && <Overview api={api} open={setView} scope={scope} />}
-        {view === "registry" && <Registry api={api} scope={scope} />}
-        {view === "capabilities" && <Capabilities api={api} scope={scope} />}
-        {view === "runs" && <Runs api={api} scope={scope} />}
+        {view === "overview" && <Overview api={api} open={(next) => navigate(next)} scope={scope} />}
+        {view === "registry" && <Registry api={api} scope={scope} role={session.role} selectedId={route.selectedId} select={(id) => navigate("registry", id)} />}
+        {view === "capabilities" && <Capabilities api={api} scope={scope} role={session.role} selectedId={route.selectedId} select={(id) => navigate("capabilities", id)} />}
+        {view === "runs" && <Runs api={api} scope={scope} role={session.role} selectedId={route.selectedId} select={(id) => navigate("runs", id)} />}
       </main>
       <footer><span>Modall Registry Alpha</span><span>Exact lineage · bounded retention · fail closed</span></footer>
     </div>

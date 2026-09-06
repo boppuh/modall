@@ -6,6 +6,7 @@ import type { components, paths } from "./schema";
 type Schemas = components["schemas"];
 export type Connection = Schemas["ConnectionResponse"];
 export type ConnectionDetail = Schemas["ConnectionDetailResponse"];
+export type ConnectionVersion = Schemas["ConnectionVersionResponse"];
 export type Capability = Schemas["CapabilityResponse"];
 export type CapabilityDetail = Schemas["CapabilityDetailResponse"];
 export type CapabilityVersion = Schemas["CapabilityVersionResponse"];
@@ -44,8 +45,21 @@ async function unwrap<T>(pending: Promise<ApiResult<T>>): Promise<T> {
   );
 }
 
-function mutationKey(prefix: string): string {
-  return `${prefix}-${crypto.randomUUID()}`;
+type Page<T> = { items: T[]; page: { next_cursor?: string | null } };
+
+async function collectPages<T>(fetchPage: (cursor?: string) => Promise<Page<T>>): Promise<T[]> {
+  const items: T[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const page = await fetchPage(cursor);
+    items.push(...page.items);
+    const next = page.page.next_cursor ?? undefined;
+    if (next && seen.has(next)) throw new Error("The control plane returned a repeated page cursor.");
+    if (next) seen.add(next);
+    cursor = next;
+  } while (cursor);
+  return items;
 }
 
 export interface OverviewData {
@@ -58,20 +72,21 @@ export interface ControlPlane {
   overview(): Promise<OverviewData>;
   listConnections(): Promise<Connection[]>;
   getConnection(id: string): Promise<ConnectionDetail>;
-  createConnection(input: { name: string; endpointUrl: string }): Promise<Connection>;
-  connectionAction(id: string, action: "verify" | "refresh" | "enable" | "disable"): Promise<void>;
+  createConnection(input: { name: string; endpointUrl: string; secretBindingId?: string }, idempotencyKey: string): Promise<Connection>;
+  appendConnectionVersion(id: string, input: { endpointUrl: string; secretBindingId?: string }, idempotencyKey: string): Promise<ConnectionVersion>;
+  connectionAction(id: string, action: "verify" | "refresh" | "enable" | "disable", idempotencyKey: string): Promise<void>;
   searchRegistry(query: string): Promise<RegistrySearch>;
-  importRegistry(cacheId: string, provenanceDigest: string): Promise<RegistryEntry>;
+  importRegistry(cacheId: string, provenanceDigest: string, idempotencyKey: string): Promise<RegistryEntry>;
   listRegistryEntries(): Promise<RegistryEntry[]>;
   listCapabilities(): Promise<Capability[]>;
   getCapability(id: string): Promise<CapabilityDetail>;
-  capabilityAction(versionId: string, action: "enable" | "disable"): Promise<Capability>;
+  capabilityAction(versionId: string, action: "enable" | "disable", idempotencyKey: string): Promise<Capability>;
   listRuns(): Promise<Run[]>;
   getRun(id: string): Promise<Run>;
   listRunEvents(id: string): Promise<RunEvent[]>;
   preflight(versionId: string, argumentsValue: Record<string, unknown>): Promise<RunPreflight>;
-  createRun(preflight: RunPreflight, argumentsValue: Record<string, unknown>): Promise<Run>;
-  cancelRun(id: string): Promise<Run>;
+  createRun(preflight: RunPreflight, argumentsValue: Record<string, unknown>, idempotencyKey: string): Promise<Run>;
+  cancelRun(id: string, idempotencyKey: string): Promise<Run>;
 }
 
 class GeneratedControlPlane implements ControlPlane {
@@ -87,7 +102,7 @@ class GeneratedControlPlane implements ControlPlane {
   }
 
   async listConnections(): Promise<Connection[]> {
-    return (await unwrap(this.client.GET("/v1/server-connections"))).items;
+    return collectPages((cursor) => unwrap(this.client.GET("/v1/server-connections", { params: { query: { limit: 100, cursor } } })));
   }
 
   getConnection(id: string): Promise<ConnectionDetail> {
@@ -98,23 +113,30 @@ class GeneratedControlPlane implements ControlPlane {
     );
   }
 
-  createConnection(input: { name: string; endpointUrl: string }): Promise<Connection> {
+  createConnection(input: { name: string; endpointUrl: string; secretBindingId?: string }, idempotencyKey: string): Promise<Connection> {
     return unwrap(
       this.client.POST("/v1/server-connections", {
-        params: { header: { "Idempotency-Key": mutationKey("connection") } },
-        body: { name: input.name, endpoint_url: input.endpointUrl, policy_version: "v1" },
+        params: { header: { "Idempotency-Key": idempotencyKey } },
+        body: { name: input.name, endpoint_url: input.endpointUrl, secret_binding_id: input.secretBindingId, policy_version: "v1" },
       }),
     );
   }
 
+  appendConnectionVersion(id: string, input: { endpointUrl: string; secretBindingId?: string }, idempotencyKey: string): Promise<ConnectionVersion> {
+    return unwrap(this.client.POST("/v1/server-connections/{connection_id}/versions", {
+      params: { path: { connection_id: id }, header: { "Idempotency-Key": idempotencyKey } },
+      body: { endpoint_url: input.endpointUrl, secret_binding_id: input.secretBindingId, policy_version: "v1" },
+    }));
+  }
+
   async connectionAction(
     id: string,
-    action: "verify" | "refresh" | "enable" | "disable",
+    action: "verify" | "refresh" | "enable" | "disable", idempotencyKey: string,
   ): Promise<void> {
     const options = {
       params: {
         path: { connection_id: id },
-        header: { "Idempotency-Key": mutationKey(action) },
+        header: { "Idempotency-Key": idempotencyKey },
       },
     } as const;
     if (action === "verify") {
@@ -132,21 +154,21 @@ class GeneratedControlPlane implements ControlPlane {
     return unwrap(this.client.POST("/v1/registry/searches", { body: { query } }));
   }
 
-  importRegistry(cacheId: string, provenanceDigest: string): Promise<RegistryEntry> {
+  importRegistry(cacheId: string, provenanceDigest: string, idempotencyKey: string): Promise<RegistryEntry> {
     return unwrap(
       this.client.POST("/v1/registry/imports", {
-        params: { header: { "Idempotency-Key": mutationKey("import") } },
+        params: { header: { "Idempotency-Key": idempotencyKey } },
         body: { cache_id: cacheId, provenance_digest: provenanceDigest },
       }),
     );
   }
 
   async listRegistryEntries(): Promise<RegistryEntry[]> {
-    return (await unwrap(this.client.GET("/v1/registry/entries"))).items;
+    return collectPages((cursor) => unwrap(this.client.GET("/v1/registry/entries", { params: { query: { limit: 100, cursor } } })));
   }
 
   async listCapabilities(): Promise<Capability[]> {
-    return (await unwrap(this.client.GET("/v1/capabilities"))).items;
+    return collectPages((cursor) => unwrap(this.client.GET("/v1/capabilities", { params: { query: { limit: 100, cursor } } })));
   }
 
   getCapability(id: string): Promise<CapabilityDetail> {
@@ -157,11 +179,11 @@ class GeneratedControlPlane implements ControlPlane {
     );
   }
 
-  capabilityAction(versionId: string, action: "enable" | "disable"): Promise<Capability> {
+  capabilityAction(versionId: string, action: "enable" | "disable", idempotencyKey: string): Promise<Capability> {
     const options = {
       params: {
         path: { capability_version_id: versionId },
-        header: { "Idempotency-Key": mutationKey(`capability-${action}`) },
+        header: { "Idempotency-Key": idempotencyKey },
       },
     } as const;
     return action === "enable"
@@ -170,7 +192,7 @@ class GeneratedControlPlane implements ControlPlane {
   }
 
   async listRuns(): Promise<Run[]> {
-    return (await unwrap(this.client.GET("/v1/runs"))).items;
+    return collectPages((cursor) => unwrap(this.client.GET("/v1/runs", { params: { query: { limit: 100, cursor } } })));
   }
 
   getRun(id: string): Promise<Run> {
@@ -178,11 +200,7 @@ class GeneratedControlPlane implements ControlPlane {
   }
 
   async listRunEvents(id: string): Promise<RunEvent[]> {
-    return (
-      await unwrap(
-        this.client.GET("/v1/runs/{run_id}/events", { params: { path: { run_id: id } } }),
-      )
-    ).items;
+    return collectPages((cursor) => unwrap(this.client.GET("/v1/runs/{run_id}/events", { params: { path: { run_id: id }, query: { limit: 100, cursor } } })));
   }
 
   preflight(
@@ -196,10 +214,10 @@ class GeneratedControlPlane implements ControlPlane {
     );
   }
 
-  createRun(preflight: RunPreflight, argumentsValue: Record<string, unknown>): Promise<Run> {
+  createRun(preflight: RunPreflight, argumentsValue: Record<string, unknown>, idempotencyKey: string): Promise<Run> {
     return unwrap(
       this.client.POST("/v1/runs", {
-        params: { header: { "Idempotency-Key": mutationKey("run") } },
+        params: { header: { "Idempotency-Key": idempotencyKey } },
         body: {
           capability_version_id: preflight.capability_version_id,
           arguments: argumentsValue,
@@ -209,12 +227,12 @@ class GeneratedControlPlane implements ControlPlane {
     );
   }
 
-  cancelRun(id: string): Promise<Run> {
+  cancelRun(id: string, idempotencyKey: string): Promise<Run> {
     return unwrap(
       this.client.POST("/v1/runs/{run_id}/cancel", {
         params: {
           path: { run_id: id },
-          header: { "Idempotency-Key": mutationKey("cancel") },
+          header: { "Idempotency-Key": idempotencyKey },
         },
       }),
     );

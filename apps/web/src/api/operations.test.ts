@@ -78,6 +78,8 @@ describe("control-plane operations", () => {
           payload = connection;
         } else if (path === `/v1/server-connections/${id}`) {
           payload = { ...connection, versions: [], versions_truncated: false };
+        } else if (path === `/v1/server-connections/${id}/versions`) {
+          payload = { id: otherId, sequence: 2, endpoint_url: "https://mcp.example/v2", secret_binding_id: null, policy_version: "v1", transport: "streamable_http", created_at: timestamp };
         } else if (path.endsWith("/refresh")) {
           payload = { connection_id: id, connection_version_id: otherId, generation: 3, job_id: id, status: "queued" };
         } else if (path.startsWith("/v1/server-connections/")) {
@@ -120,24 +122,25 @@ describe("control-plane operations", () => {
     expect((await api.overview()).connections).toHaveLength(1);
     expect(await api.listConnections()).toHaveLength(1);
     expect((await api.getConnection(id)).id).toBe(id);
-    expect((await api.createConnection({ name: "Tools", endpointUrl: "https://mcp.example" })).id).toBe(id);
-    await api.connectionAction(id, "verify");
-    await api.connectionAction(id, "refresh");
-    await api.connectionAction(id, "enable");
-    await api.connectionAction(id, "disable");
+    expect((await api.createConnection({ name: "Tools", endpointUrl: "https://mcp.example", secretBindingId: otherId }, "create-key")).id).toBe(id);
+    await api.appendConnectionVersion(id, { endpointUrl: "https://mcp.example/v2" }, "append-key");
+    await api.connectionAction(id, "verify", "verify-key");
+    await api.connectionAction(id, "refresh", "refresh-key");
+    await api.connectionAction(id, "enable", "enable-key");
+    await api.connectionAction(id, "disable", "disable-key");
     expect((await api.searchRegistry("search")).cache_id).toBe(id);
-    expect((await api.importRegistry(id, "a".repeat(64))).source).toBe("official");
+    expect((await api.importRegistry(id, "a".repeat(64), "import-key")).source).toBe("official");
     expect(await api.listRegistryEntries()).toEqual([]);
     expect(await api.listCapabilities()).toHaveLength(1);
     expect((await api.getCapability(id)).tool_identity).toBe("tools/search");
-    await api.capabilityAction(otherId, "enable");
-    await api.capabilityAction(otherId, "disable");
+    await api.capabilityAction(otherId, "enable", "cap-enable-key");
+    await api.capabilityAction(otherId, "disable", "cap-disable-key");
     expect(await api.listRuns()).toHaveLength(1);
     expect((await api.getRun(id)).status).toBe("succeeded");
     expect(await api.listRunEvents(id)).toEqual([]);
     const preflight = await api.preflight(otherId, { query: "status" });
-    expect((await api.createRun(preflight, { query: "status" })).id).toBe(id);
-    expect((await api.cancelRun(id)).id).toBe(id);
+    expect((await api.createRun(preflight, { query: "status" }, "run-key")).id).toBe(id);
+    expect((await api.cancelRun(id, "cancel-key")).id).toBe(id);
 
     expect(requests.every((request) => request.headers.get("X-Workspace-ID") === id)).toBe(true);
     expect(
@@ -164,5 +167,24 @@ describe("control-plane operations", () => {
     await expect(fallback.listConnections()).rejects.toEqual(
       new ApiFailure("http_502", "The control plane did not complete the request."),
     );
+  });
+
+  it("collects every page and rejects a repeated cursor", async () => {
+    let page = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(() => {
+      page += 1;
+      return Promise.resolve(new Response(JSON.stringify({
+        items: [{ ...connection, id: page === 1 ? id : otherId }],
+        page: { next_cursor: page === 1 ? "next-page" : null },
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    }));
+    const api = createControlPlane({ identityId: "reviewer", workspaceId: id });
+    expect(await api.listConnections()).toHaveLength(2);
+
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(() => Promise.resolve(new Response(JSON.stringify({
+      items: [connection], page: { next_cursor: "same" },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }))));
+    const loopingApi = createControlPlane({ identityId: "reviewer", workspaceId: id });
+    await expect(loopingApi.listConnections()).rejects.toThrow("repeated page cursor");
   });
 });

@@ -7,7 +7,7 @@ const workspaceId = "11111111-1111-4111-8111-111111111111";
 describe("workspace session", () => {
   it("persists valid local and OIDC sessions without widening identity scope", () => {
     const storage = new StorageFixture();
-    const local = { identityId: "local", workspaceId, workspaceLabel: "Pilot" };
+    const local = { identityId: "local", workspaceId, workspaceLabel: "Pilot", role: "admin" as const };
     saveSession(local, storage);
     expect(loadSession(storage)).toEqual(local);
 
@@ -29,7 +29,12 @@ describe("workspace session", () => {
     expect(loadSession(storage)).toBeNull();
     storage.setItem(
       "modall.workspace-session.v1",
-      JSON.stringify({ identityId: 4, workspaceId, workspaceLabel: "Pilot", accessToken: "old" }),
+      JSON.stringify({ identityId: 4, workspaceId, workspaceLabel: "Pilot", role: "admin", accessToken: "old" }),
+    );
+    expect(loadSession(storage)).toBeNull();
+    storage.setItem(
+      "modall.workspace-session.v1",
+      JSON.stringify({ identityId: "local", workspaceId, workspaceLabel: "Pilot", role: "owner" }),
     );
     expect(loadSession(storage)).toBeNull();
   });
