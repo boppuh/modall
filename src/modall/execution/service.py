@@ -719,9 +719,7 @@ class ExecutionService:
         self._require_system_authority()
         state = await self._execution_state(lock="exclusive")
         unreconciled_run = await self._session.scalar(
-            select(Run.id)
-            .where(Run.status.not_in([status.value for status in _TERMINAL_RUN_STATUSES]))
-            .limit(1)
+            select(Run.id).where(Run.status.in_(_ACTIVE_RUN_STATUS_VALUES)).limit(1)
         )
         if not state.dispatch_quarantined or unreconciled_run is not None:
             raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
@@ -821,10 +819,12 @@ class ExecutionService:
         if version is None:
             raise ExecutionError(ExecutionFailureCode.CAPABILITY_UNAVAILABLE)
         capability = await self._session.scalar(
-            select(Capability).where(
+            select(Capability)
+            .where(
                 Capability.id == version.capability_id,
                 Capability.workspace_id == context.workspace_id,
             )
+            .execution_options(populate_existing=True)
         )
         binding = await self._session.scalar(
             select(McpToolBinding).where(
@@ -835,10 +835,12 @@ class ExecutionService:
         if capability is None or binding is None:
             raise ExecutionError(ExecutionFailureCode.CAPABILITY_UNAVAILABLE)
         connection = await self._session.scalar(
-            select(ServerConnection).where(
+            select(ServerConnection)
+            .where(
                 ServerConnection.id == binding.connection_id,
                 ServerConnection.workspace_id == context.workspace_id,
             )
+            .execution_options(populate_existing=True)
         )
         observed = None
         if connection is not None and connection.current_snapshot_id is not None:
@@ -1448,6 +1450,7 @@ class ExecutionService:
                     .where(
                         Job.status == JobStatus.LEASED.value,
                         Job.lease_expires_at <= now,
+                        Run.status == RunStatus.DISPATCH_FENCED.value,
                     )
                     .order_by(Job.lease_expires_at, Job.id)
                     .limit(self._limits.reconciliation_batch_size)
@@ -1456,14 +1459,12 @@ class ExecutionService:
             ).all()
         )
         for run in runs:
-            attempt = await self._active_attempt(run.id)
-            if attempt is not None and attempt.status == RunStatus.DISPATCH_FENCED.value:
-                await self._terminalize_run(
-                    run,
-                    RunStatus.INDETERMINATE,
-                    now,
-                    RunFailureCode.WORKER_LOST_AFTER_DISPATCH,
-                )
+            await self._terminalize_run(
+                run,
+                RunStatus.INDETERMINATE,
+                now,
+                RunFailureCode.WORKER_LOST_AFTER_DISPATCH,
+            )
         await self._session.flush()
 
     async def _terminalize_run(

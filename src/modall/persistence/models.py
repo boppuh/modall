@@ -932,6 +932,17 @@ class RunEvent(Base):
         UniqueConstraint("run_id", "sequence"),
         CheckConstraint("sequence > 0", name="ck_run_event_sequence"),
         CheckConstraint(
+            "event_type IN ('admitted', 'attempt_started', 'session_fenced', "
+            "'dispatch_fenced', 'lease_lost', 'cancel_requested', 'terminal', "
+            "'content_expired', 'restore_reconciled')",
+            name="ck_run_event_type",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'preparing', 'session_fenced', 'dispatch_fenced', "
+            "'succeeded', 'failed', 'cancelled', 'timed_out', 'indeterminate')",
+            name="ck_run_event_status",
+        ),
+        CheckConstraint(
             "safe_error_code IS NULL OR safe_error_code IN "
             "('worker_lost_before_dispatch', 'worker_lost_after_dispatch', "
             "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "

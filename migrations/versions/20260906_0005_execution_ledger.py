@@ -291,6 +291,13 @@ def upgrade() -> None:
         sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("sequence > 0", name="ck_run_event_sequence"),
         sa.CheckConstraint(
+            "event_type IN ('admitted', 'attempt_started', 'session_fenced', "
+            "'dispatch_fenced', 'lease_lost', 'cancel_requested', 'terminal', "
+            "'content_expired', 'restore_reconciled')",
+            name="ck_run_event_type",
+        ),
+        sa.CheckConstraint(f"status IN ({RUN_STATES})", name="ck_run_event_status"),
+        sa.CheckConstraint(
             f"safe_error_code IS NULL OR safe_error_code IN ({RUN_FAILURE_CODES})",
             name="ck_run_event_safe_error_code",
         ),
