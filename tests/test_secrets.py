@@ -145,3 +145,17 @@ def test_provider_factory_separates_fixture_and_deployment_modes(tmp_path: Path)
         Settings(environment="test", secret_provider="mounted_file", secret_mount_root=tmp_path)
     )
     assert isinstance(mounted, MountedFileSecretProvider)
+
+
+def test_fixture_provider_falls_back_to_shared_read_only_files(tmp_path: Path) -> None:
+    filename = MountedFileSecretProvider.filename_for("connection-token", "v3")
+    (tmp_path / filename).write_bytes(b"shared-fixture-value")
+    provider = build_secret_provider(
+        Settings(environment="test", fixture_secret_root=tmp_path),
+        fixture_values={("system-key", "v1"): b"in-memory-system-value"},
+    )
+
+    with provider.retrieve(reference(name="connection-token", version="v3")) as value:
+        assert bytes(value) == b"shared-fixture-value"
+    with provider.retrieve(reference(name="system-key")) as value:
+        assert bytes(value) == b"in-memory-system-value"

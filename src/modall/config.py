@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     worker_maintenance_timeout_seconds: Annotated[
         float, Field(gt=0, le=60, allow_inf_nan=False)
     ] = 5.0
+    worker_maintenance_interval_seconds: Annotated[
+        float, Field(gt=0, le=3600, allow_inf_nan=False)
+    ] = 60.0
     worker_lease_duration_seconds: Annotated[float, Field(ge=15, le=300, allow_inf_nan=False)] = (
         30.0
     )
@@ -41,6 +44,7 @@ class Settings(BaseSettings):
     local_subject: str = "local-developer"
     secret_provider: Literal["fixture", "mounted_file"] = "fixture"
     secret_mount_root: Path = Path("/run/secrets")
+    fixture_secret_root: Path | None = None
 
     @model_validator(mode="after")
     def validate_security_modes(self) -> "Settings":
@@ -56,6 +60,10 @@ class Settings(BaseSettings):
             raise ValueError("deployed environments require OIDC authentication")
         if deployed and self.secret_provider != "mounted_file":
             raise ValueError("deployed environments require the mounted-file secret provider")
+        if deployed and self.fixture_secret_root is not None:
+            raise ValueError("deployed environments cannot configure fixture secrets")
+        if self.secret_provider != "fixture" and self.fixture_secret_root is not None:
+            raise ValueError("fixture secret root requires the fixture provider")
         if self.auth_mode == "oidc" and not all(
             (self.oidc_issuer, self.oidc_audience, self.oidc_jwks_url)
         ):

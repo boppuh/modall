@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -7,6 +8,12 @@ from modall.config import Settings
 from modall.execution.runner import InvocationRunner
 from modall.execution.service import ExecutionService
 from modall.persistence.database import create_engine, create_session_factory
+from modall.secrets.provider import (
+    MountedFileSecretProvider,
+    SecretProvider,
+    SecretReference,
+    build_secret_provider,
+)
 from modall.worker import main
 from modall.worker.main import configure_logging, run_once
 
@@ -122,15 +129,89 @@ def test_worker_runs_global_registry_cache_cleanup(
     assert "database detail" not in caplog.text
 
 
-def test_worker_builds_secret_backed_invocation_runtime() -> None:
+def test_worker_drains_claimed_jobs_before_sleeping(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        settings = Settings(environment="test", worker_poll_interval_seconds=0.25)
+        engine = create_engine("sqlite+aiosqlite:///:memory:")
+        claimed = iter((True, True, False))
+        invocation_polls = 0
+        sleeps: list[float] = []
+
+        class FakeRunner:
+            async def claim_and_run(self, **kwargs: object) -> bool:
+                nonlocal invocation_polls
+                del kwargs
+                invocation_polls += 1
+                return next(claimed)
+
+        class FakeExecutionService:
+            async def expire_retained_results(self) -> int:
+                return 0
+
+            async def expire_retained_content(self) -> int:
+                return 0
+
+            async def delete_expired_run_metadata(self) -> int:
+                return 0
+
+        async def cleanup(session: object) -> None:
+            del session
+
+        async def stop(seconds: float) -> None:
+            sleeps.append(seconds)
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(main, "create_engine", lambda database_url: engine)
+        monkeypatch.setattr(
+            main,
+            "build_execution_runtime",
+            lambda settings, session_factory: (
+                FakeRunner(),
+                lambda session: FakeExecutionService(),
+            ),
+        )
+        monkeypatch.setattr(main, "purge_expired_registry_cache", cleanup)
+        monkeypatch.setattr(asyncio, "sleep", stop)
+
+        with pytest.raises(asyncio.CancelledError):
+            await main.run_worker(settings)
+
+        assert invocation_polls == 3
+        assert sleeps == [0.25]
+
+    asyncio.run(scenario())
+
+
+def test_worker_builds_secret_backed_invocation_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     async def scenario() -> None:
         engine = create_engine("sqlite+aiosqlite:///:memory:")
+        filename = MountedFileSecretProvider.filename_for("connection-token", "v1")
+        (tmp_path / filename).write_bytes(b"shared-connection-credential")
+        providers: list[SecretProvider] = []
+
+        def capture_provider(
+            settings: Settings,
+            *,
+            fixture_values: dict[tuple[str, str], bytes] | None = None,
+        ) -> SecretProvider:
+            provider = build_secret_provider(settings, fixture_values=fixture_values)
+            providers.append(provider)
+            return provider
+
+        monkeypatch.setattr(main, "build_secret_provider", capture_provider)
         try:
             session_factory = create_session_factory(engine)
             runner, service_factory = main.build_execution_runtime(
-                Settings(environment="test", _env_file=None), session_factory
+                Settings(environment="test", fixture_secret_root=tmp_path, _env_file=None),
+                session_factory,
             )
             assert isinstance(runner, InvocationRunner)
+            with providers[0].retrieve(
+                SecretReference("fixture", "connection-token", "v1")
+            ) as credential:
+                assert bytes(credential) == b"shared-connection-credential"
             async with session_factory() as session:
                 assert isinstance(service_factory(session), ExecutionService)
         finally:

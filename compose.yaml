@@ -27,6 +27,9 @@ services:
       MODALL_DATABASE_URL: postgresql://modall:modall@postgres:5432/modall
       MODALL_ENVIRONMENT: local
       MODALL_LOG_LEVEL: ${MODALL_LOG_LEVEL:-INFO}
+      MODALL_FIXTURE_SECRET_ROOT: /run/modall-fixtures
+    volumes:
+      - ./.modall/fixture-secrets:/run/modall-fixtures:ro
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -56,6 +59,10 @@ services:
       MODALL_ENVIRONMENT: local
       MODALL_LOG_LEVEL: ${MODALL_LOG_LEVEL:-INFO}
       MODALL_WORKER_POLL_INTERVAL_SECONDS: ${MODALL_WORKER_POLL_INTERVAL_SECONDS:-1}
+      MODALL_WORKER_MAINTENANCE_INTERVAL_SECONDS: ${MODALL_WORKER_MAINTENANCE_INTERVAL_SECONDS:-60}
+      MODALL_FIXTURE_SECRET_ROOT: /run/modall-fixtures
+    volumes:
+      - ./.modall/fixture-secrets:/run/modall-fixtures:ro
     depends_on:
       api:
         condition: service_healthy

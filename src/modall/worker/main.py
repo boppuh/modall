@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import socket
+import time
 from datetime import timedelta
 from uuid import uuid4
 
@@ -55,42 +56,61 @@ async def run_worker(settings: Settings) -> None:
             settings, session_factory
         )
         worker_id = f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex}"
+        next_maintenance_at = 0.0
         while True:
             run_once(settings)
+            work_claimed = False
             try:
-                await invocation_runner.claim_and_run(
+                work_claimed = await invocation_runner.claim_and_run(
                     worker_id=worker_id,
                     lease_duration=timedelta(seconds=settings.worker_lease_duration_seconds),
                 )
             except Exception:
                 logger.warning("invocation_poll_failed")
-            try:
-                async with asyncio.timeout(settings.worker_maintenance_timeout_seconds):
-                    async with transaction(session_factory) as session:
-                        await purge_expired_registry_cache(session)
-            except Exception:
-                logger.warning("registry_cache_cleanup_failed")
-            try:
-                async with asyncio.timeout(settings.worker_maintenance_timeout_seconds):
-                    async with transaction(session_factory) as session:
-                        await execution_service_factory(session).expire_retained_results()
-            except Exception:
-                logger.warning("result_cleanup_failed")
-            try:
-                async with asyncio.timeout(settings.worker_maintenance_timeout_seconds):
-                    async with transaction(session_factory) as session:
-                        await execution_service_factory(session).expire_retained_content()
-            except Exception:
-                logger.warning("argument_cleanup_failed")
-            try:
-                async with asyncio.timeout(settings.worker_maintenance_timeout_seconds):
-                    async with transaction(session_factory) as session:
-                        await execution_service_factory(session).delete_expired_run_metadata()
-            except Exception:
-                logger.warning("run_metadata_cleanup_failed")
+            now = time.monotonic()
+            if now >= next_maintenance_at:
+                await _run_maintenance(
+                    settings=settings,
+                    session_factory=session_factory,
+                    execution_service_factory=execution_service_factory,
+                )
+                next_maintenance_at = now + settings.worker_maintenance_interval_seconds
+            if work_claimed:
+                continue
             await asyncio.sleep(settings.worker_poll_interval_seconds)
     finally:
         await engine.dispose()
+
+
+async def _run_maintenance(
+    *,
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    execution_service_factory: ExecutionServiceFactory,
+) -> None:
+    operations = (
+        ("registry_cache_cleanup_failed", purge_expired_registry_cache),
+        (
+            "result_cleanup_failed",
+            lambda session: execution_service_factory(session).expire_retained_results(),
+        ),
+        (
+            "argument_cleanup_failed",
+            lambda session: execution_service_factory(session).expire_retained_content(),
+        ),
+        (
+            "run_metadata_cleanup_failed",
+            lambda session: execution_service_factory(session).delete_expired_run_metadata(),
+        ),
+    )
+    logger = logging.getLogger("modall.worker")
+    for failure_code, operation in operations:
+        try:
+            async with asyncio.timeout(settings.worker_maintenance_timeout_seconds):
+                async with transaction(session_factory) as session:
+                    await operation(session)
+        except Exception:
+            logger.warning(failure_code)
 
 
 def build_execution_runtime(

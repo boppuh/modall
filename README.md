@@ -36,6 +36,10 @@ Compose applies Alembic migrations before starting the API. For a separately man
 run `make migrate` with `MODALL_DATABASE_URL` configured.
 
 Local/test processes use the explicit `local` authentication mode and fixture secret provider.
+Local fixture credentials are shared by the API and worker through
+`MODALL_FIXTURE_SECRET_ROOT`. Store each credential beneath that directory using the same
+base64url filename mapping described below; `.modall/` is ignored by Git and mounted read-only by
+Compose. Create `.modall/fixture-secrets` before starting Compose and never commit its contents.
 Staging and production settings fail validation unless OIDC (`MODALL_OIDC_ISSUER`,
 `MODALL_OIDC_AUDIENCE`, and `MODALL_OIDC_JWKS_URL`) and the `mounted_file` secret provider are
 configured. Mounted secrets are read only from `MODALL_SECRET_MOUNT_ROOT`. The immutable filename

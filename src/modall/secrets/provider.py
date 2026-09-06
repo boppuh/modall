@@ -72,8 +72,16 @@ def validate_secret_reference(reference: SecretReference) -> None:
 class FixtureSecretProvider:
     """In-memory provider restricted to tests and local fixtures."""
 
-    def __init__(self, values: dict[tuple[str, str], bytes]) -> None:
+    def __init__(
+        self,
+        values: dict[tuple[str, str], bytes],
+        *,
+        mounted_root: Path | None = None,
+    ) -> None:
         self._values = values
+        self._mounted = (
+            MountedFileSecretProvider(mounted_root) if mounted_root is not None else None
+        )
 
     def retrieve(self, reference: SecretReference) -> SecretLease:
         if reference.provider != "fixture":
@@ -81,7 +89,15 @@ class FixtureSecretProvider:
         try:
             value = self._values[(reference.external_reference, reference.version)]
         except KeyError:
-            raise SecretProviderError("secret reference not found") from None
+            if self._mounted is None:
+                raise SecretProviderError("secret reference not found") from None
+            return self._mounted.retrieve(
+                SecretReference(
+                    provider="mounted_file",
+                    external_reference=reference.external_reference,
+                    version=reference.version,
+                )
+            )
         return SecretLease(value)
 
 
@@ -169,4 +185,4 @@ def build_secret_provider(
         return MountedFileSecretProvider(settings.secret_mount_root)
     if settings.environment not in {"local", "test"}:
         raise ValueError("fixture secrets are restricted to local and test environments")
-    return FixtureSecretProvider(fixture_values or {})
+    return FixtureSecretProvider(fixture_values or {}, mounted_root=settings.fixture_secret_root)

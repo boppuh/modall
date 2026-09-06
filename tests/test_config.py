@@ -14,6 +14,7 @@ def test_settings_use_safe_local_defaults(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.log_level == "INFO"
     assert settings.worker_poll_interval_seconds == 1.0
     assert settings.worker_maintenance_timeout_seconds == 5.0
+    assert settings.worker_maintenance_interval_seconds == 60.0
     assert str(settings.database_url) == "postgresql://modall:modall@localhost:5432/modall"
 
 
@@ -23,6 +24,12 @@ def test_settings_reject_unsafe_poll_intervals(interval: float) -> None:
         Settings(_env_file=None, worker_poll_interval_seconds=interval)
     with pytest.raises(ValidationError):
         Settings(_env_file=None, worker_maintenance_timeout_seconds=interval)
+
+
+@pytest.mark.parametrize("interval", [0, -1, math.inf, math.nan, 3600.1])
+def test_settings_reject_unsafe_maintenance_intervals(interval: float) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, worker_maintenance_interval_seconds=interval)
 
 
 @pytest.mark.parametrize("lease_seconds", [0, 10, 10.001, 14.999, math.inf, math.nan, 300.1])
@@ -51,6 +58,16 @@ def test_worker_lease_includes_invocation_finalization_margin(lease_seconds: flo
         },
         {"local_subject": "  "},
         {"local_subject": "s" * 513},
+        {"secret_provider": "mounted_file", "fixture_secret_root": "/tmp/fixtures"},
+        {
+            "environment": "production",
+            "auth_mode": "oidc",
+            "oidc_issuer": "https://issuer.example",
+            "oidc_audience": "modall",
+            "oidc_jwks_url": "https://issuer.example/jwks",
+            "secret_provider": "mounted_file",
+            "fixture_secret_root": "/tmp/fixtures",
+        },
     ],
 )
 def test_settings_reject_confused_security_modes(overrides: dict[str, str]) -> None:
