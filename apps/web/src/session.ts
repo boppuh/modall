@@ -35,6 +35,10 @@ export function loadSession(storage: Storage = localStorage): WorkspaceSession |
 }
 
 export function saveSession(session: WorkspaceSession, storage: Storage = localStorage): void {
+  if (session.accessToken) {
+    storage.removeItem(storageKey);
+    return;
+  }
   storage.setItem(
     storageKey,
     JSON.stringify({

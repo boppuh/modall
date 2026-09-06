@@ -13,8 +13,8 @@ describe("workspace session", () => {
 
     const oidc = { ...local, accessToken: "token" };
     saveSession(oidc, storage);
-    expect(loadSession(storage)).toEqual(local);
-    expect(storage.getItem("modall.workspace-session.v1")).not.toContain("token");
+    expect(loadSession(storage)).toBeNull();
+    expect(storage.getItem("modall.workspace-session.v1")).toBeNull();
     clearSession(storage);
     expect(loadSession(storage)).toBeNull();
   });

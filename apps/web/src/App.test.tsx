@@ -114,6 +114,7 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Workspace label"), { target: { value: "iOS pilot" } });
     fireEvent.change(screen.getByLabelText("Workspace UUID"), { target: { value: workspaceId } });
     fireEvent.change(screen.getByLabelText(/OIDC access token/), { target: { value: "token" } });
+    fireEvent.change(screen.getByLabelText(/OIDC access token/), { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: /enter control plane/i }));
     expect(await screen.findByRole("heading", { name: "Registry overview" })).toBeTruthy();
     expect(localStorage.length).toBe(1);

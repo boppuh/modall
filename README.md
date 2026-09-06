@@ -34,7 +34,8 @@ The API readiness endpoint is at `http://localhost:8000/health/ready`; the web s
 
 The operator UI asks for the bootstrapped workspace UUID. Local mode uses the configured local
 identity; OIDC environments also accept an access token for the current browser session. Tokens
-remain in memory and are never written to browser storage. The UI covers Registry search/import,
+remain in memory and are never written to browser storage; OIDC sessions therefore require a new
+token after a reload. The UI covers Registry search/import,
 manual connection and lifecycle controls, immutable capability review, one-time run confirmation,
 polling, cancellation, and the durable event timeline.
 
