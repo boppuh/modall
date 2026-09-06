@@ -1254,6 +1254,28 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
             assert response.content.endswith(b"\r\r")
             assert response_less_transport.tool_call_response_completed is False
 
+        async def json_notification(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                content=(
+                    b'{"jsonrpc":"2.0","method":"notifications/progress",'
+                    b'"params":{"progress":1}}'
+                ),
+                request=request,
+            )
+
+        notification_transport = LimitedTransport(
+            httpx.MockTransport(json_notification), 256
+        )
+        async with httpx.AsyncClient(transport=notification_transport) as client:
+            response = await client.post(
+                "https://example.test",
+                json={"jsonrpc": "2.0", "id": 7, "method": "tools/call"},
+            )
+            assert response.json()["method"] == "notifications/progress"
+            assert notification_transport.tool_call_response_completed is False
+
         async def sensitive_sse(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,

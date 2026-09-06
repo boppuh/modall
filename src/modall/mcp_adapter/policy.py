@@ -666,7 +666,7 @@ def _noop() -> None:
 
 
 def _jsonrpc_response(value: bytes, expected_id: object) -> tuple[bool, bool] | None:
-    """Classify one complete envelope, preserving malformed-body certainty."""
+    """Classify one complete document, preserving malformed-body certainty."""
 
     try:
         payload = json.loads(value)
@@ -678,7 +678,7 @@ def _jsonrpc_response(value: bytes, expected_id: object) -> tuple[bool, bool] | 
         or "id" not in payload
         or ("result" not in payload and "error" not in payload)
     ):
-        return None
+        return False, False
     matching = type(payload["id"]) is type(expected_id) and payload["id"] == expected_id
     return matching, matching and isinstance(payload.get("error"), dict)
 
