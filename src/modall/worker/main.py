@@ -82,6 +82,12 @@ async def run_worker(settings: Settings) -> None:
                         await execution_service_factory(session).expire_retained_content()
             except Exception:
                 logger.warning("argument_cleanup_failed")
+            try:
+                async with asyncio.timeout(settings.worker_maintenance_timeout_seconds):
+                    async with transaction(session_factory) as session:
+                        await execution_service_factory(session).delete_expired_run_metadata()
+            except Exception:
+                logger.warning("run_metadata_cleanup_failed")
             await asyncio.sleep(settings.worker_poll_interval_seconds)
     finally:
         await engine.dispose()

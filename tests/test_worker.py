@@ -50,6 +50,7 @@ def test_worker_runs_global_registry_cache_cleanup(
         cleanups = 0
         result_cleanups = 0
         argument_cleanups = 0
+        metadata_cleanups = 0
         invocation_polls = 0
         sleeps: list[float] = []
 
@@ -69,6 +70,11 @@ def test_worker_runs_global_registry_cache_cleanup(
             async def expire_retained_content(self) -> int:
                 nonlocal argument_cleanups
                 argument_cleanups += 1
+                return 0
+
+            async def delete_expired_run_metadata(self) -> int:
+                nonlocal metadata_cleanups
+                metadata_cleanups += 1
                 return 0
 
         async def cleanup(session: object) -> None:
@@ -101,6 +107,7 @@ def test_worker_runs_global_registry_cache_cleanup(
         assert invocation_polls == 1
         assert result_cleanups == 1
         assert argument_cleanups == 1
+        assert metadata_cleanups == 1
         assert sleeps == [0.25]
 
     asyncio.run(scenario(cleanup_outcome="succeeds"))
