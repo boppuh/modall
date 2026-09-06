@@ -38,8 +38,12 @@ def test_worker_run_polls_with_configured_interval(monkeypatch: pytest.MonkeyPat
 def test_worker_runs_global_registry_cache_cleanup(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    async def scenario(*, cleanup_fails: bool) -> None:
-        settings = Settings(environment="test", worker_poll_interval_seconds=0.25)
+    async def scenario(*, cleanup_outcome: str) -> None:
+        settings = Settings(
+            environment="test",
+            worker_poll_interval_seconds=0.25,
+            worker_maintenance_timeout_seconds=0.01,
+        )
         engine = create_engine("sqlite+aiosqlite:///:memory:")
         cleanups = 0
         sleeps: list[float] = []
@@ -48,8 +52,10 @@ def test_worker_runs_global_registry_cache_cleanup(
             nonlocal cleanups
             del session
             cleanups += 1
-            if cleanup_fails:
+            if cleanup_outcome == "fails":
                 raise RuntimeError("database detail")
+            if cleanup_outcome == "hangs":
+                await asyncio.Event().wait()
 
         async def stop(seconds: float) -> None:
             sleeps.append(seconds)
@@ -63,8 +69,9 @@ def test_worker_runs_global_registry_cache_cleanup(
         assert cleanups == 1
         assert sleeps == [0.25]
 
-    asyncio.run(scenario(cleanup_fails=False))
+    asyncio.run(scenario(cleanup_outcome="succeeds"))
     with caplog.at_level(logging.WARNING):
-        asyncio.run(scenario(cleanup_fails=True))
+        asyncio.run(scenario(cleanup_outcome="fails"))
+        asyncio.run(scenario(cleanup_outcome="hangs"))
     assert "registry_cache_cleanup_failed" in caplog.text
     assert "database detail" not in caplog.text

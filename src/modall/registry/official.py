@@ -158,6 +158,9 @@ class _DecodeWorkExceeded(ValueError):
     pass
 
 
+_JSON_DECODE_FAILED = object()
+
+
 def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -178,6 +181,26 @@ def _parse_finite_float(value: str) -> float:
     return parsed
 
 
+def _is_utf8(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _decode_registry_json(body: bytes) -> object:
+    try:
+        return json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_members,
+            parse_constant=_reject_nonfinite,
+            parse_float=_parse_finite_float,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+        return _JSON_DECODE_FAILED
+
+
 def _canonical_json(value: object) -> bytes:
     try:
         return json.dumps(
@@ -187,8 +210,8 @@ def _canonical_json(value: object) -> bytes:
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
-    except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError) as exc:
-        raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from exc
+    except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError):
+        raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from None
 
 
 def _digest(value: object) -> str:
@@ -200,8 +223,8 @@ def _decoded(value: str) -> str:
     for _ in range(8):
         try:
             next_value = unquote(decoded, errors="strict")
-        except UnicodeError as exc:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from exc
+        except UnicodeError:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from None
         if next_value == decoded:
             return decoded
         decoded = next_value
@@ -261,13 +284,13 @@ class OfficialRegistryAdapter:
 
     def __init__(
         self,
-        client: httpx.AsyncClient,
         *,
+        transport: httpx.AsyncBaseTransport | None = None,
         limits: OfficialRegistryLimits | None = None,
         query_scanner: Callable[[object], bool] = _default_metadata_scanner,
         metadata_scanner: Callable[[object], bool] = _default_metadata_scanner,
     ) -> None:
-        self._client = client
+        self._transport = transport
         self._limits = limits or OfficialRegistryLimits()
         self._query_scanner = query_scanner
         self._metadata_scanner = metadata_scanner
@@ -282,6 +305,16 @@ class OfficialRegistryAdapter:
         return await _screen_query(query, self._limits, self._query_scanner)
 
     async def search(self, query: str) -> tuple[OfficialRegistryItem, ...]:
+        async with httpx.AsyncClient(
+            transport=self._transport,
+            trust_env=False,
+            follow_redirects=False,
+        ) as client:
+            return await self._search_with_client(client, query)
+
+    async def _search_with_client(
+        self, client: httpx.AsyncClient, query: str
+    ) -> tuple[OfficialRegistryItem, ...]:
         items: list[OfficialRegistryItem] = []
         identities: set[tuple[str, str]] = set()
         cursor: str | None = None
@@ -305,7 +338,7 @@ class OfficialRegistryAdapter:
                         headers={"Accept": "application/json", "Accept-Encoding": "identity"},
                     )
                     with _suppress_registry_request_logs():
-                        response = await self._client.send(
+                        response = await client.send(
                             request,
                             auth=None,
                             follow_redirects=False,
@@ -334,10 +367,10 @@ class OfficialRegistryAdapter:
                         if declared_length is not None:
                             try:
                                 parsed_length = int(declared_length)
-                            except ValueError as exc:
+                            except ValueError:
                                 raise OfficialRegistryError(
                                     OfficialRegistryFailureCode.INVALID_RESPONSE
-                                ) from exc
+                                ) from None
                             if (
                                 parsed_length < 0
                                 or total_bytes + parsed_length > self._limits.max_response_bytes
@@ -383,14 +416,14 @@ class OfficialRegistryAdapter:
                     if cursor in seen_cursors:
                         raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
                     seen_cursors.add(cursor)
-        except TimeoutError as exc:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from exc
-        except httpx.TimeoutException as exc:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from exc
-        except httpx.DecodingError as exc:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from exc
-        except httpx.HTTPError as exc:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.UPSTREAM_UNAVAILABLE) from exc
+        except TimeoutError:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from None
+        except httpx.TimeoutException:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from None
+        except httpx.DecodingError:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from None
+        except httpx.HTTPError:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.UPSTREAM_UNAVAILABLE) from None
         raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT)
 
     async def parse_cached_items(self, values: object) -> tuple[OfficialRegistryItem, ...]:
@@ -400,19 +433,13 @@ class OfficialRegistryAdapter:
         return self._normalize_items(values)
 
     async def _parse_page(self, body: bytes) -> tuple[tuple[OfficialRegistryItem, ...], str | None]:
-        try:
-            payload = json.loads(
-                body.decode("utf-8"),
-                object_pairs_hook=_reject_duplicate_members,
-                parse_constant=_reject_nonfinite,
-                parse_float=_parse_finite_float,
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from exc
+        payload = _decode_registry_json(body)
+        if payload is _JSON_DECODE_FAILED:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
         try:
             validate_bounded_json(payload)
-        except MetadataValidationError as exc:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT) from exc
+        except MetadataValidationError:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT) from None
         await self._screen(payload)
         if not isinstance(payload, dict) or set(payload) - {"servers", "metadata"}:
             raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
@@ -431,11 +458,8 @@ class OfficialRegistryAdapter:
             or any(ord(character) < 32 or ord(character) == 127 for character in cursor)
         ):
             raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
-        if cursor is not None:
-            try:
-                cursor.encode("utf-8")
-            except UnicodeEncodeError as exc:
-                raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from exc
+        if cursor is not None and not _is_utf8(cursor):
+            raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
         return self._normalize_items(servers), cursor
 
     async def _screen(self, value: object) -> None:
@@ -491,12 +515,9 @@ class OfficialRegistryAdapter:
             or not value.strip()
             or len(value) > maximum
             or "\x00" in value
+            or not _is_utf8(value)
         ):
             raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from exc
         return value.strip()
 
     def _advertised_urls(self, server: dict[str, object]) -> tuple[str, ...]:
@@ -542,8 +563,8 @@ class OfficialRegistryService:
         try:
             async with asyncio.timeout(self._limits.total_timeout_seconds):
                 return await self._search_authorized(context=context, query=query)
-        except TimeoutError as exc:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from exc
+        except TimeoutError:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from None
 
     async def _search_authorized(
         self, *, context: WorkspaceContext, query: str
@@ -644,7 +665,12 @@ class OfficialRegistryService:
             or _digest(cache.normalized_results) != cache.response_digest
         ):
             raise OfficialRegistryError(OfficialRegistryFailureCode.CACHE_MISS)
-        items = await self._adapter.parse_cached_items(cache.normalized_results)
+        try:
+            items = await self._adapter.parse_cached_items(cache.normalized_results)
+        except OfficialRegistryError:
+            await self._session.delete(cache)
+            await self._session.flush()
+            raise
         item = next(
             (candidate for candidate in items if candidate.provenance_digest == provenance_digest),
             None,
@@ -746,10 +772,8 @@ async def _screen_query(
     ):
         raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_QUERY)
     normalized = query.strip()
-    try:
-        normalized.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_QUERY) from exc
+    if not _is_utf8(normalized):
+        raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_QUERY)
     unsafe = await _run_scanner(
         scanner,
         normalized,
@@ -790,17 +814,17 @@ async def _run_scanner(
         loop.remove_reader(receiver.fileno())
         try:
             succeeded, result = cast(tuple[bool, bool], receiver.recv())
-        except (EOFError, OSError, TypeError, ValueError) as exc:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from exc
+        except (EOFError, OSError, TypeError, ValueError):
+            raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from None
         if not succeeded:
             raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED)
         return result
-    except TimeoutError as exc:
-        raise OfficialRegistryError(timeout_code) from exc
+    except TimeoutError:
+        raise OfficialRegistryError(timeout_code) from None
     except OfficialRegistryError:
         raise
-    except Exception as exc:
-        raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from exc
+    except Exception:
+        raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED) from None
     finally:
         if "loop" in locals() and "ready" in locals():
             loop.remove_reader(receiver.fileno())

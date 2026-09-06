@@ -133,7 +133,7 @@ def test_official_adapter_uses_recorded_contract_and_bounded_pagination() -> Non
             return fixture_response("search_page_2.json", request)
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            items = await OfficialRegistryAdapter(client).search("fixture")
+            items = await OfficialRegistryAdapter(transport=client._transport).search("fixture")
         assert [item.external_id for item in items] == [
             "io.modall.fixture/weather",
             "io.modall.fixture/status",
@@ -175,7 +175,7 @@ def test_search_cache_and_import_preserve_provenance_without_connection_trust() 
                 )
                 user_id = operator.id
             async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-                adapter = OfficialRegistryAdapter(client)
+                adapter = OfficialRegistryAdapter(transport=client._transport)
                 async with transaction(factory) as session:
                     context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
                     service = OfficialRegistryService(session, adapter, now=lambda: clock)
@@ -188,7 +188,9 @@ def test_search_cache_and_import_preserve_provenance_without_connection_trust() 
 
                     strict_service = OfficialRegistryService(
                         session,
-                        OfficialRegistryAdapter(client, query_scanner=scanner_times_out),
+                        OfficialRegistryAdapter(
+                            transport=client._transport, query_scanner=scanner_times_out
+                        ),
                         now=lambda: clock,
                     )
                     with pytest.raises(OfficialRegistryError) as blocked_cache_hit:
@@ -272,7 +274,9 @@ def test_unsafe_query_sends_and_persists_nothing(
                 transaction(factory) as session,
             ):
                 context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
-                service = OfficialRegistryService(session, OfficialRegistryAdapter(client))
+                service = OfficialRegistryService(
+                    session, OfficialRegistryAdapter(transport=client._transport)
+                )
                 with pytest.raises(OfficialRegistryError) as raised:
                     await service.search(context=context, query=query)
                 assert raised.value.code == expected_code
@@ -309,7 +313,9 @@ def test_scanner_failure_and_unsafe_metadata_write_no_cache() -> None:
                     context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
                     service = OfficialRegistryService(
                         session,
-                        OfficialRegistryAdapter(client, query_scanner=scanner_times_out),
+                        OfficialRegistryAdapter(
+                            transport=client._transport, query_scanner=scanner_times_out
+                        ),
                     )
                     with pytest.raises(OfficialRegistryError) as failed:
                         await service.search(context=context, query="weather")
@@ -318,7 +324,9 @@ def test_scanner_failure_and_unsafe_metadata_write_no_cache() -> None:
 
                 async with transaction(factory) as session:
                     context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
-                    service = OfficialRegistryService(session, OfficialRegistryAdapter(client))
+                    service = OfficialRegistryService(
+                        session, OfficialRegistryAdapter(transport=client._transport)
+                    )
                     with pytest.raises(OfficialRegistryError) as unsafe:
                         await service.search(context=context, query="weather")
                     assert unsafe.value.code == OfficialRegistryFailureCode.UNSAFE_METADATA
@@ -358,6 +366,16 @@ def test_scanner_failure_and_unsafe_metadata_write_no_cache() -> None:
             lambda request: httpx.Response(
                 200,
                 headers={"Content-Type": "application/json"},
+                content=b'{"servers":[],"metadata":{"count":0},"secret":"\xff"}',
+                request=request,
+            ),
+            OfficialRegistryLimits(),
+            OfficialRegistryFailureCode.INVALID_RESPONSE,
+        ),
+        (
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
                 content=b'{"servers":[],"metadata":{"count":0,"nextCursor":"\\ud800"}}',
                 request=request,
             ),
@@ -381,8 +399,12 @@ def test_upstream_outage_invalid_payload_and_limits_are_isolated(
         assert callable(responder)
         async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
             with pytest.raises(OfficialRegistryError) as raised:
-                await OfficialRegistryAdapter(client, limits=limits).search("weather")
+                await OfficialRegistryAdapter(transport=client._transport, limits=limits).search(
+                    "weather"
+                )
         assert raised.value.code == expected_code
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
 
     asyncio.run(scenario())
 
@@ -408,7 +430,7 @@ def test_cache_is_workspace_scoped_expires_within_one_hour_and_roles_are_current
             user_a, workspace_a = await bootstrap(factory, subject="workspace-a")
             user_b, workspace_b = await bootstrap(factory, subject="workspace-b")
             async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-                adapter = OfficialRegistryAdapter(client)
+                adapter = OfficialRegistryAdapter(transport=client._transport)
                 async with transaction(factory) as session:
                     context_a = await context_for(session, user_id=user_a, workspace_id=workspace_a)
                     result_a = await OfficialRegistryService(
@@ -533,8 +555,9 @@ def test_adapter_rejects_redirect_header_and_json_envelope_faults(
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
             with pytest.raises(OfficialRegistryError) as raised:
-                await OfficialRegistryAdapter(client).search("weather")
+                await OfficialRegistryAdapter(transport=client._transport).search("weather")
         assert raised.value.code == expected_code
+        assert raised.value.__cause__ is None
 
     asyncio.run(scenario())
 
@@ -555,7 +578,9 @@ def test_adapter_bounds_streams_timeouts_transport_errors_and_direct_queries() -
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(counted)) as client:
             with pytest.raises(OfficialRegistryError) as unsafe:
-                await OfficialRegistryAdapter(client).search("token=AbCdEfGhIjKlMnOpQrStUvWx")
+                await OfficialRegistryAdapter(transport=client._transport).search(
+                    "token=AbCdEfGhIjKlMnOpQrStUvWx"
+                )
             assert unsafe.value.code == OfficialRegistryFailureCode.UNSAFE_QUERY
         assert calls == 0
 
@@ -570,7 +595,8 @@ def test_adapter_bounds_streams_timeouts_transport_errors_and_direct_queries() -
         async with httpx.AsyncClient(transport=httpx.MockTransport(streamed)) as client:
             with pytest.raises(OfficialRegistryError) as limited:
                 await OfficialRegistryAdapter(
-                    client, limits=OfficialRegistryLimits(max_response_bytes=32)
+                    transport=client._transport,
+                    limits=OfficialRegistryLimits(max_response_bytes=32),
                 ).search("weather")
             assert limited.value.code == OfficialRegistryFailureCode.RESPONSE_LIMIT
 
@@ -582,7 +608,8 @@ def test_adapter_bounds_streams_timeouts_transport_errors_and_direct_queries() -
         async with httpx.AsyncClient(transport=httpx.MockTransport(hanging)) as client:
             with pytest.raises(OfficialRegistryError) as timed_out:
                 await OfficialRegistryAdapter(
-                    client, limits=OfficialRegistryLimits(total_timeout_seconds=0.01)
+                    transport=client._transport,
+                    limits=OfficialRegistryLimits(total_timeout_seconds=0.01),
                 ).search("weather")
             assert timed_out.value.code == OfficialRegistryFailureCode.TIMEOUT
 
@@ -591,7 +618,7 @@ def test_adapter_bounds_streams_timeouts_transport_errors_and_direct_queries() -
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(disconnected)) as client:
             with pytest.raises(OfficialRegistryError) as unavailable:
-                await OfficialRegistryAdapter(client).search("weather")
+                await OfficialRegistryAdapter(transport=client._transport).search("weather")
             assert unavailable.value.code == OfficialRegistryFailureCode.UPSTREAM_UNAVAILABLE
 
         async def client_timeout(request: httpx.Request) -> httpx.Response:
@@ -599,7 +626,7 @@ def test_adapter_bounds_streams_timeouts_transport_errors_and_direct_queries() -
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(client_timeout)) as client:
             with pytest.raises(OfficialRegistryError) as timed_out_by_client:
-                await OfficialRegistryAdapter(client).search("weather")
+                await OfficialRegistryAdapter(transport=client._transport).search("weather")
             assert timed_out_by_client.value.code == OfficialRegistryFailureCode.TIMEOUT
 
     asyncio.run(scenario())
@@ -613,7 +640,8 @@ def test_metadata_scanner_failure_is_payload_free() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             with pytest.raises(OfficialRegistryError) as raised:
                 await OfficialRegistryAdapter(
-                    client, metadata_scanner=scanner_fails_with_sensitive_detail
+                    transport=client._transport,
+                    metadata_scanner=scanner_fails_with_sensitive_detail,
                 ).search("weather")
         assert raised.value.code == OfficialRegistryFailureCode.SCANNER_FAILED
         assert "scanner internals" not in str(raised.value)
@@ -640,7 +668,7 @@ def test_changed_official_metadata_appends_an_immutable_entry_version() -> None:
         async with database() as factory:
             user_id, workspace_id = await bootstrap(factory, subject="registry-versioning")
             async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-                adapter = OfficialRegistryAdapter(client)
+                adapter = OfficialRegistryAdapter(transport=client._transport)
                 async with transaction(factory) as session:
                     context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
                     service = OfficialRegistryService(session, adapter)
@@ -687,6 +715,11 @@ def test_registry_request_strips_ambient_credentials_and_suppresses_query_logs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def scenario() -> None:
+        hooked_requests: list[httpx.Request] = []
+
+        async def capture_request(request: httpx.Request) -> None:
+            hooked_requests.append(request)
+
         async def handler(request: httpx.Request) -> httpx.Response:
             assert "Authorization" not in request.headers
             assert "Cookie" not in request.headers
@@ -703,9 +736,13 @@ def test_registry_request_strips_ambient_credentials_and_suppresses_query_logs(
             auth=httpx.BasicAuth("ambient-user", "ambient-password"),
             headers={"Authorization": "Bearer ambient-secret"},
             cookies={"session": "ambient-cookie"},
+            event_hooks={"request": [capture_request]},
         ) as client:
             with caplog.at_level(logging.INFO, logger="httpx"):
-                await OfficialRegistryAdapter(client).search("private operator search")
+                await OfficialRegistryAdapter(transport=client._transport).search(
+                    "private operator search"
+                )
+        assert hooked_requests == []
 
     asyncio.run(scenario())
     assert "private operator search" not in caplog.text
@@ -721,7 +758,7 @@ def test_scanning_runs_off_loop_under_the_configured_deadline() -> None:
         limits = OfficialRegistryLimits(total_timeout_seconds=0.01)
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OfficialRegistryAdapter(
-                client,
+                transport=client._transport,
                 limits=limits,
                 query_scanner=scanner_allows,
                 metadata_scanner=scanner_blocks_briefly,
@@ -738,7 +775,7 @@ def test_repeated_hanging_scanners_are_killed_without_leaking_workers() -> None:
         limits = OfficialRegistryLimits(total_timeout_seconds=0.02)
         async with httpx.AsyncClient() as client:
             adapter = OfficialRegistryAdapter(
-                client,
+                transport=client._transport,
                 limits=limits,
                 query_scanner=scanner_hangs,
             )
@@ -818,7 +855,7 @@ def test_normalized_cache_payload_must_fit_the_active_byte_limit() -> None:
                 service = OfficialRegistryService(
                     session,
                     OfficialRegistryAdapter(
-                        client,
+                        transport=client._transport,
                         limits=OfficialRegistryLimits(max_response_bytes=byte_limit),
                     ),
                 )
@@ -832,6 +869,54 @@ def test_normalized_cache_payload_must_fit_the_active_byte_limit() -> None:
     asyncio.run(scenario())
 
 
+def test_import_purges_cache_rejected_by_the_active_scanner() -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads((FIXTURES / "search_page_1.json").read_text())
+            payload["servers"][0]["server"]["description"] = (
+                "token%2525253DAbCdEfGhIjKlMnOpQrStUvWx"
+            )
+            payload["metadata"].pop("nextCursor", None)
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                request=request,
+            )
+
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="import-rescan")
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                    searched = await OfficialRegistryService(
+                        session,
+                        OfficialRegistryAdapter(
+                            transport=client._transport,
+                            metadata_scanner=scanner_allows,
+                        ),
+                    ).search(context=context, query="weather")
+
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                    service = OfficialRegistryService(
+                        session, OfficialRegistryAdapter(transport=client._transport)
+                    )
+                    with pytest.raises(OfficialRegistryError) as raised:
+                        await service.import_cached(
+                            context=context,
+                            cache_id=searched.cache_id,
+                            provenance_digest=searched.items[0].provenance_digest,
+                        )
+                    assert raised.value.code == OfficialRegistryFailureCode.UNSAFE_METADATA
+                    assert await session.get(RegistrySearchCache, searched.cache_id) is None
+
+                async with transaction(factory) as session:
+                    assert await session.get(RegistrySearchCache, searched.cache_id) is None
+
+    asyncio.run(scenario())
+
+
 def test_service_and_adapter_cannot_diverge_on_limits() -> None:
     async def scenario() -> None:
         async with (
@@ -841,7 +926,9 @@ def test_service_and_adapter_cannot_diverge_on_limits() -> None:
             ) as client,
             transaction(factory) as session,
         ):
-            adapter = OfficialRegistryAdapter(client, limits=OfficialRegistryLimits(max_items=2))
+            adapter = OfficialRegistryAdapter(
+                transport=client._transport, limits=OfficialRegistryLimits(max_items=2)
+            )
             with pytest.raises(ValueError, match="one official Registry limits policy"):
                 OfficialRegistryService(
                     session,
@@ -874,7 +961,7 @@ def test_cache_reuse_and_import_respect_a_stricter_rolling_byte_policy() -> None
                 async with transaction(factory) as session:
                     context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
                     original = await OfficialRegistryService(
-                        session, OfficialRegistryAdapter(client)
+                        session, OfficialRegistryAdapter(transport=client._transport)
                     ).search(context=context, query="inference")
                     cache = await session.get(RegistrySearchCache, original.cache_id)
                     assert cache is not None
@@ -884,7 +971,7 @@ def test_cache_reuse_and_import_respect_a_stricter_rolling_byte_policy() -> None
                 async with transaction(factory) as session:
                     context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
                     service = OfficialRegistryService(
-                        session, OfficialRegistryAdapter(client, limits=strict)
+                        session, OfficialRegistryAdapter(transport=client._transport, limits=strict)
                     )
                     with pytest.raises(OfficialRegistryError) as limited:
                         await service.search(context=context, query="inference")
@@ -920,7 +1007,9 @@ def test_cache_reuse_and_import_respect_a_stricter_rolling_ttl() -> None:
                 async with transaction(factory) as session:
                     context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
                     original = await OfficialRegistryService(
-                        session, OfficialRegistryAdapter(client), now=lambda: now
+                        session,
+                        OfficialRegistryAdapter(transport=client._transport),
+                        now=lambda: now,
                     ).search(context=context, query="fixture")
 
                 now += timedelta(minutes=10)
@@ -929,7 +1018,7 @@ def test_cache_reuse_and_import_respect_a_stricter_rolling_ttl() -> None:
                     context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
                     service = OfficialRegistryService(
                         session,
-                        OfficialRegistryAdapter(client, limits=strict_limits),
+                        OfficialRegistryAdapter(transport=client._transport, limits=strict_limits),
                         now=lambda: now,
                     )
                     refreshed = await service.search(context=context, query="fixture")

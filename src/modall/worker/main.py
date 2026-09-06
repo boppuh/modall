@@ -43,8 +43,9 @@ async def run_worker(settings: Settings) -> None:
         while True:
             run_once(settings)
             try:
-                async with transaction(session_factory) as session:
-                    await purge_expired_registry_cache(session)
+                async with asyncio.timeout(settings.worker_maintenance_timeout_seconds):
+                    async with transaction(session_factory) as session:
+                        await purge_expired_registry_cache(session)
             except Exception:
                 logger.warning("registry_cache_cleanup_failed")
             await asyncio.sleep(settings.worker_poll_interval_seconds)
