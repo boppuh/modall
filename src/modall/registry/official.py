@@ -772,10 +772,13 @@ class OfficialRegistryService:
             return None, None
         try:
             items = await self._adapter.parse_cached_items(cache.normalized_results)
+            validated_at = self._utc_now()
             valid = (
                 len(items) == cache.result_count
                 and len(_canonical_json(cache.normalized_results)) == cache.byte_count
                 and _digest(cache.normalized_results) == cache.response_digest
+                and _utc_timestamp(cache.expires_at) > validated_at
+                and _utc_timestamp(cache.fetched_at) > validated_at - self._limits.cache_ttl
             )
         except OfficialRegistryError:
             valid = False
@@ -859,15 +862,22 @@ class OfficialRegistryService:
         if item is None:
             raise OfficialRegistryError(OfficialRegistryFailureCode.CACHE_MISS)
 
-        entry = await self._session.scalar(
-            select(RegistryEntry)
-            .where(
-                RegistryEntry.workspace_id == context.workspace_id,
-                RegistryEntry.source == RegistrySource.OFFICIAL.value,
-                RegistryEntry.external_id == item.external_id,
+        entry_lookup_failed = False
+        try:
+            entry = await self._session.scalar(
+                select(RegistryEntry)
+                .where(
+                    RegistryEntry.workspace_id == context.workspace_id,
+                    RegistryEntry.source == RegistrySource.OFFICIAL.value,
+                    RegistryEntry.external_id == item.external_id,
+                )
+                .with_for_update()
             )
-            .with_for_update()
-        )
+        except SQLAlchemyError:
+            entry_lookup_failed = True
+            entry = None
+        if entry_lookup_failed:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.PERSISTENCE_FAILURE)
         if entry is None:
             entry = RegistryEntry(
                 workspace_id=context.workspace_id,
@@ -878,12 +888,19 @@ class OfficialRegistryService:
             self._session.add(entry)
             if not await _flush_registry_payload(self._session):
                 raise OfficialRegistryError(OfficialRegistryFailureCode.PERSISTENCE_FAILURE)
-        existing = await self._session.scalar(
-            select(RegistryEntryVersion).where(
-                RegistryEntryVersion.registry_entry_id == entry.id,
-                RegistryEntryVersion.provenance_digest == item.provenance_digest,
+        version_lookup_failed = False
+        try:
+            existing = await self._session.scalar(
+                select(RegistryEntryVersion).where(
+                    RegistryEntryVersion.registry_entry_id == entry.id,
+                    RegistryEntryVersion.provenance_digest == item.provenance_digest,
+                )
             )
-        )
+        except SQLAlchemyError:
+            version_lookup_failed = True
+            existing = None
+        if version_lookup_failed:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.PERSISTENCE_FAILURE)
         if existing is not None:
             return existing
         sequence = await self._session.scalar(
@@ -1115,11 +1132,35 @@ async def _finish_scanner_cleanup(cleanup: asyncio.Task[None]) -> None:
 
 
 async def _bounded_close(close: Callable[[], Awaitable[None]], operation_timeout: float) -> None:
+    async def invoke_close() -> None:
+        await close()
+
+    close_task = asyncio.create_task(invoke_close())
     try:
-        async with asyncio.timeout(min(_RESOURCE_CLOSE_TIMEOUT_SECONDS, operation_timeout)):
-            await close()
-    except Exception:
+        done, _ = await asyncio.wait(
+            {close_task},
+            timeout=min(_RESOURCE_CLOSE_TIMEOUT_SECONDS, operation_timeout),
+        )
+    except asyncio.CancelledError:
+        close_task.cancel()
+        close_task.add_done_callback(_consume_task_result)
+        raise
+    if close_task not in done:
+        close_task.cancel()
+        close_task.add_done_callback(_consume_task_result)
         return
+    _consume_task_result(close_task)
+
+
+def _consume_task_result(task: asyncio.Task[None]) -> None:
+    with suppress(BaseException):
+        task.result()
+
+
+def _utc_timestamp(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 async def purge_expired_registry_cache(

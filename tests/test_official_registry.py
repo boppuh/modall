@@ -105,6 +105,7 @@ class ReusableTrackingTransport(httpx.AsyncBaseTransport):
 class StallingCloseStream(httpx.AsyncByteStream):
     def __init__(self) -> None:
         self.close_started = False
+        self.finish_close = asyncio.Event()
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         await asyncio.Event().wait()
@@ -113,7 +114,10 @@ class StallingCloseStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         self.close_started = True
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await self.finish_close.wait()
 
 
 @asynccontextmanager
@@ -767,6 +771,8 @@ def test_response_close_is_bounded_after_body_read_timeout() -> None:
             )
         assert raised.value.code == OfficialRegistryFailureCode.TIMEOUT
         assert stream.close_started is True
+        stream.finish_close.set()
+        await asyncio.sleep(0)
 
     asyncio.run(scenario())
 
@@ -1538,6 +1544,64 @@ def test_registry_payload_flush_failure_is_context_free(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("target_table", ["registry_entries", "registry_entry_versions"])
+def test_registry_payload_lookup_failure_is_context_free(
+    target_table: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={
+                    "servers": [{"server": {"name": "io.modall/private", "version": "1.0.0"}}],
+                    "metadata": {"count": 1},
+                },
+                request=request,
+            )
+
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject=f"lookup-{target_table}")
+            adapter = OfficialRegistryAdapter(transport=httpx.MockTransport(handler))
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                cached = await OfficialRegistryService(session, adapter).search(
+                    context=context, query="private"
+                )
+
+            with pytest.raises(OfficialRegistryError) as raised:
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                    original_scalar = session.scalar
+
+                    async def failing_scalar(
+                        statement: object, *args: object, **kwargs: object
+                    ) -> object:
+                        if f"FROM {target_table}" in str(statement):
+                            raise StatementError(
+                                "lookup failed",
+                                f"SELECT FROM {target_table}",
+                                {"external_id": "private-registry-metadata"},
+                                RuntimeError("database detail"),
+                            )
+                        return await original_scalar(  # type: ignore[call-overload]
+                            statement, *args, **kwargs
+                        )
+
+                    monkeypatch.setattr(session, "scalar", failing_scalar)
+                    await OfficialRegistryService(session, adapter).import_cached(
+                        context=context,
+                        cache_id=cached.cache_id,
+                        provenance_digest=cached.items[0].provenance_digest,
+                    )
+            assert raised.value.code == OfficialRegistryFailureCode.PERSISTENCE_FAILURE
+            assert raised.value.__cause__ is None
+            assert raised.value.__context__ is None
+
+    asyncio.run(scenario())
+
+
 def test_import_purges_cache_rejected_by_the_active_scanner() -> None:
     async def scenario() -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -1838,6 +1902,51 @@ def test_cache_freshness_starts_after_workspace_serialization(
                 ).search(context=context, query="weather")
                 assert result.fetched_at == initial + timedelta(seconds=2)
                 assert result.expires_at > current
+
+    asyncio.run(scenario())
+
+
+def test_cache_freshness_is_rechecked_after_metadata_screening() -> None:
+    async def scenario() -> None:
+        current = datetime(2026, 9, 6, tzinfo=UTC)
+
+        class AgingCacheAdapter(OfficialRegistryAdapter):
+            async def parse_cached_items(self, values: object):  # type: ignore[no-untyped-def]
+                nonlocal current
+                current += timedelta(seconds=2)
+                return await super().parse_cached_items(values)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={"servers": [], "metadata": {"count": 0}},
+                request=request,
+            )
+
+        limits = OfficialRegistryLimits(cache_ttl=timedelta(seconds=1))
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="screening-freshness")
+            transport = httpx.MockTransport(handler)
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                original = await OfficialRegistryService(
+                    session,
+                    OfficialRegistryAdapter(transport=transport, limits=limits),
+                    now=lambda: current,
+                ).search(context=context, query="weather")
+
+            current += timedelta(milliseconds=500)
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                replacement = await OfficialRegistryService(
+                    session,
+                    AgingCacheAdapter(transport=transport, limits=limits),
+                    now=lambda: current,
+                ).search(context=context, query="weather")
+                assert replacement.from_cache is False
+                assert replacement.cache_id != original.cache_id
+                assert replacement.expires_at > current
 
     asyncio.run(scenario())
 
