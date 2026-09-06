@@ -1,5 +1,6 @@
 """Authenticated, workspace-scoped HTTP contracts for the alpha control plane."""
 
+import asyncio
 import base64
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime
@@ -39,6 +40,7 @@ from modall.registry.official import OfficialRegistryAdapter, OfficialRegistrySe
 from modall.registry.service import CapabilityService, ConnectionService
 
 SessionFactory = async_sessionmaker[AsyncSession]
+_DETAIL_VERSION_LIMIT = 100
 
 
 class RegistrySearchRequest(BaseModel):
@@ -140,6 +142,7 @@ class ConnectionResponse(BaseModel):
 
 class ConnectionDetailResponse(ConnectionResponse):
     versions: list["ConnectionVersionResponse"]
+    versions_truncated: bool
 
 
 class ConnectionVersionResponse(BaseModel):
@@ -178,6 +181,7 @@ class CapabilityResponse(BaseModel):
 
 class CapabilityDetailResponse(CapabilityResponse):
     versions: list["CapabilityVersionResponse"]
+    versions_truncated: bool
 
 
 class CapabilityVersionResponse(BaseModel):
@@ -282,6 +286,8 @@ def build_control_plane_router(
             status.HTTP_403_FORBIDDEN: {"model": ErrorResponse},
             status.HTTP_409_CONFLICT: {"model": ErrorResponse},
             status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ErrorResponse},
+            status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponse},
+            status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ErrorResponse},
         },
     )
     bearer = HTTPBearer(auto_error=False)
@@ -297,7 +303,7 @@ def build_control_plane_router(
         workspace_header: Annotated[str | None, Header(alias="X-Workspace-ID")] = None,
     ) -> _RequestState:
         token = _bearer_token(request.headers.get("Authorization"), credentials)
-        principal = authenticator.authenticate(token)
+        principal = await asyncio.to_thread(authenticator.authenticate, token)
         if workspace_header is None:
             raise AuthorizationDenied("workspace access denied")
         try:
@@ -333,6 +339,7 @@ def build_control_plane_router(
         request_body: object,
         response_type: type[ResponseT],
         operation: Callable[[], Awaitable[ResponseT]],
+        required_roles: Sequence[Role],
         record_response: Callable[[ResponseT], dict[str, object]] | None = None,
         replay_response: Callable[[dict[str, object]], Awaitable[ResponseT]] | None = None,
     ) -> ResponseT:
@@ -346,6 +353,7 @@ def build_control_plane_router(
             request_body=request_body,
             response_type=response_type,
             operation=operation,
+            required_roles=required_roles,
             record_response=record_response,
             replay_response=replay_response,
         )
@@ -400,6 +408,7 @@ def build_control_plane_router(
             request_body=body.model_dump(mode="json"),
             response_type=RegistryEntryResponse,
             operation=operation,
+            required_roles=(Role.ADMIN, Role.OPERATOR),
         )
 
     @router.get("/registry/entries", response_model=RegistryEntryPage)
@@ -454,6 +463,7 @@ def build_control_plane_router(
             request_body=body.model_dump(mode="json"),
             response_type=ConnectionResponse,
             operation=operation,
+            required_roles=(Role.ADMIN,),
         )
 
     @router.get("/server-connections", response_model=ConnectionPage)
@@ -485,12 +495,14 @@ def build_control_plane_router(
                     select(ServerConnectionVersion)
                     .where(ServerConnectionVersion.connection_id == connection.id)
                     .order_by(ServerConnectionVersion.sequence.desc())
+                    .limit(_DETAIL_VERSION_LIMIT + 1)
                 )
             ).all()
         )
         return ConnectionDetailResponse(
             **_connection(connection).model_dump(),
-            versions=[_connection_version(item) for item in versions],
+            versions=[_connection_version(item) for item in versions[:_DETAIL_VERSION_LIMIT]],
+            versions_truncated=len(versions) > _DETAIL_VERSION_LIMIT,
         )
 
     @router.post(
@@ -526,6 +538,7 @@ def build_control_plane_router(
             request_body=body.model_dump(mode="json"),
             response_type=ConnectionVersionResponse,
             operation=operation,
+            required_roles=(Role.ADMIN,),
         )
 
     async def enqueue_refresh(connection_id: UUID, state: _RequestState) -> RefreshResponse:
@@ -551,6 +564,7 @@ def build_control_plane_router(
             request_body={},
             response_type=RefreshResponse,
             operation=lambda: enqueue_refresh(connection_id, state),
+            required_roles=(Role.ADMIN, Role.OPERATOR),
         )
 
     @router.post("/server-connections/{connection_id}/refresh", response_model=RefreshResponse)
@@ -564,6 +578,7 @@ def build_control_plane_router(
             request_body={},
             response_type=RefreshResponse,
             operation=lambda: enqueue_refresh(connection_id, state),
+            required_roles=(Role.ADMIN, Role.OPERATOR),
         )
 
     @router.post("/server-connections/{connection_id}/disable", response_model=ConnectionResponse)
@@ -585,6 +600,7 @@ def build_control_plane_router(
             request_body={},
             response_type=ConnectionResponse,
             operation=operation,
+            required_roles=(Role.ADMIN, Role.OPERATOR),
         )
 
     @router.post("/server-connections/{connection_id}/enable", response_model=RefreshResponse)
@@ -606,6 +622,7 @@ def build_control_plane_router(
             request_body={},
             response_type=RefreshResponse,
             operation=operation,
+            required_roles=(Role.ADMIN,),
         )
 
     @router.get("/capabilities", response_model=CapabilityPage)
@@ -642,12 +659,14 @@ def build_control_plane_router(
                     select(CapabilityVersion)
                     .where(CapabilityVersion.capability_id == capability.id)
                     .order_by(CapabilityVersion.sequence.desc())
+                    .limit(_DETAIL_VERSION_LIMIT + 1)
                 )
             ).all()
         )
         return CapabilityDetailResponse(
             **_capability(capability).model_dump(),
-            versions=[_capability_version(item) for item in versions],
+            versions=[_capability_version(item) for item in versions[:_DETAIL_VERSION_LIMIT]],
+            versions_truncated=len(versions) > _DETAIL_VERSION_LIMIT,
         )
 
     @router.get(
@@ -690,6 +709,7 @@ def build_control_plane_router(
             request_body={},
             response_type=CapabilityResponse,
             operation=operation,
+            required_roles=(Role.ADMIN, Role.OPERATOR),
         )
 
     @router.post(
@@ -721,6 +741,7 @@ def build_control_plane_router(
             request_body={},
             response_type=CapabilityResponse,
             operation=operation,
+            required_roles=(Role.ADMIN, Role.OPERATOR),
         )
 
     @router.post("/run-preflights", response_model=RunPreflightResponse)
@@ -766,8 +787,23 @@ def build_control_plane_router(
         statement = statement.order_by(Run.id.desc())
         statement = _after_cursor(statement, Run.id, cursor)
         rows = list((await state.session.scalars(statement.limit(limit + 1))).all())
+        page_runs = rows[:limit]
+        results: dict[UUID, RunResult] = {}
+        if page_runs:
+            results = {
+                result.run_id: result
+                for result in (
+                    await state.session.scalars(
+                        select(RunResult).where(
+                            RunResult.workspace_id == state.context.workspace_id,
+                            RunResult.run_id.in_([run.id for run in page_runs]),
+                            RunResult.expires_at > datetime.now(UTC),
+                        )
+                    )
+                ).all()
+            }
         return RunPage(
-            items=[await _run_response(state.session, run) for run in rows[:limit]],
+            items=[_run_response_value(run, results.get(run.id)) for run in page_runs],
             page=PageInfo(next_cursor=_next_cursor(rows, limit, lambda row: row.id)),
         )
 
@@ -838,6 +874,7 @@ def build_control_plane_router(
             request_body={"run_id": str(run_id)},
             response_type=RunResponse,
             operation=operation,
+            required_roles=(Role.ADMIN, Role.OPERATOR),
             record_response=lambda response: {"id": str(response.id)},
             replay_response=replay,
         )
@@ -871,9 +908,17 @@ def build_control_plane_router(
             if value is not None:
                 statement = statement.where(column == value)
         if occurred_after is not None:
+            occurred_after = _require_aware_datetime(occurred_after)
             statement = statement.where(AuditEvent.occurred_at >= occurred_after)
         if occurred_before is not None:
+            occurred_before = _require_aware_datetime(occurred_before)
             statement = statement.where(AuditEvent.occurred_at < occurred_before)
+        if (
+            occurred_after is not None
+            and occurred_before is not None
+            and occurred_after >= occurred_before
+        ):
+            raise ValueError("invalid audit time range")
         statement = statement.order_by(AuditEvent.id.desc())
         statement = _after_cursor(statement, AuditEvent.id, cursor)
         rows = list((await state.session.scalars(statement.limit(limit + 1))).all())
@@ -1039,7 +1084,6 @@ def _capability_version(item: CapabilityVersion) -> CapabilityVersionResponse:
 
 async def _run_response(session: AsyncSession, run: Run) -> RunResponse:
     now = datetime.now(UTC)
-    arguments = run.arguments if _utc(run.arguments_expires_at) > now else None
     result = await session.scalar(
         select(RunResult).where(
             RunResult.run_id == run.id,
@@ -1047,6 +1091,14 @@ async def _run_response(session: AsyncSession, run: Run) -> RunResponse:
             RunResult.expires_at > now,
         )
     )
+    return _run_response_value(run, result, now=now)
+
+
+def _run_response_value(
+    run: Run, result: RunResult | None, *, now: datetime | None = None
+) -> RunResponse:
+    current = now or datetime.now(UTC)
+    arguments = run.arguments if _utc(run.arguments_expires_at) > current else None
     return RunResponse(
         id=run.id,
         capability_id=run.capability_id,
@@ -1067,3 +1119,9 @@ async def _run_response(session: AsyncSession, run: Run) -> RunResponse:
 
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _require_aware_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("audit timestamps require an offset")
+    return value.astimezone(UTC)

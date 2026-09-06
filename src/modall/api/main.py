@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
@@ -13,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from modall.api.contracts import build_control_plane_router
-from modall.api.idempotency import ApiIdempotencyConflict
+from modall.api.idempotency import ApiIdempotencyConflict, ApiIdempotencyHistoryIncomplete
 from modall.config import Settings, get_settings
 from modall.execution.runtime import build_execution_keyrings
 from modall.execution.types import ExecutionError, HmacKeyVersion
@@ -89,7 +90,15 @@ def create_app(
         except ValueError:
             correlation_id = uuid4()
         request.state.correlation_id = correlation_id
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            logging.getLogger("modall.api").warning(
+                "unhandled_request_failure correlation_id=%s", correlation_id
+            )
+            response = error_response(
+                "internal_error", "The request could not be completed.", 500, request
+            )
         response.headers["X-Correlation-ID"] = str(correlation_id)
         if request.url.path.startswith("/v1/"):
             response.headers["Cache-Control"] = "no-store"
@@ -142,6 +151,17 @@ def create_app(
     async def idempotency_error(request: Request, _: ApiIdempotencyConflict) -> JSONResponse:
         return error_response(
             "idempotency_conflict", "Idempotency key reused for another request.", 409, request
+        )
+
+    @app.exception_handler(ApiIdempotencyHistoryIncomplete)
+    async def idempotency_history_error(
+        request: Request, _: ApiIdempotencyHistoryIncomplete
+    ) -> JSONResponse:
+        return error_response(
+            "idempotency_key_history_incomplete",
+            "Mutation replay protection is unavailable.",
+            503,
+            request,
         )
 
     session_factory: async_sessionmaker[AsyncSession] = create_session_factory(engine)

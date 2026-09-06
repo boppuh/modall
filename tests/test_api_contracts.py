@@ -11,7 +11,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from modall.api.contracts import ConnectionResponse
-from modall.api.idempotency import idempotent_mutation
+from modall.api.idempotency import idempotent_mutation, purge_expired_api_idempotency
 from modall.api.main import create_app
 from modall.config import Settings
 from modall.execution.types import HmacKeyVersion
@@ -29,6 +29,8 @@ from modall.persistence.models import (
     DiscoverySnapshotCapability,
     RegistryEntry,
     RegistryEntryVersion,
+    ServerConnectionVersion,
+    WorkspaceMembership,
 )
 from modall.registry.official import OfficialRegistryAdapter
 from modall.registry.service import CapabilityService, ConnectionService
@@ -187,6 +189,32 @@ def test_connection_contract_and_required_idempotency_key() -> None:
             assert appended.status_code == 201
             assert appended.json()["sequence"] == 2
 
+            async with transaction(factory) as session:
+                seed_version = await session.scalar(
+                    select(ServerConnectionVersion).where(
+                        ServerConnectionVersion.connection_id == UUID(connection_id)
+                    )
+                )
+                assert seed_version is not None
+                session.add_all(
+                    ServerConnectionVersion(
+                        workspace_id=workspace_id,
+                        connection_id=UUID(connection_id),
+                        sequence=sequence,
+                        endpoint_url="http://127.0.0.1:8766/mcp",
+                        secret_binding_id=None,
+                        transport="streamable_http",
+                        policy_version="v1",
+                        created_by_user_id=seed_version.created_by_user_id,
+                    )
+                    for sequence in range(3, 104)
+                )
+            bounded_detail = await client.get(
+                f"/v1/server-connections/{connection_id}", headers=headers
+            )
+            assert len(bounded_detail.json()["versions"]) == 100
+            assert bounded_detail.json()["versions_truncated"] is True
+
             refresh = await client.post(
                 f"/v1/server-connections/{connection_id}/verify",
                 headers={**headers, "Idempotency-Key": "verify"},
@@ -207,6 +235,47 @@ def test_connection_contract_and_required_idempotency_key() -> None:
             )
             assert enabled.status_code == 200
             assert enabled.json()["status"] == "queued"
+
+            async with transaction(factory) as session:
+                record = await session.scalar(
+                    select(ApiIdempotencyRecord).where(
+                        ApiIdempotencyRecord.route == "/v1/server-connections"
+                    )
+                )
+                assert record is not None
+                record.key_version = "retired"
+            incomplete_history = await client.post(
+                "/v1/server-connections",
+                headers={**headers, "Idempotency-Key": "new-key"},
+                json={**body, "name": "Blocked rotation"},
+            )
+            assert incomplete_history.status_code == 503
+            assert (
+                incomplete_history.json()["error"]["code"] == "idempotency_key_history_incomplete"
+            )
+
+            async with transaction(factory) as session:
+                record = await session.scalar(
+                    select(ApiIdempotencyRecord).where(
+                        ApiIdempotencyRecord.key_version == "retired"
+                    )
+                )
+                assert record is not None
+                record.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+                await session.flush()
+                assert await purge_expired_api_idempotency(session) == 1
+                membership = await session.scalar(
+                    select(WorkspaceMembership).where(
+                        WorkspaceMembership.workspace_id == workspace_id
+                    )
+                )
+                assert membership is not None
+                membership.role = Role.VIEWER.value
+            denied_replay = await client.post(
+                f"/v1/server-connections/{connection_id}/enable",
+                headers={**headers, "Idempotency-Key": "enable"},
+            )
+            assert denied_replay.status_code == 403
 
     asyncio.run(scenario())
 
@@ -308,6 +377,27 @@ def test_registry_capability_and_audit_read_contracts() -> None:
             assert audit.json()["items"][0]["action"] == "capability.disabled"
             assert "payload" not in audit.json()["items"][0]
 
+            naive_time = await client.get(
+                "/v1/audit-events?occurred_after=2026-09-06T12:00:00", headers=headers
+            )
+            assert naive_time.status_code == 422
+
+            filtered_time = await client.get(
+                "/v1/audit-events?occurred_after=2020-01-01T00:00:00Z"
+                "&occurred_before=2030-01-01T00:00:00Z&outcome=succeeded"
+                "&action=capability.disabled",
+                headers=headers,
+            )
+            assert filtered_time.status_code == 200
+            assert len(filtered_time.json()["items"]) == 1
+
+            invalid_range = await client.get(
+                "/v1/audit-events?occurred_after=2030-01-01T00:00:00Z"
+                "&occurred_before=2020-01-01T00:00:00Z",
+                headers=headers,
+            )
+            assert invalid_range.status_code == 422
+
     asyncio.run(scenario())
 
 
@@ -372,6 +462,26 @@ def test_official_registry_search_import_and_replay_contract() -> None:
             )
             assert replayed.status_code == 201
             assert replayed.json()["id"] == imported.json()["id"]
+
+    asyncio.run(scenario())
+
+
+def test_unhandled_v1_failure_keeps_safe_response_policy() -> None:
+    def broken_upstream(_: httpx.Request) -> httpx.Response:
+        raise RuntimeError("fixture failure")
+
+    async def scenario() -> None:
+        adapter = OfficialRegistryAdapter(transport=httpx.MockTransport(broken_upstream))
+        async with api_client(adapter) as (client, _engine, workspace_id):
+            response = await client.post(
+                "/v1/registry/searches",
+                headers={"X-Workspace-ID": str(workspace_id)},
+                json={"query": "weather"},
+            )
+            assert response.status_code == 500
+            assert response.json()["error"]["code"] == "internal_error"
+            assert response.headers["cache-control"] == "no-store"
+            assert UUID(response.headers["x-correlation-id"])
 
     asyncio.run(scenario())
 
@@ -492,9 +602,31 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             assert created.json()["status"] == "queued"
             run_id = created.json()["id"]
 
+            result_queries = 0
+
+            def count_result_queries(
+                connection: object,
+                cursor: object,
+                statement: str,
+                parameters: object,
+                context: object,
+                executemany: bool,
+            ) -> None:
+                del connection, cursor, parameters, context, executemany
+                nonlocal result_queries
+                if "FROM run_results" in statement:
+                    result_queries += 1
+
+            event.listen(engine.sync_engine, "before_cursor_execute", count_result_queries)
             listed = await client.get("/v1/runs", headers=headers)
+            event.remove(engine.sync_engine, "before_cursor_execute", count_result_queries)
             assert listed.status_code == 200
             assert listed.json()["items"][0]["arguments"] == arguments
+            assert result_queries == 1
+
+            filtered = await client.get("/v1/runs?status=queued", headers=headers)
+            assert filtered.status_code == 200
+            assert len(filtered.json()["items"]) == 1
 
             fetched = await client.get(f"/v1/runs/{run_id}", headers=headers)
             assert fetched.status_code == 200
@@ -518,6 +650,18 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             )
             assert replayed_cancel.status_code == 200
             assert replayed_cancel.json()["id"] == run_id
+
+            disabled = await client.post(
+                f"/v1/capability-versions/{version.id}/disable",
+                headers={**headers, "Idempotency-Key": "run-target-disable"},
+            )
+            assert disabled.status_code == 200
+            enabled = await client.post(
+                f"/v1/capability-versions/{version.id}/enable",
+                headers={**headers, "Idempotency-Key": "run-target-enable"},
+            )
+            assert enabled.status_code == 200
+            assert enabled.json()["status"] == "enabled"
 
     asyncio.run(scenario())
 
@@ -567,6 +711,7 @@ def test_api_idempotency_rejects_invalid_configuration_before_database_access() 
                 request_body={},
                 response_type=ConnectionResponse,
                 operation=operation,
+                required_roles=(Role.ADMIN,),
             )
         with pytest.raises(RuntimeError, match="keyring is empty"):
             await idempotent_mutation(
@@ -578,6 +723,7 @@ def test_api_idempotency_rejects_invalid_configuration_before_database_access() 
                 request_body={},
                 response_type=ConnectionResponse,
                 operation=operation,
+                required_roles=(Role.ADMIN,),
             )
         with pytest.raises(ValueError, match="request exceeds"):
             await idempotent_mutation(
@@ -589,6 +735,9 @@ def test_api_idempotency_rejects_invalid_configuration_before_database_access() 
                 request_body={"value": "x" * 262_144},
                 response_type=ConnectionResponse,
                 operation=operation,
+                required_roles=(Role.ADMIN,),
             )
+        with pytest.raises(ValueError, match="cleanup batch size"):
+            await purge_expired_api_idempotency(session, batch_size=0)
 
     asyncio.run(scenario())

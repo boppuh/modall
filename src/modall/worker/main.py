@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from modall.api.idempotency import purge_expired_api_idempotency
 from modall.config import Settings, get_settings
 from modall.execution.runner import ExecutionServiceFactory, InvocationRunner
 from modall.execution.runtime import build_execution_keyrings
@@ -90,6 +91,7 @@ async def _run_maintenance(
 ) -> None:
     operations = (
         ("registry_cache_cleanup_failed", purge_expired_registry_cache),
+        ("api_idempotency_cleanup_failed", purge_expired_api_idempotency),
         (
             "result_cleanup_failed",
             lambda session: execution_service_factory(session).expire_retained_results(),
