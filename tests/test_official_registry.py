@@ -850,6 +850,7 @@ def test_scanner_process_concurrency_is_globally_bounded() -> None:
         assert {child.pid for child in multiprocessing.active_children()} == existing_children
 
     asyncio.run(scenario())
+    asyncio.run(scenario())
 
 
 def test_scanner_policy_and_child_protocol_are_covered_in_process() -> None:

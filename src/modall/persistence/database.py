@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 _AFTER_ROLLBACK_CALLBACKS = "modall_after_rollback_callbacks"
+_AFTER_ROLLBACK_TIMEOUT_SECONDS = 2.5
 
 
 def register_after_rollback(
@@ -84,8 +85,9 @@ async def transaction(
         except BaseException:
             for callback in callbacks:
                 try:
-                    async with session_factory() as cleanup_session, cleanup_session.begin():
-                        await callback(cleanup_session)
+                    async with asyncio.timeout(_AFTER_ROLLBACK_TIMEOUT_SECONDS):
+                        async with session_factory() as cleanup_session, cleanup_session.begin():
+                            await callback(cleanup_session)
                 except Exception:
                     logging.getLogger("modall.persistence").warning("after_rollback_cleanup_failed")
             raise

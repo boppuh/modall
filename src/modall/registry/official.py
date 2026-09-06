@@ -67,7 +67,15 @@ _REGISTRY_LOG_LOCK = Lock()
 _REGISTRY_LOG_USERS = 0
 _SCANNER_PROCESS_CONTEXT = multiprocessing.get_context("spawn")
 _SCANNER_PROCESS_LIMIT = 4
-_SCANNER_PROCESS_SEMAPHORE = asyncio.Semaphore(_SCANNER_PROCESS_LIMIT)
+
+
+def _scanner_process_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    semaphore = getattr(loop, "_modall_registry_scanner_semaphore", None)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(_SCANNER_PROCESS_LIMIT)
+        setattr(loop, "_modall_registry_scanner_semaphore", semaphore)  # noqa: B010
+    return cast(asyncio.Semaphore, semaphore)
 
 
 @contextmanager
@@ -615,38 +623,23 @@ class OfficialRegistryService:
         normalized_query = await self._adapter.screen_query(query)
         query_digest = hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
         now = self._utc_now()
-        await _purge_expired_workspace_cache(
-            self._session,
-            workspace_id=context.workspace_id,
-            now=now,
-            cache_ttl=self._limits.cache_ttl,
+        cached_result, rejected_cache = await self._read_cache(
+            context=context, query_digest=query_digest, now=now
         )
-        cache = await self._session.scalar(
-            select(RegistrySearchCache)
-            .where(
-                RegistrySearchCache.workspace_id == context.workspace_id,
-                RegistrySearchCache.provider == OFFICIAL_REGISTRY_PROVIDER,
-                RegistrySearchCache.query_digest == query_digest,
-                RegistrySearchCache.expires_at > now,
-                RegistrySearchCache.fetched_at > now - self._limits.cache_ttl,
-                RegistrySearchCache.byte_count <= self._limits.max_response_bytes,
+        if cached_result is not None:
+            return cached_result
+
+        workspace_locked = False
+        if rejected_cache is not None:
+            await require_current_role(
+                self._session,
+                context,
+                Role.ADMIN,
+                Role.OPERATOR,
+                serialize_workspace=True,
             )
-            .order_by(RegistrySearchCache.fetched_at.desc(), RegistrySearchCache.id.desc())
-            .limit(1)
-        )
-        if cache is not None:
-            try:
-                items = await self._adapter.parse_cached_items(cache.normalized_results)
-            except OfficialRegistryError:
-                await self._purge_rejected_cache(context=context, cache=cache)
-            else:
-                if (
-                    len(items) == cache.result_count
-                    and len(_canonical_json(cache.normalized_results)) == cache.byte_count
-                    and _digest(cache.normalized_results) == cache.response_digest
-                ):
-                    return self._result(cache, items, from_cache=True)
-                await self._purge_rejected_cache(context=context, cache=cache)
+            workspace_locked = True
+            await self._purge_rejected_cache(context=context, cache=rejected_cache)
 
         items = await self._adapter.search(normalized_query)
         normalized_results = cast(
@@ -659,19 +652,28 @@ class OfficialRegistryService:
         ):
             raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT)
         fetched_at = self._utc_now()
-        await require_current_role(
-            self._session,
-            context,
-            Role.ADMIN,
-            Role.OPERATOR,
-            serialize_workspace=True,
-        )
+        if not workspace_locked:
+            await require_current_role(
+                self._session,
+                context,
+                Role.ADMIN,
+                Role.OPERATOR,
+                serialize_workspace=True,
+            )
         await _purge_expired_workspace_cache(
             self._session,
             workspace_id=context.workspace_id,
             now=fetched_at,
             cache_ttl=self._limits.cache_ttl,
         )
+        cached_result, rejected_cache = await self._read_cache(
+            context=context, query_digest=query_digest, now=fetched_at
+        )
+        if cached_result is not None:
+            return cached_result
+        if rejected_cache is not None:
+            await self._purge_rejected_cache(context=context, cache=rejected_cache)
+
         cache_usage = (
             await self._session.execute(
                 select(
@@ -699,6 +701,37 @@ class OfficialRegistryService:
         self._session.add(cache)
         await self._session.flush()
         return self._result(cache, items, from_cache=False)
+
+    async def _read_cache(
+        self, *, context: WorkspaceContext, query_digest: str, now: datetime
+    ) -> tuple[OfficialRegistrySearchResult | None, RegistrySearchCache | None]:
+        cache = await self._session.scalar(
+            select(RegistrySearchCache)
+            .where(
+                RegistrySearchCache.workspace_id == context.workspace_id,
+                RegistrySearchCache.provider == OFFICIAL_REGISTRY_PROVIDER,
+                RegistrySearchCache.query_digest == query_digest,
+                RegistrySearchCache.expires_at > now,
+                RegistrySearchCache.fetched_at > now - self._limits.cache_ttl,
+                RegistrySearchCache.byte_count <= self._limits.max_response_bytes,
+            )
+            .order_by(RegistrySearchCache.fetched_at.desc(), RegistrySearchCache.id.desc())
+            .limit(1)
+        )
+        if cache is None:
+            return None, None
+        try:
+            items = await self._adapter.parse_cached_items(cache.normalized_results)
+            valid = (
+                len(items) == cache.result_count
+                and len(_canonical_json(cache.normalized_results)) == cache.byte_count
+                and _digest(cache.normalized_results) == cache.response_digest
+            )
+        except OfficialRegistryError:
+            valid = False
+        if valid:
+            return self._result(cache, items, from_cache=True), None
+        return None, cache
 
     async def import_cached(
         self,
@@ -895,7 +928,8 @@ async def _run_scanner(
     )
     try:
         async with asyncio.timeout(timeout_seconds):
-            await _SCANNER_PROCESS_SEMAPHORE.acquire()
+            semaphore = _scanner_process_semaphore()
+            await semaphore.acquire()
             permit_acquired = True
             process.start()
             sender.close()
@@ -936,7 +970,7 @@ async def _run_scanner(
                 process.join()
             process.close()
         if permit_acquired:
-            _SCANNER_PROCESS_SEMAPHORE.release()
+            semaphore.release()
 
 
 async def purge_expired_registry_cache(

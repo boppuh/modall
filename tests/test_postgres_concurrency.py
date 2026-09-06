@@ -2,6 +2,7 @@ import asyncio
 import os
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import DBAPIError
@@ -20,16 +21,83 @@ from modall.persistence.models import (
     CapabilityStatusEvent,
     McpToolBinding,
     RegistryEntry,
+    RegistrySearchCache,
     ServerConnectionVersion,
     User,
     WorkspaceMembership,
 )
+from modall.registry.official import OfficialRegistryAdapter, OfficialRegistryService
 from modall.registry.service import CapabilityService, ConnectionService
 
 pytestmark = pytest.mark.skipif(
     "MODALL_DATABASE_URL" not in os.environ,
     reason="requires the migrated PostgreSQL integration database",
 )
+
+
+def test_concurrent_registry_search_misses_share_one_cache_row() -> None:
+    async def scenario() -> None:
+        engine = create_engine(async_database_url(os.environ["MODALL_DATABASE_URL"]))
+        factory = create_session_factory(engine)
+        suffix = str(uuid4())
+        request_count = 0
+        both_requested = asyncio.Event()
+        request_lock = asyncio.Lock()
+        try:
+            async with transaction(factory) as session:
+                identity = IdentityService(session)
+                operator = await identity.resolve_user(
+                    Principal("issuer", f"registry-search-{suffix}", None)
+                )
+                workspace = await identity.create_workspace(
+                    owner=operator, name=f"Registry search {suffix}"
+                )
+                user_id, workspace_id = operator.id, workspace.id
+
+            async def handler(request: httpx.Request) -> httpx.Response:
+                nonlocal request_count
+                async with request_lock:
+                    request_count += 1
+                    if request_count == 2:
+                        both_requested.set()
+                await both_requested.wait()
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "application/json"},
+                    json={"servers": [], "metadata": {"count": 0}},
+                    request=request,
+                )
+
+            async def search() -> tuple[UUID, bool]:
+                async with transaction(factory) as session:
+                    context = await AuthorizationService(session).authorize(
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                        permission=Permission.SEARCH_REGISTRY,
+                    )
+                    result = await OfficialRegistryService(
+                        session,
+                        OfficialRegistryAdapter(transport=httpx.MockTransport(handler)),
+                    ).search(context=context, query="shared-query")
+                    return result.cache_id, result.from_cache
+
+            results = await asyncio.gather(search(), search())
+            assert len({result[0] for result in results}) == 1
+            assert sorted(result[1] for result in results) == [False, True]
+            assert request_count == 2
+            async with factory() as session:
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(RegistrySearchCache)
+                        .where(RegistrySearchCache.workspace_id == workspace_id)
+                    )
+                    == 1
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 def test_concurrent_first_login_resolves_one_user() -> None:
