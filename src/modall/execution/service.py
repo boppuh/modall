@@ -386,7 +386,7 @@ class ExecutionService:
                 await self._append_next_event(
                     run,
                     RunEventType.LEASE_LOST,
-                    RunStatus.PREPARING,
+                    RunStatus(run.status),
                     safe_error_code=RunFailureCode.WORKER_LOST_BEFORE_DISPATCH.value,
                     now=now,
                 )
@@ -777,6 +777,7 @@ class ExecutionService:
             arguments,
             schema,
             timeout_seconds=self._limits.schema_validation_timeout_seconds,
+            memory_limit_bytes=self._limits.schema_validation_memory_bytes,
         )
         if result == SchemaValidationResult.INVALID_ARGUMENTS:
             raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS) from None

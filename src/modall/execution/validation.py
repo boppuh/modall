@@ -2,6 +2,8 @@
 
 import asyncio
 import multiprocessing
+import resource
+import sys
 from contextlib import suppress
 from enum import StrEnum
 from multiprocessing.connection import Connection
@@ -28,6 +30,7 @@ async def validate_schema_arguments(
     schema: dict[str, object],
     *,
     timeout_seconds: float,
+    memory_limit_bytes: int,
 ) -> SchemaValidationResult:
     """Evaluate jsonschema in a killable, concurrency-limited child process."""
 
@@ -44,7 +47,7 @@ async def validate_schema_arguments(
             receiver, sender = _PROCESS_CONTEXT.Pipe(duplex=False)
             process = _PROCESS_CONTEXT.Process(
                 target=_schema_validation_process,
-                args=(arguments, schema, sender),
+                args=(arguments, schema, sender, memory_limit_bytes),
                 daemon=True,
             )
             process.start()
@@ -76,10 +79,14 @@ async def validate_schema_arguments(
 
 
 def _schema_validation_process(
-    arguments: dict[str, object], schema: dict[str, object], sender: Connection
+    arguments: dict[str, object],
+    schema: dict[str, object],
+    sender: Connection,
+    memory_limit_bytes: int,
 ) -> None:
     try:
         try:
+            _apply_validation_memory_limit(memory_limit_bytes)
             Draft202012Validator.check_schema(schema)
             Draft202012Validator(schema).validate(arguments)
         except ValidationError:
@@ -95,6 +102,14 @@ def _schema_validation_process(
     finally:
         with suppress(Exception):
             sender.close()
+
+
+def _apply_validation_memory_limit(memory_limit_bytes: int) -> None:
+    """Install the deployment-platform address-space ceiling before validation."""
+
+    if sys.platform != "linux":
+        return
+    resource.setrlimit(resource.RLIMIT_AS, (memory_limit_bytes, memory_limit_bytes))
 
 
 async def _close_process(

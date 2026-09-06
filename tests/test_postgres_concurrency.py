@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,6 +53,18 @@ pytestmark = pytest.mark.skipif(
 
 CONFIRMATION_KEYS = (HmacKeyVersion("confirm-v1", b"c" * 32),)
 IDEMPOTENCY_KEYS = (HmacKeyVersion("idem-v1", b"i" * 32),)
+
+
+def isolated_database_url() -> str:
+    raw_url = os.environ["MODALL_DATABASE_URL"]
+    database_name = (make_url(raw_url).database or "").lower()
+    if not (
+        database_name == "test"
+        or database_name.startswith("test_")
+        or database_name.endswith("_test")
+    ):
+        pytest.fail("global-queue tests require a dedicated test database")
+    return raw_url
 
 
 def scanner_allows(value: object) -> bool:
@@ -693,7 +706,7 @@ def test_concurrent_run_creation_replays_one_resource() -> None:
 
 def test_concurrent_workers_claim_each_job_once() -> None:
     async def scenario() -> None:
-        engine = create_engine(async_database_url(os.environ["MODALL_DATABASE_URL"]))
+        engine = create_engine(async_database_url(isolated_database_url()))
         factory = create_session_factory(engine)
         suffix = str(uuid4())
         now = datetime(2026, 9, 6, tzinfo=UTC)
@@ -779,7 +792,7 @@ def test_concurrent_workers_claim_each_job_once() -> None:
 
 def test_claim_and_cancellation_share_one_lock_order() -> None:
     async def scenario() -> None:
-        engine = create_engine(async_database_url(os.environ["MODALL_DATABASE_URL"]))
+        engine = create_engine(async_database_url(isolated_database_url()))
         factory = create_session_factory(engine)
         suffix = str(uuid4())
         now = datetime(2026, 9, 6, tzinfo=UTC)

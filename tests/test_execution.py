@@ -1,4 +1,6 @@
 import asyncio
+import resource
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -10,6 +12,7 @@ from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from modall.audit.types import AuditAction
+from modall.execution import validation as schema_validation
 from modall.execution.service import ExecutionService
 from modall.execution.types import (
     ExecutionError,
@@ -437,6 +440,14 @@ def test_job_leasing_reclaims_only_with_a_new_epoch_and_rejects_stale_heartbeat(
                 )
                 assert first.run_id == run.id
                 assert first.lease_epoch == 1
+                attempt = await session.scalar(
+                    select(RunAttempt).where(RunAttempt.run_id == run.id)
+                )
+                claimed_run = await session.get(Run, run.id)
+                assert claimed_run is not None
+                assert attempt is not None
+                claimed_run.status = RunStatus.SESSION_FENCED.value
+                attempt.status = RunStatus.SESSION_FENCED.value
 
             current += timedelta(seconds=11)
             async with transaction(factory) as session:
@@ -475,6 +486,8 @@ def test_job_leasing_reclaims_only_with_a_new_epoch_and_rejects_stale_heartbeat(
                         )
                     ).all()
                 )
+                lease_lost = next(event for event in events if event.event_type == "lease_lost")
+                assert lease_lost.status == RunStatus.SESSION_FENCED.value
                 assert ExecutionService.replay_projection(events) == RunStatus.SUCCEEDED
 
     asyncio.run(scenario())
@@ -827,6 +840,8 @@ def test_confirmation_limits_expiry_and_key_configuration_fail_closed(
                     )
             with pytest.raises(ValueError, match="invalid execution limits"):
                 ExecutionLimits(confirmation_ttl_seconds=0)
+            with pytest.raises(ValueError, match="invalid execution limits"):
+                ExecutionLimits(schema_validation_memory_bytes=32 * 1024 * 1024)
             with pytest.raises(ValueError, match="run event history is empty"):
                 ExecutionService.replay_projection([])
             with pytest.raises(ValueError, match="invalid cleanup batch"):
@@ -835,6 +850,29 @@ def test_confirmation_limits_expiry_and_key_configuration_fail_closed(
                 await execution.delete_expired_run_metadata(batch_size=1001)
 
     asyncio.run(scenario())
+
+
+def test_linux_schema_validation_memory_limit_is_mandatory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, tuple[int, int]]] = []
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        resource,
+        "setrlimit",
+        lambda resource_id, limits: calls.append((resource_id, limits)),
+    )
+    memory_limit = 256 * 1024 * 1024
+    schema_validation._apply_validation_memory_limit(memory_limit)
+    assert calls == [(resource.RLIMIT_AS, (memory_limit, memory_limit))]
+
+    def fail_to_install(resource_id: int, limits: tuple[int, int]) -> None:
+        del resource_id, limits
+        raise OSError("unsupported")
+
+    monkeypatch.setattr(resource, "setrlimit", fail_to_install)
+    with pytest.raises(OSError, match="unsupported"):
+        schema_validation._apply_validation_memory_limit(memory_limit)
 
 
 def test_schema_validation_is_killable_and_invalid_schemas_fail_closed() -> None:

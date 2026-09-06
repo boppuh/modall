@@ -36,6 +36,10 @@ class Base(DeclarativeBase):
 
 UuidPrimaryKey = Annotated[UUID, mapped_column(primary_key=True, default=uuid4)]
 CreatedAt = Annotated[datetime, mapped_column(DateTime(timezone=True), default=utc_now)]
+_TERMINAL_EXECUTION_STATUSES = frozenset(
+    {"succeeded", "failed", "cancelled", "timed_out", "indeterminate"}
+)
+_TERMINAL_EXECUTION_STATUS_SQL = "'succeeded', 'failed', 'cancelled', 'timed_out', 'indeterminate'"
 
 
 class User(Base):
@@ -690,8 +694,7 @@ class Run(Base):
             name="ck_run_status",
         ),
         CheckConstraint(
-            "(status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'indeterminate')) "
-            "= (terminal_at IS NOT NULL)",
+            f"(status IN ({_TERMINAL_EXECUTION_STATUS_SQL})) = (terminal_at IS NOT NULL)",
             name="ck_run_terminal_time",
         ),
         CheckConstraint("connection_control_epoch >= 0", name="ck_run_connection_epoch"),
@@ -737,7 +740,7 @@ class Run(Base):
     connection_control_epoch: Mapped[int] = mapped_column(Integer)
     capability_status_epoch: Mapped[int] = mapped_column(Integer)
     protocol_revision: Mapped[str] = mapped_column(String(64))
-    status: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(24), active_history=True)
     arguments: Mapped[dict[str, object] | None] = mapped_column(JSON(none_as_null=True))
     argument_digest: Mapped[str] = mapped_column(String(64))
     arguments_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -769,8 +772,7 @@ class Job(Base):
             name="ck_job_active_lease",
         ),
         CheckConstraint(
-            "(status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'indeterminate')) "
-            "= (completed_at IS NOT NULL)",
+            f"(status IN ({_TERMINAL_EXECUTION_STATUS_SQL})) = (completed_at IS NOT NULL)",
             name="ck_job_completion_time",
         ),
         ForeignKeyConstraint(
@@ -786,7 +788,7 @@ class Job(Base):
     run_id: Mapped[UUID]
     actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     execution_epoch: Mapped[int] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(24), active_history=True)
     lease_owner: Mapped[str | None] = mapped_column(String(128))
     lease_epoch: Mapped[int] = mapped_column(Integer, default=0)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -809,8 +811,7 @@ class RunAttempt(Base):
             name="ck_run_attempt_status",
         ),
         CheckConstraint(
-            "(status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'indeterminate')) "
-            "= (terminal_at IS NOT NULL)",
+            f"(status IN ({_TERMINAL_EXECUTION_STATUS_SQL})) = (terminal_at IS NOT NULL)",
             name="ck_run_attempt_terminal_time",
         ),
         CheckConstraint(
@@ -845,7 +846,7 @@ class RunAttempt(Base):
     job_id: Mapped[UUID]
     sequence: Mapped[int] = mapped_column(Integer)
     lease_epoch: Mapped[int] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(24), active_history=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     safe_error_code: Mapped[str | None] = mapped_column(String(64))
@@ -976,8 +977,7 @@ def _reject_terminal_status_update(
     del mapper, connection
     history = get_history(target, "status")
     if history.has_changes() and any(
-        status in {"succeeded", "failed", "cancelled", "timed_out", "indeterminate"}
-        for status in history.deleted
+        status in _TERMINAL_EXECUTION_STATUSES for status in history.deleted
     ):
         raise ValueError("terminal execution status cannot be updated")
 

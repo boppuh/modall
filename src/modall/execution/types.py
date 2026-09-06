@@ -94,6 +94,7 @@ class ExecutionLimits:
     max_idempotency_key_characters: int = 256
     max_historical_hmac_keys: int = 8
     schema_validation_timeout_seconds: float = 2.0
+    schema_validation_memory_bytes: int = 256 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if (
@@ -106,6 +107,7 @@ class ExecutionLimits:
             or not 1 <= self.max_historical_hmac_keys <= 16
             or not 0 < self.schema_validation_timeout_seconds <= 5
             or not math.isfinite(self.schema_validation_timeout_seconds)
+            or not 64 * 1024 * 1024 <= self.schema_validation_memory_bytes <= 1024 * 1024 * 1024
         ):
             raise ValueError("invalid execution limits")
 
