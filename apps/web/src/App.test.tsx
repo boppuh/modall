@@ -509,6 +509,46 @@ describe("App", () => {
     expect(connectionAction.mock.calls[1]?.[2]).toBe(originalKey);
   });
 
+  it("rotates connection action keys after the control epoch advances", async () => {
+    const disabled = { ...connection, lifecycle: "disabled" as const, control_epoch: 3 };
+    const enabled = { ...connection, lifecycle: "active" as const, control_epoch: 4 };
+    const detail = (value: Connection) => ({ ...value, versions: [{ id: versionId, sequence: 1, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http" as const, created_at: timestamp }], versions_truncated: false });
+    const getConnection = vi.fn<ControlPlane["getConnection"]>()
+      .mockResolvedValueOnce(detail(connection))
+      .mockResolvedValueOnce(detail(disabled))
+      .mockResolvedValue(detail(enabled));
+    const connectionAction = vi.fn<ControlPlane["connectionAction"]>().mockResolvedValue(undefined);
+    renderApp(fakeApi({ getConnection, connectionAction }));
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Disable" }));
+    const reenable = await screen.findByRole("button", { name: "Re-enable" });
+    const firstDisableKey = connectionAction.mock.calls[0]?.[2];
+    fireEvent.click(reenable);
+    fireEvent.click(await screen.findByRole("button", { name: "Disable" }));
+    await waitFor(() => expect(connectionAction).toHaveBeenCalledTimes(3));
+    expect(connectionAction.mock.calls[2]?.[2]).not.toBe(firstDisableKey);
+  });
+
+  it("refreshes untouched version defaults when a newer version appears", async () => {
+    const newerVersionId = "77777777-7777-4777-8777-777777777777";
+    const initial = { ...connection, versions: [{ id: versionId, sequence: 1, endpoint_url: "https://old.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http" as const, created_at: timestamp }], versions_truncated: false };
+    const updated = { ...connection, versions: [{ id: newerVersionId, sequence: 2, endpoint_url: "https://new.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http" as const, created_at: timestamp }], versions_truncated: false };
+    const getConnection = vi.fn<ControlPlane["getConnection"]>().mockResolvedValueOnce(initial).mockResolvedValue(updated);
+    renderApp(fakeApi({ getConnection }));
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    expect(await screen.findByDisplayValue("https://old.example/tools")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByDisplayValue("https://new.example/tools")).toBeTruthy();
+  });
+
+  it("preserves seconds in run timeline diagnostics", async () => {
+    window.history.replaceState({}, "", `/runs/${runId}`);
+    renderApp(fakeApi({ listRunEvents: vi.fn().mockResolvedValue([{ id: connectionId, sequence: 1, event_type: "admitted", status: "queued", safe_error_code: null, occurred_at: "2026-09-06T12:00:37Z" }]) }));
+    expect((await screen.findByText(/:37/)).textContent).toContain("queued");
+  });
+
   it("keeps cancellation available when the event timeline fails", async () => {
     const cancelRun = vi.fn<ControlPlane["cancelRun"]>().mockResolvedValue({ ...run, cancellation_requested: true });
     window.history.replaceState({}, "", `/runs/${runId}`);

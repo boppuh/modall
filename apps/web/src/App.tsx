@@ -49,6 +49,7 @@ function formatTime(value: string | null): string {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
+    second: "2-digit",
   }).format(new Date(value));
 }
 
@@ -384,10 +385,10 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
     },
   });
   const action = useMutation({
-    mutationFn: ({ id, verb, key }: { id: string; verb: "verify" | "refresh" | "enable" | "disable"; key: string }) =>
+    mutationFn: ({ id, verb, key }: { id: string; verb: "verify" | "refresh" | "enable" | "disable"; key: string; operation: string }) =>
       api.connectionAction(id, verb, key),
     onSuccess: async (_data, variables) => {
-      mutationKeys.current.delete(`connection:${variables.id}:${variables.verb}`);
+      mutationKeys.current.delete(variables.operation);
       await refreshLists();
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "connection", selectedId) });
     },
@@ -536,14 +537,14 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
               {detail.data.last_refresh_error_code && <p className="incident-note">Last refresh: {detail.data.last_refresh_error_code}</p>}
               {action.isError && <p className="field-error" role="alert">{failureMessage(action.error)}</p>}
               <div className="action-strip">
-                {canOperate(role) && detail.data.lifecycle !== "disabled" && detail.data.pending_version_id && <button type="button" onClick={() => action.mutate({ id: detail.data.id, verb: "verify", key: keyFor(`connection:${detail.data.id}:verify`) })}>Verify pending</button>}
-                {canOperate(role) && detail.data.lifecycle !== "disabled" && <button type="button" onClick={() => action.mutate({ id: detail.data.id, verb: "refresh", key: keyFor(`connection:${detail.data.id}:refresh`) })}>Refresh</button>}
-                {canOperate(role) && detail.data.lifecycle !== "disabled" && <button type="button" onClick={() => action.mutate({ id: detail.data.id, verb: "disable", key: keyFor(`connection:${detail.data.id}:disable`) })}>Disable</button>}
-                {isAdmin(role) && detail.data.lifecycle === "disabled" && <button type="button" onClick={() => action.mutate({ id: detail.data.id, verb: "enable", key: keyFor(`connection:${detail.data.id}:enable`) })}>
+                {canOperate(role) && detail.data.lifecycle !== "disabled" && detail.data.pending_version_id && <button type="button" onClick={() => { const operation = `connection:${detail.data.id}:${detail.data.control_epoch}:verify`; action.mutate({ id: detail.data.id, verb: "verify", operation, key: keyFor(operation) }); }}>Verify pending</button>}
+                {canOperate(role) && detail.data.lifecycle !== "disabled" && <button type="button" onClick={() => { const operation = `connection:${detail.data.id}:${detail.data.control_epoch}:refresh`; action.mutate({ id: detail.data.id, verb: "refresh", operation, key: keyFor(operation) }); }}>Refresh</button>}
+                {canOperate(role) && detail.data.lifecycle !== "disabled" && <button type="button" onClick={() => { const operation = `connection:${detail.data.id}:${detail.data.control_epoch}:disable`; action.mutate({ id: detail.data.id, verb: "disable", operation, key: keyFor(operation) }); }}>Disable</button>}
+                {isAdmin(role) && detail.data.lifecycle === "disabled" && <button type="button" onClick={() => { const operation = `connection:${detail.data.id}:${detail.data.control_epoch}:enable`; action.mutate({ id: detail.data.id, verb: "enable", operation, key: keyFor(operation) }); }}>
                   {detail.data.lifecycle === "disabled" ? "Re-enable" : "Disable"}
                 </button>}
               </div>
-              {isAdmin(role) && detail.data.lifecycle !== "disabled" && <form key={detail.data.id} className="stacked-form version-form" onSubmit={submitVersion}>
+              {isAdmin(role) && detail.data.lifecycle !== "disabled" && <form key={`${detail.data.id}:${detail.data.versions[0]?.id ?? "none"}`} className="stacked-form version-form" onSubmit={submitVersion}>
                 <h3>Append immutable version</h3>
                 <label>HTTPS endpoint<input name="version-endpoint" type="url" required defaultValue={detail.data.versions[0]?.endpoint_url} /></label>
                 <label>Secret binding UUID <span>optional</span><input name="version-secret-binding" pattern="[0-9a-fA-F-]{36}" defaultValue={detail.data.versions[0]?.secret_binding_id ?? ""} placeholder="Opaque binding identifier" /></label>
@@ -665,7 +666,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
   const runs = useQuery({
     queryKey: runsKey,
     queryFn: () => api.listRuns(),
-    refetchInterval: (query) => query.state.status !== "error" && query.state.data?.some((item) => !terminal(item.status)) ? 3000 : false,
+    refetchInterval: (query) => query.state.status === "error" ? false : 3000,
   });
   const capabilities = useQuery({ queryKey: queryKey(scope, "capabilities"), queryFn: () => api.listCapabilities() });
   const connections = useQuery({ queryKey: queryKey(scope, "connections"), queryFn: () => api.listConnections() });
