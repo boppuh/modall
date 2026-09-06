@@ -83,11 +83,19 @@ async def transaction(
             async with session.begin():
                 yield session
         except BaseException:
-            for callback in callbacks:
-                try:
-                    async with asyncio.timeout(_AFTER_ROLLBACK_TIMEOUT_SECONDS):
-                        async with session_factory() as cleanup_session, cleanup_session.begin():
-                            await callback(cleanup_session)
-                except Exception:
-                    logging.getLogger("modall.persistence").warning("after_rollback_cleanup_failed")
+            try:
+                async with asyncio.timeout(_AFTER_ROLLBACK_TIMEOUT_SECONDS):
+                    for callback in callbacks:
+                        try:
+                            async with (
+                                session_factory() as cleanup_session,
+                                cleanup_session.begin(),
+                            ):
+                                await callback(cleanup_session)
+                        except Exception:
+                            logging.getLogger("modall.persistence").warning(
+                                "after_rollback_cleanup_failed"
+                            )
+            except TimeoutError:
+                logging.getLogger("modall.persistence").warning("after_rollback_cleanup_failed")
             raise

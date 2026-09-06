@@ -153,12 +153,12 @@ def test_after_rollback_cleanup_is_bounded_and_preserves_original_error(
     async def scenario() -> None:
         engine = create_engine("sqlite+aiosqlite:///:memory:")
         factory = create_session_factory(engine)
-        cleanup_started = False
+        cleanups_started = 0
 
         async def hanging_cleanup(session: AsyncSession) -> None:
-            nonlocal cleanup_started
+            nonlocal cleanups_started
             del session
-            cleanup_started = True
+            cleanups_started += 1
             await asyncio.Event().wait()
 
         monkeypatch.setattr(database, "_AFTER_ROLLBACK_TIMEOUT_SECONDS", 0.01)
@@ -166,8 +166,9 @@ def test_after_rollback_cleanup_is_bounded_and_preserves_original_error(
             with pytest.raises(RuntimeError, match="original failure"):
                 async with transaction(factory) as session:
                     register_after_rollback(session, hanging_cleanup)
+                    register_after_rollback(session, hanging_cleanup)
                     raise RuntimeError("original failure")
-            assert cleanup_started is True
+            assert cleanups_started == 1
         finally:
             await engine.dispose()
 

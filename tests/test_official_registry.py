@@ -1014,7 +1014,7 @@ def test_service_deadline_is_detached_from_scanned_metadata() -> None:
     asyncio.run(scenario())
 
 
-def test_import_workspace_lock_wait_is_bounded(
+def test_search_and_import_role_waits_are_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
@@ -1031,22 +1031,28 @@ def test_import_workspace_lock_wait_is_bounded(
         async with database() as factory:
             user_id, workspace_id = await bootstrap(factory, subject="bounded-import-lock")
             monkeypatch.setattr(official_registry, "require_current_role", stalled_role_check)
+            context = WorkspaceContext(workspace_id, user_id, Role.OPERATOR)
+            limits = OfficialRegistryLimits(total_timeout_seconds=0.01)
             async with transaction(factory) as session:
-                context = WorkspaceContext(workspace_id, user_id, Role.OPERATOR)
-                with pytest.raises(OfficialRegistryError) as raised:
+                with pytest.raises(OfficialRegistryError) as search_error:
                     await OfficialRegistryService(
-                        session,
-                        OfficialRegistryAdapter(
-                            limits=OfficialRegistryLimits(total_timeout_seconds=0.01)
-                        ),
+                        session, OfficialRegistryAdapter(limits=limits)
+                    ).search(context=context, query="private query")
+            assert search_error.value.code == OfficialRegistryFailureCode.TIMEOUT
+            assert search_error.value.__cause__ is None
+            assert search_error.value.__context__ is None
+            async with transaction(factory) as session:
+                with pytest.raises(OfficialRegistryError) as import_error:
+                    await OfficialRegistryService(
+                        session, OfficialRegistryAdapter(limits=limits)
                     ).import_cached(
                         context=context,
                         cache_id=UUID(int=1),
                         provenance_digest="0" * 64,
                     )
-        assert raised.value.code == OfficialRegistryFailureCode.TIMEOUT
-        assert raised.value.__cause__ is None
-        assert raised.value.__context__ is None
+            assert import_error.value.code == OfficialRegistryFailureCode.TIMEOUT
+            assert import_error.value.__cause__ is None
+            assert import_error.value.__context__ is None
 
     asyncio.run(scenario())
 

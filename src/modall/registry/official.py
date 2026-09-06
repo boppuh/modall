@@ -646,9 +646,9 @@ class OfficialRegistryService:
     async def search(
         self, *, context: WorkspaceContext, query: str
     ) -> OfficialRegistrySearchResult:
-        await require_current_role(self._session, context, Role.ADMIN, Role.OPERATOR)
         try:
             async with asyncio.timeout(self._limits.total_timeout_seconds):
+                await require_current_role(self._session, context, Role.ADMIN, Role.OPERATOR)
                 return await self._search_authorized(context=context, query=query)
         except TimeoutError:
             pass
