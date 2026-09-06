@@ -329,6 +329,7 @@ class ExecutionService:
                 actor_user_id=context.actor_user_id,
                 nonce_digest=nonce_digest,
                 run_id=run_id,
+                key_version=claims.key_version,
                 expires_at=claims.expires_at,
                 consumed_at=now,
             )
@@ -1058,6 +1059,7 @@ class ExecutionService:
                     actor_user_id=context.actor_user_id,
                     nonce_digest=nonce_digest,
                     run_id=run.id,
+                    key_version=claims.key_version,
                     expires_at=claims.expires_at,
                     consumed_at=now,
                 )
@@ -1085,6 +1087,13 @@ class ExecutionService:
             .limit(1)
         )
         if missing_version is not None:
+            raise ExecutionError(ExecutionFailureCode.CONFIRMATION_KEY_HISTORY_INCOMPLETE)
+        missing_nonce_version = await self._session.scalar(
+            select(ConfirmationNonce.key_version)
+            .where(ConfirmationNonce.key_version.not_in(configured_versions))
+            .limit(1)
+        )
+        if missing_nonce_version is not None:
             raise ExecutionError(ExecutionFailureCode.CONFIRMATION_KEY_HISTORY_INCOMPLETE)
 
     @staticmethod
@@ -1203,7 +1212,6 @@ class ExecutionService:
         )
         if workspace_id is None:
             raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
-        now = await self._durable_now()
         membership = await self._session.scalar(
             select(WorkspaceMembership).where(
                 WorkspaceMembership.workspace_id == run.workspace_id,
@@ -1248,6 +1256,7 @@ class ExecutionService:
             )
         )
         attempt = await self._active_attempt(run.id)
+        now = await self._durable_now()
         if (
             state.dispatch_quarantined
             or state.execution_epoch != lease.execution_epoch

@@ -394,8 +394,53 @@ def test_idempotency_survives_key_rotation_and_detects_conflict() -> None:
                     confirmation_token=token.confirmation_token,
                     idempotency_key="rotating-key",
                 )
+                confirmation_replay_service = service(
+                    session,
+                    now=now,
+                    confirmation_keys=(rotated_confirmation, *CONFIRMATION_KEYS),
+                )
+                confirmation_replay_token = await confirmation_replay_service.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "same"},
+                )
+                assert (
+                    await confirmation_replay_service.create_run(
+                        context=context,
+                        capability_version_id=version.id,
+                        arguments={"query": "same"},
+                        confirmation_token=confirmation_replay_token.confirmation_token,
+                        idempotency_key="rotating-key",
+                    )
+                ).id == run.id
+                replay_nonce = await session.scalar(
+                    select(ConfirmationNonce).where(
+                        ConfirmationNonce.key_version == rotated_confirmation.version
+                    )
+                )
+                assert replay_nonce is not None
+                retained_key_token = await initial.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "retained confirmation key"},
+                )
+                with pytest.raises(ExecutionError) as retained_confirmation_history:
+                    await initial.create_run(
+                        context=context,
+                        capability_version_id=version.id,
+                        arguments={"query": "retained confirmation key"},
+                        confirmation_token=retained_key_token.confirmation_token,
+                        idempotency_key="retained-confirmation-key",
+                    )
+                assert (
+                    retained_confirmation_history.value.code
+                    == ExecutionFailureCode.CONFIRMATION_KEY_HISTORY_INCOMPLETE
+                )
                 rotated_service = service(
-                    session, now=now, idempotency_keys=(rotated, *IDEMPOTENCY_KEYS)
+                    session,
+                    now=now,
+                    confirmation_keys=(rotated_confirmation, *CONFIRMATION_KEYS),
+                    idempotency_keys=(rotated, *IDEMPOTENCY_KEYS),
                 )
                 replay_token = await rotated_service.preflight(
                     context=context,
@@ -419,6 +464,7 @@ def test_idempotency_survives_key_rotation_and_detects_conflict() -> None:
                     await service(
                         session,
                         now=now + timedelta(days=91),
+                        confirmation_keys=(rotated_confirmation, *CONFIRMATION_KEYS),
                         idempotency_keys=(rotated,),
                     ).create_run(
                         context=context,
@@ -486,6 +532,7 @@ def test_idempotency_survives_key_rotation_and_detects_conflict() -> None:
                 replay_token = await service(
                     session,
                     now=now + timedelta(seconds=31),
+                    confirmation_keys=(rotated_confirmation, *CONFIRMATION_KEYS),
                     idempotency_keys=(rotated, *IDEMPOTENCY_KEYS),
                 ).preflight(
                     context=context,
@@ -495,6 +542,7 @@ def test_idempotency_survives_key_rotation_and_detects_conflict() -> None:
                 past_deadline_replay = await service(
                     session,
                     now=now + timedelta(seconds=31),
+                    confirmation_keys=(rotated_confirmation, *CONFIRMATION_KEYS),
                     idempotency_keys=(rotated, *IDEMPOTENCY_KEYS),
                 ).create_run(
                     context=context,

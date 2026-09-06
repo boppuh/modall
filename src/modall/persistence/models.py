@@ -976,7 +976,11 @@ class ConfirmationNonce(Base):
             ondelete="CASCADE",
         ),
         CheckConstraint("length(nonce_digest) = 64", name="ck_confirmation_nonce_digest"),
+        CheckConstraint(
+            "length(key_version) BETWEEN 1 AND 32", name="ck_confirmation_nonce_key_version"
+        ),
         Index("ix_confirmation_nonces_run", "workspace_id", "run_id"),
+        Index("ix_confirmation_nonces_key_version", "key_version"),
     )
 
     id: Mapped[UuidPrimaryKey]
@@ -984,6 +988,7 @@ class ConfirmationNonce(Base):
     actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     nonce_digest: Mapped[str] = mapped_column(String(64))
     run_id: Mapped[UUID]
+    key_version: Mapped[str] = mapped_column(String(32))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

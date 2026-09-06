@@ -318,9 +318,14 @@ def upgrade() -> None:
         sa.Column("actor_user_id", sa.Uuid(), nullable=False),
         sa.Column("nonce_digest", sa.String(64), nullable=False),
         sa.Column("run_id", sa.Uuid(), nullable=False),
+        sa.Column("key_version", sa.String(32), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("consumed_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("length(nonce_digest) = 64", name="ck_confirmation_nonce_digest"),
+        sa.CheckConstraint(
+            "length(key_version) BETWEEN 1 AND 32",
+            name="ck_confirmation_nonce_key_version",
+        ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["actor_user_id"], ["users.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(
@@ -334,6 +339,7 @@ def upgrade() -> None:
         "confirmation_nonces",
         ["workspace_id", "run_id"],
     )
+    op.create_index("ix_confirmation_nonces_key_version", "confirmation_nonces", ["key_version"])
 
     op.create_table(
         "idempotency_records",
@@ -431,6 +437,7 @@ def downgrade() -> None:
     op.drop_index("ix_idempotency_confirmation_key_version", table_name="idempotency_records")
     op.drop_index("ix_idempotency_expiry", table_name="idempotency_records")
     op.drop_table("idempotency_records")
+    op.drop_index("ix_confirmation_nonces_key_version", table_name="confirmation_nonces")
     op.drop_index("ix_confirmation_nonces_run", table_name="confirmation_nonces")
     op.drop_table("confirmation_nonces")
     op.drop_table("run_events")
