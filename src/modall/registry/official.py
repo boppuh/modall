@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import multiprocessing
+import signal
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from urllib.parse import unquote
 from uuid import UUID, uuid4
 
 import httpx
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modall.audit.types import AuditAction, ResourceType
@@ -165,8 +166,13 @@ class _DecodeWorkExceeded(ValueError):
     pass
 
 
+class _ScannerTerminated(BaseException):
+    pass
+
+
 _JSON_DECODE_FAILED = object()
 _CANONICAL_JSON_FAILED = object()
+_CONTENT_LENGTH_FAILED = object()
 
 
 def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -187,6 +193,13 @@ def _parse_finite_float(value: str) -> float:
     if not math.isfinite(parsed):
         raise ValueError("non-finite number")
     return parsed
+
+
+def _parse_content_length(value: str) -> int | object:
+    try:
+        return int(value)
+    except ValueError:
+        return _CONTENT_LENGTH_FAILED
 
 
 def _is_utf8(value: str) -> bool:
@@ -293,6 +306,12 @@ def _scanner_process_main(scanner: Callable[[object], bool], value: object, send
     """Run an untrusted scanner where the parent can forcibly stop it."""
 
     connection = cast(Connection, sender)
+
+    def terminate(signum: int, frame: object) -> None:
+        del signum, frame
+        raise _ScannerTerminated
+
+    signal.signal(signal.SIGTERM, terminate)
     try:
         connection.send((True, bool(scanner(value))))
     except BaseException:
@@ -389,12 +408,12 @@ class OfficialRegistryAdapter:
                             )
                         declared_length = response.headers.get("Content-Length")
                         if declared_length is not None:
-                            try:
-                                parsed_length = int(declared_length)
-                            except ValueError:
+                            parsed_length = _parse_content_length(declared_length)
+                            if parsed_length is _CONTENT_LENGTH_FAILED:
                                 raise OfficialRegistryError(
                                     OfficialRegistryFailureCode.INVALID_RESPONSE
-                                ) from None
+                                )
+                            parsed_length = cast(int, parsed_length)
                             if (
                                 parsed_length < 0
                                 or total_bytes + parsed_length > self._limits.max_response_bytes
@@ -597,7 +616,10 @@ class OfficialRegistryService:
         query_digest = hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
         now = self._utc_now()
         await _purge_expired_workspace_cache(
-            self._session, workspace_id=context.workspace_id, now=now
+            self._session,
+            workspace_id=context.workspace_id,
+            now=now,
+            cache_ttl=self._limits.cache_ttl,
         )
         cache = await self._session.scalar(
             select(RegistrySearchCache)
@@ -616,7 +638,7 @@ class OfficialRegistryService:
             try:
                 items = await self._adapter.parse_cached_items(cache.normalized_results)
             except OfficialRegistryError:
-                await self._session.delete(cache)
+                await self._purge_rejected_cache(context=context, cache=cache)
             else:
                 if (
                     len(items) == cache.result_count
@@ -624,7 +646,7 @@ class OfficialRegistryService:
                     and _digest(cache.normalized_results) == cache.response_digest
                 ):
                     return self._result(cache, items, from_cache=True)
-                await self._session.delete(cache)
+                await self._purge_rejected_cache(context=context, cache=cache)
 
         items = await self._adapter.search(normalized_query)
         normalized_results = cast(
@@ -645,7 +667,10 @@ class OfficialRegistryService:
             serialize_workspace=True,
         )
         await _purge_expired_workspace_cache(
-            self._session, workspace_id=context.workspace_id, now=fetched_at
+            self._session,
+            workspace_id=context.workspace_id,
+            now=fetched_at,
+            cache_ttl=self._limits.cache_ttl,
         )
         cache_usage = (
             await self._session.execute(
@@ -696,7 +721,10 @@ class OfficialRegistryService:
             raise OfficialRegistryError(OfficialRegistryFailureCode.CACHE_MISS)
         now = self._utc_now()
         await _purge_expired_workspace_cache(
-            self._session, workspace_id=context.workspace_id, now=now
+            self._session,
+            workspace_id=context.workspace_id,
+            now=now,
+            cache_ttl=self._limits.cache_ttl,
         )
         cache = await self._session.scalar(
             select(RegistrySearchCache).where(
@@ -717,18 +745,7 @@ class OfficialRegistryService:
         try:
             items = await self._adapter.parse_cached_items(cache.normalized_results)
         except OfficialRegistryError:
-
-            async def purge_after_rollback(cleanup_session: AsyncSession) -> None:
-                await cleanup_session.execute(
-                    delete(RegistrySearchCache).where(
-                        RegistrySearchCache.id == cache_id,
-                        RegistrySearchCache.workspace_id == context.workspace_id,
-                    )
-                )
-
-            register_after_rollback(self._session, purge_after_rollback)
-            await self._session.delete(cache)
-            await self._session.flush()
+            await self._purge_rejected_cache(context=context, cache=cache)
             raise
         item = next(
             (candidate for candidate in items if candidate.provenance_digest == provenance_digest),
@@ -795,6 +812,24 @@ class OfficialRegistryService:
         )
         await self._session.flush()
         return version
+
+    async def _purge_rejected_cache(
+        self, *, context: WorkspaceContext, cache: RegistrySearchCache
+    ) -> None:
+        cache_id = cache.id
+        workspace_id = context.workspace_id
+
+        async def purge_after_rollback(cleanup_session: AsyncSession) -> None:
+            await cleanup_session.execute(
+                delete(RegistrySearchCache).where(
+                    RegistrySearchCache.id == cache_id,
+                    RegistrySearchCache.workspace_id == workspace_id,
+                )
+            )
+
+        register_after_rollback(self._session, purge_after_rollback)
+        await self._session.delete(cache)
+        await self._session.flush()
 
     def _utc_now(self) -> datetime:
         value = self._now()
@@ -894,8 +929,11 @@ async def _run_scanner(
         receiver.close()
         if process.pid is not None:
             if process.is_alive():
+                process.terminate()
+                process.join(timeout=0.25)
+            if process.is_alive():
                 process.kill()
-            process.join()
+                process.join()
             process.close()
         if permit_acquired:
             _SCANNER_PROCESS_SEMAPHORE.release()
@@ -915,12 +953,19 @@ async def purge_expired_registry_cache(
 
 
 async def _purge_expired_workspace_cache(
-    session: AsyncSession, *, workspace_id: UUID, now: datetime
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    now: datetime,
+    cache_ttl: timedelta | None = None,
 ) -> None:
+    expiry_predicates = [RegistrySearchCache.expires_at <= now]
+    if cache_ttl is not None:
+        expiry_predicates.append(RegistrySearchCache.fetched_at <= now - cache_ttl)
     await session.execute(
         delete(RegistrySearchCache).where(
             RegistrySearchCache.workspace_id == workspace_id,
-            RegistrySearchCache.expires_at <= now,
+            or_(*expiry_predicates),
         )
     )
 

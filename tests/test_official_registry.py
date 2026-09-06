@@ -562,6 +562,7 @@ def test_adapter_rejects_redirect_header_and_json_envelope_faults(
                 await OfficialRegistryAdapter(transport=client._transport).search("weather")
         assert raised.value.code == expected_code
         assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
 
     asyncio.run(scenario())
 
@@ -1132,6 +1133,91 @@ def test_import_purges_cache_rejected_by_the_active_scanner() -> None:
     asyncio.run(scenario())
 
 
+def test_search_rejected_cache_flushes_for_quota_and_survives_rollback() -> None:
+    async def scenario() -> None:
+        calls: dict[str, int] = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            query = request.url.params["search"]
+            calls[query] = calls.get(query, 0) + 1
+            if calls[query] == 1:
+                payload = json.loads((FIXTURES / "search_page_1.json").read_text())
+                payload["servers"][0]["server"]["description"] = (
+                    "token%2525253DAbCdEfGhIjKlMnOpQrStUvWx"
+                )
+                payload["metadata"].pop("nextCursor", None)
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "application/json"},
+                    json=payload,
+                    request=request,
+                )
+            if query == "rollback":
+                raise httpx.ConnectError("upstream unavailable", request=request)
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={"servers": [], "metadata": {"count": 0}},
+                request=request,
+            )
+
+        limits = OfficialRegistryLimits(max_workspace_cache_rows=1)
+        async with database() as factory:
+            replace_user, replace_workspace = await bootstrap(factory, subject="search-replace")
+            rollback_user, rollback_workspace = await bootstrap(factory, subject="search-rollback")
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                permissive = OfficialRegistryAdapter(
+                    transport=client._transport,
+                    limits=limits,
+                    metadata_scanner=scanner_allows,
+                )
+                strict = OfficialRegistryAdapter(transport=client._transport, limits=limits)
+                async with transaction(factory) as session:
+                    context = await context_for(
+                        session, user_id=replace_user, workspace_id=replace_workspace
+                    )
+                    rejected = await OfficialRegistryService(session, permissive).search(
+                        context=context, query="replace"
+                    )
+                async with transaction(factory) as session:
+                    context = await context_for(
+                        session, user_id=replace_user, workspace_id=replace_workspace
+                    )
+                    replacement = await OfficialRegistryService(session, strict).search(
+                        context=context, query="replace"
+                    )
+                    assert replacement.cache_id != rejected.cache_id
+                    assert (
+                        await session.scalar(
+                            select(func.count())
+                            .select_from(RegistrySearchCache)
+                            .where(RegistrySearchCache.workspace_id == replace_workspace)
+                        )
+                        == 1
+                    )
+
+                async with transaction(factory) as session:
+                    context = await context_for(
+                        session, user_id=rollback_user, workspace_id=rollback_workspace
+                    )
+                    rollback_cache = await OfficialRegistryService(session, permissive).search(
+                        context=context, query="rollback"
+                    )
+                with pytest.raises(OfficialRegistryError) as unavailable:
+                    async with transaction(factory) as session:
+                        context = await context_for(
+                            session, user_id=rollback_user, workspace_id=rollback_workspace
+                        )
+                        await OfficialRegistryService(session, strict).search(
+                            context=context, query="rollback"
+                        )
+                assert unavailable.value.code == OfficialRegistryFailureCode.UPSTREAM_UNAVAILABLE
+                async with transaction(factory) as session:
+                    assert await session.get(RegistrySearchCache, rollback_cache.cache_id) is None
+
+    asyncio.run(scenario())
+
+
 def test_service_and_adapter_cannot_diverge_on_limits() -> None:
     async def scenario() -> None:
         async with (
@@ -1228,7 +1314,9 @@ def test_cache_reuse_and_import_respect_a_stricter_rolling_ttl() -> None:
                     ).search(context=context, query="fixture")
 
                 now += timedelta(minutes=10)
-                strict_limits = OfficialRegistryLimits(cache_ttl=timedelta(minutes=5))
+                strict_limits = OfficialRegistryLimits(
+                    cache_ttl=timedelta(minutes=5), max_workspace_cache_rows=1
+                )
                 async with transaction(factory) as session:
                     context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
                     service = OfficialRegistryService(
@@ -1246,6 +1334,7 @@ def test_cache_reuse_and_import_respect_a_stricter_rolling_ttl() -> None:
                             provenance_digest=original.items[0].provenance_digest,
                         )
                     assert expired_import.value.code == OfficialRegistryFailureCode.CACHE_MISS
+                    assert await session.get(RegistrySearchCache, original.cache_id) is None
                 assert calls == 4
 
     asyncio.run(scenario())
