@@ -111,7 +111,7 @@ class ExecutionLimits:
             or not 1 <= self.max_historical_hmac_keys <= 16
             or not 0 < self.schema_validation_timeout_seconds <= 5
             or not math.isfinite(self.schema_validation_timeout_seconds)
-            or not 64 * 1024 * 1024 <= self.schema_validation_memory_bytes <= 1024 * 1024 * 1024
+            or not 64 * 1024 * 1024 <= self.schema_validation_memory_bytes <= 256 * 1024 * 1024
             or not 1 <= self.reconciliation_batch_size <= 1000
         ):
             raise ValueError("invalid execution limits")

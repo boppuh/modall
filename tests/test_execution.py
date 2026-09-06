@@ -897,6 +897,8 @@ def test_confirmation_limits_expiry_and_key_configuration_fail_closed(
                 ExecutionLimits(confirmation_ttl_seconds=0)
             with pytest.raises(ValueError, match="invalid execution limits"):
                 ExecutionLimits(schema_validation_memory_bytes=32 * 1024 * 1024)
+            with pytest.raises(ValueError, match="invalid execution limits"):
+                ExecutionLimits(schema_validation_memory_bytes=512 * 1024 * 1024)
             with pytest.raises(ValueError, match="run event history is empty"):
                 ExecutionService.replay_projection([])
             with pytest.raises(ValueError, match="invalid cleanup batch"):
