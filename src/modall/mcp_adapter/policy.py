@@ -279,14 +279,17 @@ class LimitedByteStream(httpx.AsyncByteStream):
             self._reject_sensitive_body()
 
     def _screen_completed_sse_events(self) -> None:
+        consumed = 0
         while match := _SSE_EVENT_BOUNDARY_BYTES.search(
             self._structured_buffer, self._sse_scan_from
         ):
-            event = bytes(self._structured_buffer[: match.start()])
-            del self._structured_buffer[: match.end()]
-            self._sse_scan_from = 0
+            event = bytes(self._structured_buffer[consumed : match.start()])
+            consumed = match.end()
+            self._sse_scan_from = consumed
             if _contains_sensitive_sse_event(event):
                 self._reject_sensitive_body()
+        if consumed:
+            del self._structured_buffer[:consumed]
         self._sse_scan_from = max(0, len(self._structured_buffer) - 3)
 
     def _reject_sensitive_body(self) -> None:
@@ -294,7 +297,15 @@ class LimitedByteStream(httpx.AsyncByteStream):
         raise EndpointPolicyError("sensitive upstream response body")
 
     async def aclose(self) -> None:
+        buffered = bytes(self._structured_buffer)
+        sensitive = (
+            _contains_sensitive_json_document(buffered)
+            if self._buffer_json_document
+            else _contains_sensitive_sse_event(buffered)
+        )
         await self._stream.aclose()
+        if sensitive:
+            self._reject_sensitive_body()
 
 
 class _IncrementalByteMatcher:

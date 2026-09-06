@@ -196,7 +196,10 @@ class McpClientAdapter:
                     follow_redirects=False,
                 )
                 with _suppress_untrusted_sdk_logs():
-                    return await self._discover(client, endpoint, credential_text)
+                    result = await self._discover(client, endpoint, credential_text)
+                if transport.sensitive_response_detected:
+                    raise SensitiveResponseError("secret screening rejected metadata")
+                return result
         except (ProtocolMismatch, DiscoveryError):
             raise
         except Exception as exc:

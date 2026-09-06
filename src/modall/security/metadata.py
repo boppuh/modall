@@ -196,6 +196,7 @@ def contains_sensitive_url(value: str) -> bool:
             parsed.password is not None
             or contains_sensitive_hostname(host)
             or contains_sensitive_url_path(decoded_path)
+            or contains_obvious_secret(decoded_path)
             or contains_sensitive_url_path(decoded_query)
             or contains_sensitive_url_path(decoded_fragment)
             or contains_obvious_secret(decoded_query)

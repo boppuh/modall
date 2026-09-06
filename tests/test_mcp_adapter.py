@@ -442,6 +442,7 @@ def test_url_secret_screen_handles_embedded_and_multiple_markers() -> None:
     assert contains_sensitive_url("https://token-AbCdEfGhIjKlMnOpQrStUvWx@cdn.example/path")
     assert contains_sensitive_url("https://cdn.example/path?token-AbCdEfGhIjKlMnOpQrStUvWx")
     assert contains_sensitive_url("https://cdn.example/path?token%3DAbCdEfGhIjKlMnOpQrStUvWx")
+    assert contains_sensitive_url("https://cdn.example/path/token%3DAbCdEfGhIjKlMnOpQrStUvWx")
     assert _contains_sensitive_tool(
         {
             "name": "safe-tool",
@@ -639,6 +640,16 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
         async def aclose(self) -> None:
             return None
 
+    class OneChunkStream(httpx.AsyncByteStream):
+        def __init__(self, content: bytes) -> None:
+            self._content = content
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield self._content
+
+        async def aclose(self) -> None:
+            return None
+
     async def scenario() -> None:
         async def declared(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, headers={"Content-Length": "100"}, request=request)
@@ -820,6 +831,38 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
         ) as client:
             with pytest.raises(EndpointPolicyError, match="sensitive upstream response body"):
                 await client.get("https://example.test")
+
+        async def early_close_sse(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                stream=OneChunkStream(
+                    b'data: {"status":"ready"}\n\n: {"token":{"value":"AbCdEfGhIjKlMnOpQrStUvWx"}}'
+                ),
+                request=request,
+            )
+
+        early_close_transport = LimitedTransport(httpx.MockTransport(early_close_sse), 100)
+        async with httpx.AsyncClient(transport=early_close_transport) as client:
+            request = client.build_request("GET", "https://example.test")
+            response = await client.send(request, stream=True)
+            assert await anext(response.aiter_raw())
+            with pytest.raises(EndpointPolicyError, match="sensitive upstream response body"):
+                await response.aclose()
+            assert early_close_transport.sensitive_response_detected
+
+        async def many_sse_events(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                stream=OneChunkStream(b"\n\n" * 100_000),
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(many_sse_events), 262_144)
+        ) as client:
+            assert len((await client.get("https://example.test")).content) == 200_000
 
         long_credential = "AbCd" * 1024
 
