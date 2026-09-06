@@ -211,7 +211,7 @@ footer { display: flex; justify-content: space-between; gap: 2rem; padding: 1.4r
   h1 { font-size: clamp(2.8rem, 16vw, 4.5rem); }
   .brand { padding: 0 0.8rem; border-right: 0; }
   .workspace-menu { gap: 0.6rem; padding: 0 0.8rem; }
-  .workspace-menu code, .workspace-menu .text-action { display: none; }
+  .workspace-menu code { display: none; }
   .topbar nav button { padding: 0 0.65rem; }
   .topbar nav button span { display: none; }
   .app-shell > main { width: min(100% - 1.5rem, var(--max)); padding-top: 3rem; }

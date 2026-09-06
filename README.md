@@ -42,7 +42,7 @@ polling, cancellation, and the durable event timeline.
 Run the desktop and mobile reference journey, including the automated WCAG scan, with:
 
 ```sh
-npx playwright install chromium
+npx playwright install --with-deps chromium
 npm run e2e --workspace @modall/web
 ```
 

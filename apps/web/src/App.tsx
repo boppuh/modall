@@ -251,7 +251,7 @@ function Overview({ api, open, scope }: { api: ControlPlane; open: (view: View) 
           <h1>Registry overview</h1>
           <p>Current state across server trust, capability approval, and durable execution.</p>
         </div>
-        <p className="timestamp">Updated {formatTime(new Date().toISOString())}</p>
+        <p className="timestamp">Updated {formatTime(new Date(query.dataUpdatedAt).toISOString())}</p>
       </header>
       <section className="metric-ribbon" aria-label="Workspace metrics">
         <button type="button" onClick={() => open("registry")}>

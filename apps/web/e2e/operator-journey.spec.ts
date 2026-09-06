@@ -50,25 +50,32 @@ const run = {
 async function mockControlPlane(route: Route) {
   const request = route.request();
   const path = new URL(request.url()).pathname;
-  let body: unknown = {};
-  if (path === "/v1/server-connections") {
-    body = request.method() === "GET" ? { items: [connection], page: { next_cursor: null } } : connection;
-  } else if (path === `/v1/server-connections/${connectionId}`) {
+  const key = `${request.method()} ${path}`;
+  let body: unknown;
+  if (key === "GET /v1/server-connections") {
+    body = { items: [connection], page: { next_cursor: null } };
+  } else if (key === "POST /v1/server-connections") {
+    body = connection;
+  } else if (key === `GET /v1/server-connections/${connectionId}`) {
     body = { ...connection, versions: [{ id: versionId, sequence: 1, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http", created_at: timestamp }], versions_truncated: false };
-  } else if (path === "/v1/registry/entries") {
+  } else if (key === "GET /v1/registry/entries") {
     body = { items: [], page: { next_cursor: null } };
-  } else if (path === "/v1/capabilities") {
+  } else if (key === "GET /v1/capabilities") {
     body = { items: [capability], page: { next_cursor: null } };
-  } else if (path === `/v1/capabilities/${capabilityId}`) {
+  } else if (key === `GET /v1/capabilities/${capabilityId}`) {
     body = { ...capability, versions: [{ id: versionId, capability_id: capabilityId, sequence: 1, display_name: "Search", description: "Search public records", input_schema: { type: "object", properties: { query: { type: "string" } } }, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false };
-  } else if (path === "/v1/runs") {
-    body = request.method() === "GET" ? { items: [run], page: { next_cursor: null } } : run;
-  } else if (path === `/v1/runs/${runId}`) {
+  } else if (key === "GET /v1/runs") {
+    body = { items: [run], page: { next_cursor: null } };
+  } else if (key === "POST /v1/runs") {
     body = run;
-  } else if (path === `/v1/runs/${runId}/events`) {
+  } else if (key === `GET /v1/runs/${runId}`) {
+    body = run;
+  } else if (key === `GET /v1/runs/${runId}/events`) {
     body = { items: [{ id: connectionId, sequence: 1, event_type: "completed", status: "succeeded", safe_error_code: null, occurred_at: timestamp }], page: { next_cursor: null } };
-  } else if (path === "/v1/run-preflights") {
+  } else if (key === "POST /v1/run-preflights") {
     body = { capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "token", expires_at: "2026-09-06T12:03:00Z" };
+  } else {
+    throw new Error(`Unexpected control-plane request: ${key}`);
   }
   await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
 }
