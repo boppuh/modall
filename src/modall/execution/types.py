@@ -77,6 +77,15 @@ class RunFailureCode(StrEnum):
     UPSTREAM_OUTCOME_UNKNOWN = "upstream_outcome_unknown"
 
 
+@dataclass(frozen=True, slots=True)
+class AcceptedToolResult:
+    """Bounded, screened result content safe for durable storage."""
+
+    payload: dict[str, object]
+    canonical_digest: str
+    byte_count: int
+
+
 class ExecutionError(Exception):
     """A stable execution failure that carries no submitted content."""
 
@@ -94,9 +103,11 @@ class HmacKeyVersion:
 @dataclass(frozen=True, slots=True)
 class ExecutionLimits:
     max_argument_bytes: int = 65_536
+    max_result_bytes: int = 262_144
     confirmation_ttl_seconds: int = 120
     max_run_seconds: int = 300
     argument_retention_days: int = 14
+    result_retention_days: int = 14
     run_retention_days: int = 90
     max_idempotency_key_characters: int = 256
     max_historical_hmac_keys: int = 8
@@ -107,9 +118,11 @@ class ExecutionLimits:
     def __post_init__(self) -> None:
         if (
             self.max_argument_bytes <= 0
+            or self.max_result_bytes <= 0
             or not 1 <= self.confirmation_ttl_seconds <= 300
             or self.max_run_seconds <= 0
             or not 1 <= self.argument_retention_days <= 14
+            or not 1 <= self.result_retention_days <= 14
             or self.run_retention_days < self.argument_retention_days
             or self.max_idempotency_key_characters <= 0
             or not 1 <= self.max_historical_hmac_keys <= 16

@@ -12,6 +12,9 @@ import pytest
 from modall.mcp_adapter.client import (
     CredentialError,
     DiscoveryError,
+    InvocationError,
+    InvocationFailureCode,
+    InvocationIndeterminate,
     McpClientAdapter,
     ProtocolMismatch,
     _contains_decoded_credential,
@@ -242,6 +245,115 @@ def test_adapter_discovers_bounded_domain_types_and_drift() -> None:
         credential_property, endpoint = adapter_for("credential-property-schema")
         credential_property_result = await credential_property.discover(endpoint)
         assert credential_property_result.tools[0].schema_supported is True
+
+    asyncio.run(scenario())
+
+
+def test_adapter_invokes_once_between_fences_and_normalizes_safe_results() -> None:
+    async def scenario() -> None:
+        client, endpoint = adapter_for("default")
+        boundaries: list[str] = []
+
+        async def session_fence() -> None:
+            boundaries.append("session")
+
+        async def dispatch_fence() -> None:
+            boundaries.append("dispatch")
+
+        result = await client.invoke(
+            endpoint,
+            tool_name="echo",
+            arguments={"message": "hello"},
+            output_schema={
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            },
+            before_session=session_fence,
+            before_dispatch=dispatch_fence,
+        )
+        assert boundaries == ["session", "dispatch"]
+        assert result.payload["structuredContent"] == {"message": "hello"}
+        assert result.byte_count > 0
+        assert len(result.canonical_digest) == 64
+
+        authenticated, authenticated_endpoint = adapter_for("authenticated")
+        authenticated_result = await authenticated.invoke(
+            authenticated_endpoint,
+            tool_name="echo",
+            arguments={"message": "authenticated"},
+            output_schema=None,
+            bearer_token=FIXTURE_TOKEN.encode(),
+            before_session=session_fence,
+            before_dispatch=dispatch_fence,
+        )
+        assert authenticated_result.payload["structuredContent"] == {"message": "authenticated"}
+        for invalid_credential in (b"short", b"non-ascii-\xff"):
+            invalid_client, invalid_endpoint = adapter_for("authenticated")
+            with pytest.raises(InvocationError) as invalid:
+                await invalid_client.invoke(
+                    invalid_endpoint,
+                    tool_name="echo",
+                    arguments={"message": "never sent"},
+                    output_schema=None,
+                    bearer_token=invalid_credential,
+                    before_session=session_fence,
+                    before_dispatch=dispatch_fence,
+                )
+            assert invalid.value.code == InvocationFailureCode.SESSION_INITIALIZATION_FAILED
+
+        for tool, expected in (
+            ("unsupported-content", InvocationFailureCode.UNSUPPORTED_RESULT_CONTENT),
+            ("invalid-output", InvocationFailureCode.INVALID_UPSTREAM_OUTPUT),
+            ("fail", InvocationFailureCode.TOOL_CALL_FAILED),
+        ):
+            rejected, rejected_endpoint = adapter_for("default")
+            with pytest.raises(InvocationError) as failure:
+                await rejected.invoke(
+                    rejected_endpoint,
+                    tool_name=tool,
+                    arguments={},
+                    output_schema=(
+                        {
+                            "type": "object",
+                            "properties": {"message": {"type": "string"}},
+                            "required": ["message"],
+                        }
+                        if tool == "invalid-output"
+                        else None
+                    ),
+                    before_session=session_fence,
+                    before_dispatch=dispatch_fence,
+                )
+            assert failure.value.code == expected
+            assert failure.value.dispatched is True
+
+        timed, timed_endpoint = adapter_for(
+            "timeout-on-call", limits=TransportLimits(read_seconds=0.02, total_seconds=0.2)
+        )
+        with pytest.raises(InvocationIndeterminate):
+            await timed.invoke(
+                timed_endpoint,
+                tool_name="status",
+                arguments={},
+                output_schema=None,
+                before_session=session_fence,
+                before_dispatch=dispatch_fence,
+            )
+
+        initializing, initializing_endpoint = adapter_for("protocol-mismatch")
+        with pytest.raises(InvocationError) as initialization_failure:
+            await initializing.invoke(
+                initializing_endpoint,
+                tool_name="status",
+                arguments={},
+                output_schema=None,
+                before_session=session_fence,
+                before_dispatch=dispatch_fence,
+            )
+        assert (
+            initialization_failure.value.code == InvocationFailureCode.SESSION_INITIALIZATION_FAILED
+        )
 
     asyncio.run(scenario())
 

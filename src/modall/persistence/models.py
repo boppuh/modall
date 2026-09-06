@@ -794,6 +794,28 @@ class Run(Base):
     terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class RunResult(Base):
+    __tablename__ = "run_results"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "run_id"],
+            ["runs.workspace_id", "runs.id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("byte_count > 0", name="ck_run_result_byte_count"),
+        CheckConstraint("length(canonical_digest) = 64", name="ck_run_result_digest"),
+        Index("ix_run_results_expiry", "expires_at", "run_id"),
+    )
+
+    run_id: Mapped[UUID] = mapped_column(primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    canonical_digest: Mapped[str] = mapped_column(String(64))
+    byte_count: Mapped[int] = mapped_column(Integer)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Job(Base):
     __tablename__ = "jobs"
     __table_args__ = (
@@ -1113,6 +1135,7 @@ for immutable_model in (
     DiscoverySnapshotCapability,
     RegistrySearchCache,
     RunEvent,
+    RunResult,
     ConfirmationNonce,
     IdempotencyRecord,
 ):

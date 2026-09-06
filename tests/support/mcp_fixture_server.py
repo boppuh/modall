@@ -37,7 +37,9 @@ SUPPORTED_PROFILES = {
     "malformed-secret",
     "oversized",
     "timeout",
+    "timeout-on-call",
     "disconnect",
+    "disconnect-on-call",
     "headers",
     "sdk",
     "redirect",
@@ -329,7 +331,7 @@ def create_mcp_fixture_app() -> FastAPI:
             method == "tools/call"
         ):
             return RedirectResponse("https://redirect.invalid/mcp", status_code=307)
-        if profile == "timeout":
+        if profile == "timeout" or (profile == "timeout-on-call" and method == "tools/call"):
             await asyncio.sleep(0.05)
         if profile in {"malformed", "malformed-secret"}:
             body = (
@@ -352,7 +354,7 @@ def create_mcp_fixture_app() -> FastAPI:
                     yield body[offset : offset + 16_384]
 
             return StreamingResponse(oversized_body(), media_type="application/json")
-        if profile == "disconnect":
+        if profile == "disconnect" or (profile == "disconnect-on-call" and method == "tools/call"):
 
             async def abort_body() -> Any:
                 yield b'{"jsonrpc":"2.0","id":'

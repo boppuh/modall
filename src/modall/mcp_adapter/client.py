@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from enum import StrEnum
 from threading import Lock
 from typing import Any
 from urllib.parse import unquote
@@ -101,6 +102,36 @@ class CredentialError(DiscoveryError):
 
 class SensitiveResponseError(DiscoveryError):
     """An upstream response contained credential-shaped material."""
+
+
+class InvocationFailureCode(StrEnum):
+    SESSION_INITIALIZATION_FAILED = "session_initialization_failed"
+    TOOL_CALL_FAILED = "tool_call_failed"
+    UNSUPPORTED_RESULT_CONTENT = "unsupported_result_content"
+    SENSITIVE_RESULT = "sensitive_result"
+    INVALID_UPSTREAM_OUTPUT = "invalid_upstream_output"
+
+
+class InvocationError(Exception):
+    def __init__(self, code: InvocationFailureCode, *, dispatched: bool = False) -> None:
+        self.code = code
+        self.dispatched = dispatched
+        super().__init__(code.value)
+
+
+class InvocationIndeterminate(InvocationError):
+    """The call crossed the dispatch fence without a definitive response."""
+
+
+class InvocationFenceRejected(InvocationError):
+    """A durable fence rejected contact or dispatch."""
+
+
+@dataclass(frozen=True, slots=True)
+class InvocationResult:
+    payload: dict[str, object]
+    canonical_digest: str
+    byte_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +243,215 @@ class McpClientAdapter:
             if discovery_error is not None:
                 raise discovery_error from exc
             raise DiscoveryError("MCP discovery failed") from exc
+
+    async def invoke(
+        self,
+        endpoint: str,
+        *,
+        tool_name: str,
+        arguments: dict[str, object],
+        output_schema: dict[str, object] | None,
+        bearer_token: bytes | bytearray | None = None,
+        before_session: Callable[[], Awaitable[None]],
+        before_dispatch: Callable[[], Awaitable[None]],
+    ) -> InvocationResult:
+        headers: dict[str, str] = {"Accept-Encoding": "identity"}
+        credential_text: str | None = None
+        if bearer_token is not None:
+            if not endpoint.lower().startswith("https://"):
+                raise InvocationError(InvocationFailureCode.SESSION_INITIALIZATION_FAILED)
+            try:
+                credential_text = bytes(bearer_token).decode("ascii")
+            except UnicodeDecodeError as exc:
+                raise InvocationError(InvocationFailureCode.SESSION_INITIALIZATION_FAILED) from exc
+            if (
+                len(credential_text) < 16
+                or len(credential_text) > 4096
+                or any(not 33 <= ord(character) <= 126 for character in credential_text)
+                or _credential_entropy_bits(credential_text) < 64
+            ):
+                raise InvocationError(InvocationFailureCode.SESSION_INITIALIZATION_FAILED)
+            headers["Authorization"] = f"Bearer {credential_text}"
+        dispatched = False
+        transport: LimitedTransport | None = None
+        try:
+            await before_session()
+            async with asyncio.timeout(self._limits.total_seconds):
+                resolution = await self._endpoint_policy.validate(endpoint)
+                inner = self._transport or PinnedHTTPTransport(resolution)
+                transport = LimitedTransport(
+                    inner,
+                    self._limits.response_bytes,
+                    forbidden_response_values=(
+                        (credential_text, json.dumps(credential_text)[1:-1])
+                        if credential_text is not None
+                        else ()
+                    ),
+                )
+                client = httpx.AsyncClient(
+                    transport=transport,
+                    headers=headers,
+                    timeout=httpx.Timeout(
+                        self._limits.read_seconds,
+                        connect=self._limits.connect_seconds,
+                    ),
+                    follow_redirects=False,
+                )
+
+                async def dispatch() -> None:
+                    nonlocal dispatched
+                    await before_dispatch()
+                    dispatched = True
+
+                with _suppress_untrusted_sdk_logs():
+                    result = await self._invoke(
+                        client,
+                        endpoint,
+                        tool_name,
+                        arguments,
+                        dispatch,
+                    )
+                if transport.sensitive_response_detected:
+                    raise InvocationError(
+                        InvocationFailureCode.SENSITIVE_RESULT, dispatched=dispatched
+                    )
+                try:
+                    return await self._normalize_invocation_result(
+                        result,
+                        output_schema=output_schema,
+                        credential_text=credential_text,
+                    )
+                except InvocationError:
+                    raise
+                except Exception as exc:
+                    raise InvocationError(
+                        InvocationFailureCode.INVALID_UPSTREAM_OUTPUT,
+                        dispatched=True,
+                    ) from exc
+        except InvocationError:
+            raise
+        except Exception as exc:
+            if transport is not None and transport.sensitive_response_detected:
+                raise InvocationError(
+                    InvocationFailureCode.SENSITIVE_RESULT, dispatched=dispatched
+                ) from exc
+            if dispatched:
+                raise InvocationIndeterminate(
+                    InvocationFailureCode.TOOL_CALL_FAILED, dispatched=True
+                ) from exc
+            raise InvocationError(InvocationFailureCode.SESSION_INITIALIZATION_FAILED) from exc
+
+    async def _invoke(
+        self,
+        client: httpx.AsyncClient,
+        endpoint: str,
+        tool_name: str,
+        arguments: dict[str, object],
+        before_dispatch: Callable[[], Awaitable[None]],
+    ) -> types.CallToolResult:
+        received: types.CallToolResult | None = None
+        try:
+            async with (
+                client,
+                streamable_http_client(endpoint, http_client=client) as (
+                    read_stream,
+                    write_stream,
+                    _,
+                ),
+                ClientSession(
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds=timedelta(seconds=self._limits.read_seconds),
+                ) as session,
+            ):
+                initialized = await session.send_request(
+                    types.ClientRequest(
+                        types.InitializeRequest(
+                            params=types.InitializeRequestParams(
+                                protocolVersion=QUALIFIED_PROTOCOL_REVISION,
+                                capabilities=types.ClientCapabilities(),
+                                clientInfo=types.Implementation(name="modall", version="0.1.0"),
+                            )
+                        )
+                    ),
+                    types.InitializeResult,
+                )
+                if initialized.protocolVersion != QUALIFIED_PROTOCOL_REVISION:
+                    raise InvocationError(InvocationFailureCode.SESSION_INITIALIZATION_FAILED)
+                await session.send_notification(
+                    types.ClientNotification(types.InitializedNotification())
+                )
+                await before_dispatch()
+                received = await session.call_tool(tool_name, arguments=arguments)
+        except Exception:
+            if received is None:
+                raise
+        if received is None:
+            raise InvocationIndeterminate(InvocationFailureCode.TOOL_CALL_FAILED, dispatched=True)
+        return received
+
+    async def _normalize_invocation_result(
+        self,
+        result: types.CallToolResult,
+        *,
+        output_schema: dict[str, object] | None,
+        credential_text: str | None,
+    ) -> InvocationResult:
+        if result.isError:
+            raise InvocationError(InvocationFailureCode.TOOL_CALL_FAILED, dispatched=True)
+        content: list[dict[str, object]] = []
+        for block in result.content:
+            if not isinstance(block, types.TextContent):
+                raise InvocationError(
+                    InvocationFailureCode.UNSUPPORTED_RESULT_CONTENT, dispatched=True
+                )
+            content.append({"type": "text", "text": block.text})
+        structured = result.structuredContent
+        if structured is not None and not isinstance(structured, dict):
+            raise InvocationError(InvocationFailureCode.INVALID_UPSTREAM_OUTPUT, dispatched=True)
+        payload: dict[str, object] = {"content": content}
+        if structured is not None:
+            payload["structuredContent"] = structured
+        try:
+            validate_bounded_json(payload)
+            canonical = _canonical_json(payload)
+        except (MetadataValidationError, DiscoveryError) as exc:
+            raise InvocationError(
+                InvocationFailureCode.INVALID_UPSTREAM_OUTPUT, dispatched=True
+            ) from exc
+        if len(canonical) > self._limits.response_bytes:
+            raise InvocationError(InvocationFailureCode.INVALID_UPSTREAM_OUTPUT, dispatched=True)
+        if contains_sensitive_json(payload) or (
+            credential_text is not None and _contains_decoded_credential(payload, credential_text)
+        ):
+            raise InvocationError(InvocationFailureCode.SENSITIVE_RESULT, dispatched=True)
+        if output_schema is not None:
+            # Import lazily: execution admission imports the adapter's pinned
+            # protocol constant during package initialization.
+            from modall.execution.validation import (
+                SchemaValidationResult,
+                validate_schema_arguments,
+            )
+
+            if structured is None:
+                raise InvocationError(
+                    InvocationFailureCode.INVALID_UPSTREAM_OUTPUT, dispatched=True
+                )
+            validation = await validate_schema_arguments(
+                structured,
+                output_schema,
+                timeout_seconds=min(self._limits.total_seconds, 5.0),
+                memory_limit_bytes=256 * 1024 * 1024,
+            )
+            if validation is not SchemaValidationResult.VALID:
+                raise InvocationError(
+                    InvocationFailureCode.INVALID_UPSTREAM_OUTPUT, dispatched=True
+                )
+        return InvocationResult(
+            payload=payload,
+            canonical_digest=hashlib.sha256(canonical).hexdigest(),
+            byte_count=len(canonical),
+        )
 
     async def _discover(
         self, client: httpx.AsyncClient, endpoint: str, credential_text: str | None
