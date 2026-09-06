@@ -83,19 +83,32 @@ async def transaction(
             async with session.begin():
                 yield session
         except BaseException:
-            try:
-                async with asyncio.timeout(_AFTER_ROLLBACK_TIMEOUT_SECONDS):
-                    for callback in callbacks:
-                        try:
-                            async with (
-                                session_factory() as cleanup_session,
-                                cleanup_session.begin(),
-                            ):
-                                await callback(cleanup_session)
-                        except Exception:
-                            logging.getLogger("modall.persistence").warning(
-                                "after_rollback_cleanup_failed"
-                            )
-            except TimeoutError:
-                logging.getLogger("modall.persistence").warning("after_rollback_cleanup_failed")
+            cleanup = asyncio.create_task(_run_after_rollback_callbacks(session_factory, callbacks))
+            cancelled = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError from None
             raise
+
+
+async def _run_after_rollback_callbacks(
+    session_factory: async_sessionmaker[AsyncSession],
+    callbacks: list[Callable[[AsyncSession], Awaitable[None]]],
+) -> None:
+    try:
+        async with asyncio.timeout(_AFTER_ROLLBACK_TIMEOUT_SECONDS):
+            for callback in callbacks:
+                try:
+                    async with (
+                        session_factory() as cleanup_session,
+                        cleanup_session.begin(),
+                    ):
+                        await callback(cleanup_session)
+                except Exception:
+                    logging.getLogger("modall.persistence").warning("after_rollback_cleanup_failed")
+    except TimeoutError:
+        logging.getLogger("modall.persistence").warning("after_rollback_cleanup_failed")

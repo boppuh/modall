@@ -7,6 +7,7 @@ import logging
 import math
 import multiprocessing
 import signal
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from enum import StrEnum
 from multiprocessing.connection import Connection
 from multiprocessing.context import SpawnProcess
 from multiprocessing.reduction import ForkingPickler
-from threading import BoundedSemaphore, Lock
+from threading import Lock
 from typing import cast
 from urllib.parse import unquote
 from uuid import UUID, uuid4
@@ -71,17 +72,67 @@ _REGISTRY_LOG_USERS = 0
 _SCANNER_PROCESS_CONTEXT = multiprocessing.get_context("spawn")
 _SCANNER_PROCESS_LIMIT = 4
 _CACHE_CLEANUP_BATCH_SIZE = 500
-_SCANNER_PROCESS_PERMITS = BoundedSemaphore(_SCANNER_PROCESS_LIMIT)
 _RESOURCE_CLOSE_TIMEOUT_SECONDS = 0.25
+_SCANNER_PROCESS_PERMIT_LOCK = Lock()
+_SCANNER_PROCESS_AVAILABLE = _SCANNER_PROCESS_LIMIT
+
+
+@dataclass(slots=True)
+class _ScannerProcessWaiter:
+    loop: asyncio.AbstractEventLoop
+    future: asyncio.Future[None]
+    granted: bool = False
+    cancelled: bool = False
+
+
+_SCANNER_PROCESS_WAITERS: deque[_ScannerProcessWaiter] = deque()
 
 
 async def _acquire_scanner_process_permit() -> None:
-    while not _SCANNER_PROCESS_PERMITS.acquire(blocking=False):
-        await asyncio.sleep(0.001)
+    global _SCANNER_PROCESS_AVAILABLE
+    loop = asyncio.get_running_loop()
+    waiter = _ScannerProcessWaiter(loop=loop, future=loop.create_future())
+    with _SCANNER_PROCESS_PERMIT_LOCK:
+        if _SCANNER_PROCESS_AVAILABLE > 0:
+            _SCANNER_PROCESS_AVAILABLE -= 1
+            return
+        _SCANNER_PROCESS_WAITERS.append(waiter)
+    try:
+        await waiter.future
+    except BaseException:
+        release_grant = False
+        with _SCANNER_PROCESS_PERMIT_LOCK:
+            if waiter.granted:
+                release_grant = True
+            else:
+                waiter.cancelled = True
+        if release_grant:
+            _release_scanner_process_permit()
+        raise
 
 
 def _release_scanner_process_permit() -> None:
-    _SCANNER_PROCESS_PERMITS.release()
+    global _SCANNER_PROCESS_AVAILABLE
+    with _SCANNER_PROCESS_PERMIT_LOCK:
+        while _SCANNER_PROCESS_WAITERS:
+            waiter = _SCANNER_PROCESS_WAITERS.popleft()
+            if waiter.cancelled:
+                continue
+            waiter.granted = True
+            try:
+                waiter.loop.call_soon_threadsafe(_notify_scanner_process_waiter, waiter.future)
+            except RuntimeError:
+                waiter.cancelled = True
+                continue
+            return
+        if _SCANNER_PROCESS_AVAILABLE >= _SCANNER_PROCESS_LIMIT:
+            raise RuntimeError("scanner process permit released without an acquisition")
+        _SCANNER_PROCESS_AVAILABLE += 1
+
+
+def _notify_scanner_process_waiter(future: asyncio.Future[None]) -> None:
+    if not future.done():
+        future.set_result(None)
 
 
 @contextmanager
@@ -855,12 +906,7 @@ class OfficialRegistryService:
         except OfficialRegistryError:
             await self._purge_rejected_cache(context=context, cache=cache)
             raise
-        validated_at = self._utc_now()
-        if (
-            _utc_timestamp(cache.expires_at) <= validated_at
-            or _utc_timestamp(cache.fetched_at) <= validated_at - self._limits.cache_ttl
-        ):
-            raise OfficialRegistryError(OfficialRegistryFailureCode.CACHE_MISS)
+        self._require_fresh_cache(cache)
         item = next(
             (candidate for candidate in items if candidate.provenance_digest == provenance_digest),
             None,
@@ -884,16 +930,16 @@ class OfficialRegistryService:
             entry = None
         if entry_lookup_failed:
             raise OfficialRegistryError(OfficialRegistryFailureCode.PERSISTENCE_FAILURE)
-        if entry is None:
+        entry_is_new = entry is None
+        if entry_is_new:
             entry = RegistryEntry(
+                id=uuid4(),
                 workspace_id=context.workspace_id,
                 source=RegistrySource.OFFICIAL.value,
                 external_id=item.external_id,
                 current_version_id=None,
             )
-            self._session.add(entry)
-            if not await _flush_registry_payload(self._session):
-                raise OfficialRegistryError(OfficialRegistryFailureCode.PERSISTENCE_FAILURE)
+        assert entry is not None
         version_lookup_failed = False
         try:
             existing = await self._session.scalar(
@@ -908,16 +954,32 @@ class OfficialRegistryService:
         if version_lookup_failed:
             raise OfficialRegistryError(OfficialRegistryFailureCode.PERSISTENCE_FAILURE)
         if existing is not None:
+            self._require_fresh_cache(cache)
             return existing
-        sequence = await self._session.scalar(
-            select(func.max(RegistryEntryVersion.sequence)).where(
-                RegistryEntryVersion.registry_entry_id == entry.id
-            )
-        )
+        if entry_is_new:
+            sequence = 1
+        else:
+            sequence_lookup_failed = False
+            try:
+                latest_sequence = await self._session.scalar(
+                    select(func.max(RegistryEntryVersion.sequence)).where(
+                        RegistryEntryVersion.registry_entry_id == entry.id
+                    )
+                )
+            except SQLAlchemyError:
+                sequence_lookup_failed = True
+                latest_sequence = None
+            if sequence_lookup_failed:
+                raise OfficialRegistryError(OfficialRegistryFailureCode.PERSISTENCE_FAILURE)
+            sequence = (latest_sequence or 0) + 1
+
+        self._require_fresh_cache(cache)
+        if entry_is_new:
+            self._session.add(entry)
         version = RegistryEntryVersion(
             workspace_id=context.workspace_id,
             registry_entry_id=entry.id,
-            sequence=(sequence or 0) + 1,
+            sequence=sequence,
             name=item.name,
             description=item.description,
             provenance_digest=item.provenance_digest,
@@ -966,6 +1028,14 @@ class OfficialRegistryService:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("official Registry clock must be timezone-aware")
         return value.astimezone(UTC)
+
+    def _require_fresh_cache(self, cache: RegistrySearchCache) -> None:
+        validated_at = self._utc_now()
+        if (
+            _utc_timestamp(cache.expires_at) <= validated_at
+            or _utc_timestamp(cache.fetched_at) <= validated_at - self._limits.cache_ttl
+        ):
+            raise OfficialRegistryError(OfficialRegistryFailureCode.CACHE_MISS)
 
     @staticmethod
     def _result(

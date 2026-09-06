@@ -1231,13 +1231,37 @@ def test_scanner_cleanup_cancellation_releases_process_permit(
         with suppress(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=1)
 
-        acquired = sum(
-            official_registry._SCANNER_PROCESS_PERMITS.acquire(blocking=False) for _ in range(4)
-        )
+        acquired = 0
         try:
+            for _ in range(4):
+                await asyncio.wait_for(
+                    official_registry._acquire_scanner_process_permit(), timeout=0.1
+                )
+                acquired += 1
             assert acquired == 4
         finally:
             for _ in range(acquired):
+                official_registry._release_scanner_process_permit()
+
+    asyncio.run(scenario())
+
+
+def test_scanner_process_waiters_are_notified_on_release() -> None:
+    async def scenario() -> None:
+        for _ in range(4):
+            await official_registry._acquire_scanner_process_permit()
+        waiter = asyncio.create_task(official_registry._acquire_scanner_process_permit())
+        try:
+            await asyncio.sleep(0)
+            assert waiter.done() is False
+            official_registry._release_scanner_process_permit()
+            await asyncio.wait_for(waiter, timeout=0.1)
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+                with suppress(asyncio.CancelledError):
+                    await waiter
+            for _ in range(4):
                 official_registry._release_scanner_process_permit()
 
     asyncio.run(scenario())
@@ -2002,6 +2026,91 @@ def test_import_rechecks_cache_freshness_after_metadata_screening() -> None:
                 assert (
                     await session.scalar(select(func.count()).select_from(RegistryEntryVersion))
                     == 0
+                )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("existing_version", [False, True])
+def test_import_rechecks_cache_freshness_after_database_lookups(
+    existing_version: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        current = datetime(2026, 9, 6, tzinfo=UTC)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads((FIXTURES / "search_page_1.json").read_text())
+            payload["metadata"].pop("nextCursor", None)
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                request=request,
+            )
+
+        limits = OfficialRegistryLimits(cache_ttl=timedelta(seconds=10))
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(
+                factory, subject=f"lookup-freshness-{existing_version}"
+            )
+            adapter = OfficialRegistryAdapter(transport=httpx.MockTransport(handler), limits=limits)
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                result = await OfficialRegistryService(
+                    session, adapter, now=lambda: current
+                ).search(context=context, query="weather")
+                if existing_version:
+                    await OfficialRegistryService(
+                        session, adapter, now=lambda: current
+                    ).import_cached(
+                        context=context,
+                        cache_id=result.cache_id,
+                        provenance_digest=result.items[0].provenance_digest,
+                    )
+
+            current += timedelta(seconds=9, milliseconds=500)
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                original_scalar = session.scalar
+                delayed = False
+
+                async def delayed_scalar(
+                    statement: object, *args: object, **kwargs: object
+                ) -> object:
+                    nonlocal current, delayed
+                    result_value = await original_scalar(  # type: ignore[call-overload]
+                        statement, *args, **kwargs
+                    )
+                    sql = str(statement)
+                    target = (
+                        "FROM registry_entry_versions"
+                        if existing_version
+                        else "FROM registry_entries"
+                    )
+                    if not delayed and target in sql:
+                        delayed = True
+                        current += timedelta(seconds=1)
+                    return result_value
+
+                monkeypatch.setattr(session, "scalar", delayed_scalar)
+                with pytest.raises(OfficialRegistryError) as raised:
+                    await OfficialRegistryService(
+                        session, adapter, now=lambda: current
+                    ).import_cached(
+                        context=context,
+                        cache_id=result.cache_id,
+                        provenance_digest=result.items[0].provenance_digest,
+                    )
+                assert delayed is True
+                assert raised.value.code == OfficialRegistryFailureCode.CACHE_MISS
+                expected = 1 if existing_version else 0
+                assert (
+                    await original_scalar(select(func.count()).select_from(RegistryEntry))
+                    == expected
+                )
+                assert (
+                    await original_scalar(select(func.count()).select_from(RegistryEntryVersion))
+                    == expected
                 )
 
     asyncio.run(scenario())
