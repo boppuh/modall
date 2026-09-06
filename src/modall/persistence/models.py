@@ -210,6 +210,7 @@ class RegistrySearchCache(Base):
     __table_args__ = (
         CheckConstraint("provider = 'official'", name="ck_registry_search_cache_provider"),
         CheckConstraint("result_count >= 0", name="ck_registry_search_cache_result_count"),
+        CheckConstraint("byte_count >= 0", name="ck_registry_search_cache_byte_count"),
         Index(
             "ix_registry_search_cache_lookup",
             "workspace_id",
@@ -227,6 +228,7 @@ class RegistrySearchCache(Base):
     response_digest: Mapped[str] = mapped_column(String(64))
     normalized_results: Mapped[list[dict[str, object]]] = mapped_column(JSON)
     result_count: Mapped[int] = mapped_column(Integer)
+    byte_count: Mapped[int] = mapped_column(Integer)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

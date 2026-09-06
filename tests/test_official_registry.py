@@ -683,6 +683,7 @@ def test_registry_request_strips_ambient_credentials_and_suppresses_query_logs(
 
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
+            auth=httpx.BasicAuth("ambient-user", "ambient-password"),
             headers={"Authorization": "Bearer ambient-secret"},
             cookies={"session": "ambient-cookie"},
         ) as client:
@@ -736,5 +737,55 @@ def test_service_and_adapter_cannot_diverge_on_limits() -> None:
                     adapter,
                     limits=OfficialRegistryLimits(max_items=1),
                 )
+
+    asyncio.run(scenario())
+
+
+def test_cache_reuse_and_import_respect_a_stricter_rolling_byte_policy() -> None:
+    async def scenario() -> None:
+        calls = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if "cursor" in request.url.params:
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "application/json"},
+                    json={"servers": [], "metadata": {"count": 0}},
+                    request=request,
+                )
+            return fixture_response("official_remote_sample.json", request)
+
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="rolling-limits")
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                    original = await OfficialRegistryService(
+                        session, OfficialRegistryAdapter(client)
+                    ).search(context=context, query="inference")
+                    cache = await session.get(RegistrySearchCache, original.cache_id)
+                    assert cache is not None
+                    assert cache.byte_count > 100
+
+                strict = OfficialRegistryLimits(max_response_bytes=100)
+                async with transaction(factory) as session:
+                    context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                    service = OfficialRegistryService(
+                        session, OfficialRegistryAdapter(client, limits=strict)
+                    )
+                    with pytest.raises(OfficialRegistryError) as limited:
+                        await service.search(context=context, query="inference")
+                    assert limited.value.code == OfficialRegistryFailureCode.RESPONSE_LIMIT
+                    with pytest.raises(OfficialRegistryError) as import_miss:
+                        await service.import_cached(
+                            context=context,
+                            cache_id=original.cache_id,
+                            provenance_digest=original.items[0].provenance_digest,
+                        )
+                    assert import_miss.value.code == OfficialRegistryFailureCode.CACHE_MISS
+                    assert await session.get(RegistrySearchCache, original.cache_id) is not None
+                assert calls == 3
 
     asyncio.run(scenario())

@@ -57,10 +57,12 @@ def upgrade() -> None:
         sa.Column("response_digest", sa.String(64), nullable=False),
         sa.Column("normalized_results", sa.JSON(), nullable=False),
         sa.Column("result_count", sa.Integer(), nullable=False),
+        sa.Column("byte_count", sa.Integer(), nullable=False),
         sa.Column("fetched_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("provider = 'official'", name="ck_registry_search_cache_provider"),
         sa.CheckConstraint("result_count >= 0", name="ck_registry_search_cache_result_count"),
+        sa.CheckConstraint("byte_count >= 0", name="ck_registry_search_cache_byte_count"),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )

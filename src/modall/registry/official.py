@@ -545,6 +545,7 @@ class OfficialRegistryService:
                 RegistrySearchCache.provider == OFFICIAL_REGISTRY_PROVIDER,
                 RegistrySearchCache.query_digest == query_digest,
                 RegistrySearchCache.expires_at > now,
+                RegistrySearchCache.byte_count <= self._limits.max_response_bytes,
             )
             .order_by(RegistrySearchCache.fetched_at.desc(), RegistrySearchCache.id.desc())
             .limit(1)
@@ -557,6 +558,7 @@ class OfficialRegistryService:
             else:
                 if (
                     len(items) == cache.result_count
+                    and len(_canonical_json(cache.normalized_results)) == cache.byte_count
                     and _digest(cache.normalized_results) == cache.response_digest
                 ):
                     return self._result(cache, items, from_cache=True)
@@ -567,6 +569,7 @@ class OfficialRegistryService:
             list[dict[str, object]],
             json.loads(_canonical_json([item.normalized_metadata for item in items])),
         )
+        normalized_bytes = _canonical_json(normalized_results)
         fetched_at = self._utc_now()
         cache = RegistrySearchCache(
             workspace_id=context.workspace_id,
@@ -575,6 +578,7 @@ class OfficialRegistryService:
             response_digest=_digest(normalized_results),
             normalized_results=normalized_results,
             result_count=len(items),
+            byte_count=len(normalized_bytes),
             fetched_at=fetched_at,
             expires_at=fetched_at + self._limits.cache_ttl,
         )
@@ -611,9 +615,14 @@ class OfficialRegistryService:
                 RegistrySearchCache.workspace_id == context.workspace_id,
                 RegistrySearchCache.provider == OFFICIAL_REGISTRY_PROVIDER,
                 RegistrySearchCache.expires_at > now,
+                RegistrySearchCache.byte_count <= self._limits.max_response_bytes,
             )
         )
-        if cache is None or _digest(cache.normalized_results) != cache.response_digest:
+        if (
+            cache is None
+            or len(_canonical_json(cache.normalized_results)) != cache.byte_count
+            or _digest(cache.normalized_results) != cache.response_digest
+        ):
             raise OfficialRegistryError(OfficialRegistryFailureCode.CACHE_MISS)
         items = await self._adapter.parse_cached_items(cache.normalized_results)
         item = next(
