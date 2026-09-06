@@ -822,6 +822,13 @@ class Job(Base):
         ),
         Index("ix_jobs_claim", "status", "available_at", "created_at"),
         Index(
+            "ix_jobs_claim_priority",
+            "created_at",
+            "id",
+            postgresql_where=text("status IN ('queued', 'leased')"),
+            sqlite_where=text("status IN ('queued', 'leased')"),
+        ),
+        Index(
             "ix_jobs_deadline_reconciliation",
             "deadline",
             "id",

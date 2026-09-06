@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import math
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -139,7 +140,7 @@ class ExecutionService:
         del normalized
         now = await self._durable_now()
         expires_at = datetime.fromtimestamp(
-            int((now + timedelta(seconds=self._limits.confirmation_ttl_seconds)).timestamp()),
+            math.ceil((now + timedelta(seconds=self._limits.confirmation_ttl_seconds)).timestamp()),
             UTC,
         )
         nonce = uuid4().hex
@@ -605,6 +606,10 @@ class ExecutionService:
         run_id: UUID,
         correlation_id: UUID | None = None,
     ) -> Run:
+        # Fail closed before the resource lookup so a stale context cannot use
+        # cancellation responses as a run-existence oracle. The serialized
+        # check below still linearizes the mutation after the run lock.
+        await require_current_role(self._session, context, Role.ADMIN, Role.OPERATOR)
         run = await self._locked_run(context.workspace_id, run_id)
         await require_current_role(
             self._session,

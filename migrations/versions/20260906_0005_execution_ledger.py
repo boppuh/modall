@@ -200,6 +200,13 @@ def upgrade() -> None:
     )
     op.create_index("ix_jobs_claim", "jobs", ["status", "available_at", "created_at"])
     op.create_index(
+        "ix_jobs_claim_priority",
+        "jobs",
+        ["created_at", "id"],
+        postgresql_where=sa.text("status IN ('queued', 'leased')"),
+        sqlite_where=sa.text("status IN ('queued', 'leased')"),
+    )
+    op.create_index(
         "ix_jobs_deadline_reconciliation",
         "jobs",
         ["deadline", "id"],
@@ -418,6 +425,7 @@ def downgrade() -> None:
     op.drop_table("run_attempts")
     op.drop_index("ix_jobs_lease_reconciliation", table_name="jobs")
     op.drop_index("ix_jobs_deadline_reconciliation", table_name="jobs")
+    op.drop_index("ix_jobs_claim_priority", table_name="jobs")
     op.drop_index("ix_jobs_claim", table_name="jobs")
     op.drop_table("jobs")
     op.drop_index("ix_runs_terminal_expiry", table_name="runs")

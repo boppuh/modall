@@ -23,9 +23,9 @@ from modall.execution.types import (
     RunStatus,
     SystemExecutionAuthority,
 )
-from modall.identity.repository import AuthorizationService
+from modall.identity.repository import AuthorizationDenied, AuthorizationService
 from modall.identity.service import IdentityService
-from modall.identity.types import Permission, Principal, WorkspaceContext
+from modall.identity.types import Permission, Principal, Role, WorkspaceContext
 from modall.persistence.database import create_engine, create_session_factory, transaction
 from modall.persistence.models import (
     AuditEvent,
@@ -41,6 +41,7 @@ from modall.persistence.models import (
     RunAttempt,
     RunEvent,
     SystemExecutionState,
+    WorkspaceMembership,
 )
 from modall.registry.service import CapabilityService, ConnectionService
 
@@ -288,6 +289,25 @@ def test_preflight_returns_the_exact_expiry_encoded_in_confirmation() -> None:
                 )
                 assert preflight.expires_at == datetime.fromtimestamp(claims["exp"], UTC)
                 assert preflight.expires_at.microsecond == 0
+                minimum_ttl = ExecutionLimits(confirmation_ttl_seconds=1)
+                short_preflight = await service(session, now=now, limits=minimum_ttl).preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "expiry"},
+                )
+                assert short_preflight.expires_at >= now + timedelta(seconds=1)
+                short_run = await service(
+                    session,
+                    now=now + timedelta(seconds=1),
+                    limits=minimum_ttl,
+                ).create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "expiry"},
+                    confirmation_token=short_preflight.confirmation_token,
+                    idempotency_key="minimum-durable-clock",
+                )
+                assert short_run.status == RunStatus.QUEUED.value
                 run = await service(session, now=now).create_run(
                     context=context,
                     capability_version_id=version.id,
@@ -794,6 +814,38 @@ def test_cancellation_terminalizes_unfenced_work_and_is_idempotent() -> None:
                 assert dispatched.status == RunStatus.INDETERMINATE.value
                 assert dispatched.arguments is None
                 assert dispatched.argument_digest is None
+
+    asyncio.run(scenario())
+
+
+def test_cancellation_authorizes_before_revealing_run_existence() -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="revoked-cancel")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=now)
+                token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "cancel"},
+                )
+                run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "cancel"},
+                    confirmation_token=token.confirmation_token,
+                    idempotency_key="revoked-cancel",
+                )
+                membership = await session.get(WorkspaceMembership, (workspace_id, user_id))
+                assert membership is not None
+                membership.role = Role.VIEWER.value
+                await session.flush()
+                for run_id in (run.id, UUID(int=0)):
+                    with pytest.raises(AuthorizationDenied):
+                        await execution.cancel_run(context=context, run_id=run_id)
 
     asyncio.run(scenario())
 
