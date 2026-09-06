@@ -311,8 +311,6 @@ def upgrade() -> None:
         sa.UniqueConstraint("workspace_id", "id"),
         sa.UniqueConstraint("run_id", "sequence"),
     )
-    op.create_index("ix_run_events_run_sequence", "run_events", ["run_id", "sequence"])
-
     op.create_table(
         "confirmation_nonces",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -400,7 +398,7 @@ def upgrade() -> None:
         "RAISE EXCEPTION 'replay-protection rows cannot be deleted independently'; "
         "END IF; RETURN OLD; END; $$"
     )
-    for table in ("confirmation_nonces", "idempotency_records"):
+    for table in ("run_events", "confirmation_nonces", "idempotency_records"):
         op.execute(
             f"CREATE TRIGGER {table}_delete_guard BEFORE DELETE ON {table} "
             "FOR EACH ROW EXECUTE FUNCTION modall_reject_independent_execution_delete()"
@@ -423,7 +421,7 @@ def downgrade() -> None:
     for table in ("run_attempts", "jobs", "runs"):
         op.execute(f"DROP TRIGGER IF EXISTS {table}_terminal_status_immutable ON {table}")
     op.execute("DROP FUNCTION IF EXISTS modall_reject_terminal_execution_update()")
-    for table in ("idempotency_records", "confirmation_nonces"):
+    for table in ("idempotency_records", "confirmation_nonces", "run_events"):
         op.execute(f"DROP TRIGGER IF EXISTS {table}_delete_guard ON {table}")
     op.execute("DROP FUNCTION IF EXISTS modall_reject_independent_execution_delete()")
     for table in ("idempotency_records", "confirmation_nonces", "run_events"):
@@ -435,7 +433,6 @@ def downgrade() -> None:
     op.drop_table("idempotency_records")
     op.drop_index("ix_confirmation_nonces_run", table_name="confirmation_nonces")
     op.drop_table("confirmation_nonces")
-    op.drop_index("ix_run_events_run_sequence", table_name="run_events")
     op.drop_table("run_events")
     op.drop_index("uq_run_attempts_active", table_name="run_attempts")
     op.drop_index("ix_run_attempts_job", table_name="run_attempts")

@@ -872,7 +872,7 @@ def test_replay_protection_rows_reject_independent_orm_deletion() -> None:
                     idempotency_key="immutable-replay",
                 )
 
-            for model in (ConfirmationNonce, IdempotencyRecord):
+            for model in (RunEvent, ConfirmationNonce, IdempotencyRecord):
                 async with factory() as session:
                     row = await session.scalar(select(model))
                     assert row is not None
@@ -1074,6 +1074,88 @@ def test_worker_rechecks_its_qualified_protocol_at_claim_and_each_fence(
                     await execution.fence_dispatch(session_lease)
                 assert dispatch_fence.value.code == ExecutionFailureCode.LEASE_LOST
                 assert stale_at_session.status == RunStatus.SESSION_FENCED.value
+
+    asyncio.run(scenario())
+
+
+def test_admission_and_claim_refresh_time_after_slow_validation_and_target_locks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        issued_at = datetime(2026, 9, 6, tzinfo=UTC)
+        current = issued_at
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="slow-boundaries")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                fixed = service(session, now=issued_at)
+                expired_token = await fixed.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "slow-validation"},
+                )
+
+                async def slow_validation(
+                    *args: object, **kwargs: object
+                ) -> schema_validation.SchemaValidationResult:
+                    nonlocal current
+                    del args, kwargs
+                    current = issued_at + timedelta(seconds=121)
+                    return schema_validation.SchemaValidationResult.VALID
+
+                monkeypatch.setattr(
+                    "modall.execution.service.validate_schema_arguments", slow_validation
+                )
+                changing_clock = ExecutionService(
+                    session,
+                    confirmation_keys=CONFIRMATION_KEYS,
+                    idempotency_keys=IDEMPOTENCY_KEYS,
+                    now=lambda: current,
+                )
+                with pytest.raises(ExecutionError) as expired:
+                    await changing_clock.create_run(
+                        context=context,
+                        capability_version_id=version.id,
+                        arguments={"query": "slow-validation"},
+                        confirmation_token=expired_token.confirmation_token,
+                        idempotency_key="slow-validation",
+                    )
+                assert expired.value.code == ExecutionFailureCode.CONFIRMATION_EXPIRED
+
+                current = issued_at
+                monkeypatch.setattr(
+                    "modall.execution.service.validate_schema_arguments",
+                    schema_validation.validate_schema_arguments,
+                )
+                claim_token = await changing_clock.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "slow-lock"},
+                )
+                run = await changing_clock.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "slow-lock"},
+                    confirmation_token=claim_token.confirmation_token,
+                    idempotency_key="slow-lock",
+                    deadline=issued_at + timedelta(seconds=1),
+                )
+
+                async def slow_target(_: Run) -> bool:
+                    nonlocal current
+                    current = issued_at + timedelta(seconds=2)
+                    return True
+
+                monkeypatch.setattr(changing_clock, "_claim_target_is_current", slow_target)
+                assert (
+                    await changing_clock.claim_job(
+                        worker_id="slow-worker", lease_duration=timedelta(seconds=30)
+                    )
+                    is None
+                )
+                assert run.status == RunStatus.TIMED_OUT.value
+                assert await session.scalar(select(func.count()).select_from(RunAttempt)) == 0
 
     asyncio.run(scenario())
 

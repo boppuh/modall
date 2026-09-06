@@ -265,7 +265,6 @@ class ExecutionService:
             raise ExecutionError(ExecutionFailureCode.CONFIRMATION_REPLAYED)
 
         effective_deadline = self._admission_deadline(requested_deadline, now)
-
         target = await self._load_admission_target(context, capability_version_id)
         if (
             claims.capability_id != target.capability.id
@@ -274,6 +273,10 @@ class ExecutionService:
         ):
             raise ExecutionError(ExecutionFailureCode.INVALID_CONFIRMATION)
         await self._validate_normalized_arguments(normalized, target.version.input_schema)
+        now = await self._durable_now()
+        if claims.expires_at <= now:
+            raise ExecutionError(ExecutionFailureCode.CONFIRMATION_EXPIRED)
+        effective_deadline = self._admission_deadline(requested_deadline, now)
 
         if state.dispatch_quarantined:
             raise ExecutionError(ExecutionFailureCode.DISPATCH_QUARANTINED)
@@ -420,7 +423,18 @@ class ExecutionService:
             )
             await self._session.flush()
             return None
-        if not await self._claim_target_is_current(run):
+        target_is_current = await self._claim_target_is_current(run)
+        now = await self._durable_now()
+        if _utc(job.deadline) <= now:
+            await self._terminalize_run(
+                run,
+                RunStatus.TIMED_OUT,
+                now,
+                RunFailureCode.DEADLINE_EXCEEDED,
+            )
+            await self._session.flush()
+            return None
+        if not target_is_current:
             await self._terminalize_run(
                 run,
                 RunStatus.FAILED,

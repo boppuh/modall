@@ -954,7 +954,6 @@ class RunEvent(Base):
             ["runs.workspace_id", "runs.id"],
             ondelete="CASCADE",
         ),
-        Index("ix_run_events_run_sequence", "run_id", "sequence"),
     )
 
     id: Mapped[UuidPrimaryKey]
@@ -1107,6 +1106,7 @@ event.listen(McpToolBinding, "before_delete", _reject_immutable_delete)
 event.listen(CapabilityStatusEvent, "before_delete", _reject_immutable_delete)
 event.listen(ConfirmationNonce, "before_delete", _reject_immutable_delete)
 event.listen(IdempotencyRecord, "before_delete", _reject_immutable_delete)
+event.listen(RunEvent, "before_delete", _reject_immutable_delete)
 event.listen(Capability, "before_update", _reject_capability_identity_update)
 event.listen(RegistryEntry, "before_update", _reject_registry_entry_identity_update)
 event.listen(RegistryEntry, "before_insert", _validate_registry_entry_insert)

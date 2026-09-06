@@ -2,7 +2,6 @@
 
 import asyncio
 import multiprocessing
-import resource
 import sys
 from contextlib import suppress
 from enum import StrEnum
@@ -109,6 +108,8 @@ def _apply_validation_memory_limit(memory_limit_bytes: int) -> None:
 
     if sys.platform != "linux":
         return
+    import resource
+
     resource.setrlimit(resource.RLIMIT_AS, (memory_limit_bytes, memory_limit_bytes))
 
 
