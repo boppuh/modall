@@ -176,3 +176,39 @@ def test_after_rollback_cleanup_is_bounded_and_preserves_original_error(
         asyncio.run(scenario())
     assert "after_rollback_cleanup_failed" in caplog.text
     assert "original failure" not in caplog.text
+
+
+def test_after_rollback_cleanup_finishes_before_cancellation_propagates() -> None:
+    async def scenario() -> None:
+        engine = create_engine("sqlite+aiosqlite:///:memory:")
+        factory = create_session_factory(engine)
+        cleanup_started = asyncio.Event()
+        finish_cleanup = asyncio.Event()
+        cleanup_finished = False
+
+        async def delayed_cleanup(session: AsyncSession) -> None:
+            nonlocal cleanup_finished
+            del session
+            cleanup_started.set()
+            await finish_cleanup.wait()
+            cleanup_finished = True
+
+        async def failing_transaction() -> None:
+            async with transaction(factory) as session:
+                register_after_rollback(session, delayed_cleanup)
+                raise RuntimeError("original failure")
+
+        try:
+            task = asyncio.create_task(failing_transaction())
+            await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert task.done() is False
+            finish_cleanup.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+            assert cleanup_finished is True
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
