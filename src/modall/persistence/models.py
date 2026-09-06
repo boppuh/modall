@@ -704,7 +704,9 @@ class Run(Base):
             "safe_error_code IS NULL OR safe_error_code IN "
             "('worker_lost_before_dispatch', 'worker_lost_after_dispatch', "
             "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
-            "'content_retention_deadline', 'tool_call_failed', 'invalid_tool_result')",
+            "'content_retention_deadline', 'preparation_failed', "
+            "'session_initialization_failed', 'tool_call_failed', 'invalid_tool_result', "
+            "'upstream_outcome_unknown')",
             name="ck_run_safe_error_code",
         ),
         CheckConstraint(
@@ -732,6 +734,13 @@ class Run(Base):
             ondelete="RESTRICT",
         ),
         Index("ix_runs_workspace_created", "workspace_id", "created_at", "id"),
+        Index(
+            "ix_runs_arguments_expiry",
+            "arguments_expires_at",
+            "id",
+            postgresql_where=text("arguments IS NOT NULL"),
+            sqlite_where=text("arguments IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UuidPrimaryKey]
@@ -822,7 +831,9 @@ class RunAttempt(Base):
             "safe_error_code IS NULL OR safe_error_code IN "
             "('worker_lost_before_dispatch', 'worker_lost_after_dispatch', "
             "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
-            "'content_retention_deadline', 'tool_call_failed', 'invalid_tool_result')",
+            "'content_retention_deadline', 'preparation_failed', "
+            "'session_initialization_failed', 'tool_call_failed', 'invalid_tool_result', "
+            "'upstream_outcome_unknown')",
             name="ck_run_attempt_safe_error_code",
         ),
         CheckConstraint(
@@ -870,7 +881,9 @@ class RunEvent(Base):
             "safe_error_code IS NULL OR safe_error_code IN "
             "('worker_lost_before_dispatch', 'worker_lost_after_dispatch', "
             "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
-            "'content_retention_deadline', 'tool_call_failed', 'invalid_tool_result')",
+            "'content_retention_deadline', 'preparation_failed', "
+            "'session_initialization_failed', 'tool_call_failed', 'invalid_tool_result', "
+            "'upstream_outcome_unknown')",
             name="ck_run_event_safe_error_code",
         ),
         CheckConstraint(

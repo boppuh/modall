@@ -112,6 +112,7 @@ class ExecutionService:
         self._limits = limits or ExecutionLimits()
         self._confirmation_keys = self._validate_keyring(confirmation_keys)
         self._idempotency_keys = self._validate_keyring(idempotency_keys)
+        self._clock_override = now
         self._now = now or (lambda: datetime.now(UTC))
         self._system_authority = system_authority
 
@@ -128,7 +129,7 @@ class ExecutionService:
             arguments, target.version.input_schema
         )
         del normalized
-        now = self._utc_now()
+        now = await self._durable_now()
         expires_at = datetime.fromtimestamp(
             int((now + timedelta(seconds=self._limits.confirmation_ttl_seconds)).timestamp()),
             UTC,
@@ -181,7 +182,7 @@ class ExecutionService:
         )
         normalized, argument_digest = self._normalize_arguments(arguments)
         claims = self._decode_confirmation(confirmation_token)
-        now = self._utc_now()
+        now = await self._durable_now()
         self._require_confirmation_bindings(
             claims=claims,
             context=context,
@@ -360,7 +361,7 @@ class ExecutionService:
     ) -> JobLease | None:
         if not worker_id or len(worker_id) > 128 or lease_duration <= timedelta(0):
             raise ValueError("invalid worker lease")
-        now = self._utc_now()
+        now = await self._durable_now()
         state = await self._execution_state(lock="shared")
         if state.dispatch_quarantined:
             raise ExecutionError(ExecutionFailureCode.DISPATCH_QUARANTINED)
@@ -473,7 +474,7 @@ class ExecutionService:
     async def heartbeat(self, lease: JobLease, *, lease_duration: timedelta) -> JobLease:
         if lease_duration <= timedelta(0):
             raise ValueError("invalid worker lease")
-        now = self._utc_now()
+        now = await self._durable_now()
         state = await self._execution_state(lock="shared")
         run, job = await self._locked_lease_lineage(lease)
         if (
@@ -514,7 +515,7 @@ class ExecutionService:
             raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
         if status == RunStatus.SUCCEEDED and safe_error_code is not None:
             raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
-        now = self._utc_now()
+        now = await self._durable_now()
         state = await self._execution_state(lock="shared")
         run, job = await self._locked_lease_lineage(lease)
         if (
@@ -546,10 +547,7 @@ class ExecutionService:
         attempt = await self._active_attempt(run.id)
         if attempt is None or attempt.lease_epoch != lease.lease_epoch:
             raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
-        if status == RunStatus.SUCCEEDED and (
-            run.status != RunStatus.DISPATCH_FENCED.value
-            or attempt.status != RunStatus.DISPATCH_FENCED.value
-        ):
+        if not self._valid_worker_completion(run, attempt, status, safe_error_code):
             raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
         run.status = status.value
         persisted_error_code = safe_error_code.value if safe_error_code is not None else None
@@ -591,7 +589,7 @@ class ExecutionService:
         status = RunStatus(run.status)
         if status in _TERMINAL_RUN_STATUSES:
             return run
-        now = self._utc_now()
+        now = await self._durable_now()
         run.cancellation_requested = True
         if status in {RunStatus.QUEUED, RunStatus.PREPARING, RunStatus.SESSION_FENCED}:
             await self._terminalize_run(
@@ -623,7 +621,7 @@ class ExecutionService:
 
     async def enter_restore_quarantine(self) -> int:
         self._require_system_authority()
-        now = self._utc_now()
+        now = await self._durable_now()
         state = await self._execution_state(lock="exclusive")
         state.execution_epoch += 1
         state.dispatch_quarantined = True
@@ -657,14 +655,14 @@ class ExecutionService:
         self._require_system_authority()
         state = await self._execution_state(lock="exclusive")
         state.dispatch_quarantined = False
-        state.updated_at = self._utc_now()
+        state.updated_at = await self._durable_now()
         await self._session.flush()
         return state.execution_epoch
 
     async def expire_retained_content(self, *, batch_size: int = 500) -> int:
         if batch_size <= 0 or batch_size > 1000:
             raise ValueError("invalid cleanup batch")
-        now = self._utc_now()
+        now = await self._durable_now()
         runs = list(
             (
                 await self._session.scalars(
@@ -701,7 +699,7 @@ class ExecutionService:
     async def delete_expired_run_metadata(self, *, batch_size: int = 500) -> int:
         if batch_size <= 0 or batch_size > 1000:
             raise ValueError("invalid cleanup batch")
-        cutoff = self._utc_now() - timedelta(days=self._limits.run_retention_days)
+        cutoff = await self._durable_now() - timedelta(days=self._limits.run_retention_days)
         run_ids = list(
             (
                 await self._session.scalars(
@@ -1004,7 +1002,7 @@ class ExecutionService:
                 id=1,
                 execution_epoch=1,
                 dispatch_quarantined=False,
-                updated_at=self._utc_now(),
+                updated_at=await self._durable_now(),
             )
             self._session.add(state)
             await self._session.flush()
@@ -1044,7 +1042,7 @@ class ExecutionService:
             raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
         state = await self._execution_state(lock="shared")
         run, job = await self._locked_lease_lineage(lease)
-        now = self._utc_now()
+        now = await self._durable_now()
         membership = await self._session.scalar(
             select(WorkspaceMembership).where(
                 WorkspaceMembership.workspace_id == run.workspace_id,
@@ -1312,6 +1310,56 @@ class ExecutionService:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("execution clock must be timezone-aware")
         return value.astimezone(UTC)
+
+    async def _durable_now(self) -> datetime:
+        """Use the database clock in production; injected clocks are a test seam only."""
+
+        if self._clock_override is not None:
+            return self._utc_now()
+        clock = (
+            func.clock_timestamp()
+            if self._session.get_bind().dialect.name == "postgresql"
+            else func.current_timestamp()
+        )
+        value = await self._session.scalar(select(clock))
+        if not isinstance(value, datetime):
+            raise RuntimeError("database clock is unavailable")
+        return _utc(value)
+
+    @staticmethod
+    def _valid_worker_completion(
+        run: Run,
+        attempt: RunAttempt,
+        status: RunStatus,
+        safe_error_code: RunFailureCode | None,
+    ) -> bool:
+        source = RunStatus(run.status)
+        if attempt.status != source.value:
+            return False
+        if status == RunStatus.SUCCEEDED:
+            return source == RunStatus.DISPATCH_FENCED and safe_error_code is None
+        if status == RunStatus.FAILED:
+            allowed_codes = {
+                RunStatus.PREPARING: {RunFailureCode.PREPARATION_FAILED},
+                RunStatus.SESSION_FENCED: {RunFailureCode.SESSION_INITIALIZATION_FAILED},
+                RunStatus.DISPATCH_FENCED: {
+                    RunFailureCode.TOOL_CALL_FAILED,
+                    RunFailureCode.INVALID_TOOL_RESULT,
+                },
+            }
+            return safe_error_code in allowed_codes.get(source, set())
+        if status == RunStatus.CANCELLED:
+            return (
+                run.cancellation_requested
+                and source in {RunStatus.PREPARING, RunStatus.SESSION_FENCED}
+                and safe_error_code == RunFailureCode.CANCELLED_BEFORE_DISPATCH
+            )
+        if status == RunStatus.INDETERMINATE:
+            return (
+                source == RunStatus.DISPATCH_FENCED
+                and safe_error_code == RunFailureCode.UPSTREAM_OUTCOME_UNKNOWN
+            )
+        return False
 
     def _require_system_authority(self) -> None:
         if self._system_authority is None:

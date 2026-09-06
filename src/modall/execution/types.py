@@ -69,8 +69,11 @@ class RunFailureCode(StrEnum):
     CANCELLED_BEFORE_DISPATCH = "cancelled_before_dispatch"
     RESTORE_RECONCILIATION = "restore_reconciliation"
     CONTENT_RETENTION_DEADLINE = "content_retention_deadline"
+    PREPARATION_FAILED = "preparation_failed"
+    SESSION_INITIALIZATION_FAILED = "session_initialization_failed"
     TOOL_CALL_FAILED = "tool_call_failed"
     INVALID_TOOL_RESULT = "invalid_tool_result"
+    UPSTREAM_OUTCOME_UNKNOWN = "upstream_outcome_unknown"
 
 
 class ExecutionError(Exception):

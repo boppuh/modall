@@ -19,7 +19,8 @@ TERMINAL_JOB_STATES = "'succeeded', 'failed', 'cancelled', 'timed_out', 'indeter
 RUN_FAILURE_CODES = (
     "'worker_lost_before_dispatch', 'worker_lost_after_dispatch', 'deadline_exceeded', "
     "'cancelled_before_dispatch', 'restore_reconciliation', 'content_retention_deadline', "
-    "'tool_call_failed', 'invalid_tool_result'"
+    "'preparation_failed', 'session_initialization_failed', 'tool_call_failed', "
+    "'invalid_tool_result', 'upstream_outcome_unknown'"
 )
 
 
@@ -123,6 +124,13 @@ def upgrade() -> None:
         sa.UniqueConstraint("workspace_id", "id"),
     )
     op.create_index("ix_runs_workspace_created", "runs", ["workspace_id", "created_at", "id"])
+    op.create_index(
+        "ix_runs_arguments_expiry",
+        "runs",
+        ["arguments_expires_at", "id"],
+        postgresql_where=sa.text("arguments IS NOT NULL"),
+        sqlite_where=sa.text("arguments IS NOT NULL"),
+    )
 
     op.create_table(
         "jobs",
@@ -334,6 +342,7 @@ def downgrade() -> None:
     op.drop_table("run_attempts")
     op.drop_index("ix_jobs_claim", table_name="jobs")
     op.drop_table("jobs")
+    op.drop_index("ix_runs_arguments_expiry", table_name="runs")
     op.drop_index("ix_runs_workspace_created", table_name="runs")
     op.drop_table("runs")
     op.drop_table("system_execution_state")

@@ -735,6 +735,20 @@ def test_heartbeat_and_worker_boundary_validation() -> None:
                         safe_error_code=RunFailureCode.TOOL_CALL_FAILED,
                     )
                 assert contradictory_success.value.code == ExecutionFailureCode.INVALID_TRANSITION
+                for invalid_status, invalid_code in (
+                    (RunStatus.TIMED_OUT, RunFailureCode.DEADLINE_EXCEEDED),
+                    (RunStatus.INDETERMINATE, RunFailureCode.UPSTREAM_OUTCOME_UNKNOWN),
+                    (RunStatus.CANCELLED, RunFailureCode.CANCELLED_BEFORE_DISPATCH),
+                ):
+                    with pytest.raises(ExecutionError) as invalid_completion:
+                        await execution.complete_lease(
+                            renewed,
+                            status=invalid_status,
+                            safe_error_code=invalid_code,
+                        )
+                    assert invalid_completion.value.code == ExecutionFailureCode.INVALID_TRANSITION
+                await execution.fence_session(renewed)
+                await execution.fence_dispatch(renewed)
                 failed = await execution.complete_lease(
                     renewed,
                     status=RunStatus.FAILED,
