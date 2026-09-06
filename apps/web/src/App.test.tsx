@@ -213,7 +213,7 @@ describe("App", () => {
 
   it("prefers a pending version over an older retained capability version", async () => {
     const pendingVersionId = "66666666-6666-4666-8666-666666666666";
-    const disabled = { ...capability, status: "disabled" as const, pending_version_id: pendingVersionId, enabled_version_id: versionId };
+    const disabled = { ...capability, status: "pending_review" as const, pending_version_id: pendingVersionId, enabled_version_id: versionId };
     const api = fakeApi({
       listCapabilities: vi.fn().mockResolvedValue([disabled]),
       getCapability: vi.fn().mockResolvedValue({ ...disabled, versions: [
@@ -242,6 +242,19 @@ describe("App", () => {
     expect(await screen.findByRole("button", { name: "Enable exact version" })).toHaveProperty("disabled", true);
     fireEvent.click(screen.getByRole("button", { name: "Reject version" }));
     await waitFor(() => expect(api.capabilityAction).toHaveBeenCalledWith(versionId, "disable", expect.any(String)));
+  });
+
+  it("offers only reconsideration after a pending version is rejected", async () => {
+    const rejected = { ...capability, status: "disabled" as const, pending_version_id: versionId, enabled_version_id: null };
+    const api = fakeApi({
+      listCapabilities: vi.fn().mockResolvedValue([rejected]),
+      getCapability: vi.fn().mockResolvedValue({ ...rejected, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: connectionId, sequence: 1, display_name: "Rejected search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false }),
+    });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
+    expect(await screen.findByRole("button", { name: "Reconsider version" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Reject version" })).toBeNull();
   });
 
   it("preflights, confirms, follows, and cancels a run", async () => {
@@ -477,6 +490,32 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     expect(await screen.findByText(/results expired/i)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import" })).toHaveProperty("disabled", true);
+  });
+
+  it("preserves a registry mutation key across navigation", async () => {
+    const connectionAction = vi.fn<ControlPlane["connectionAction"]>().mockRejectedValue(new Error("response lost"));
+    const api = fakeApi({ connectionAction });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(connectionAction).toHaveBeenCalledTimes(1));
+    const originalKey = connectionAction.mock.calls[0]?.[2];
+    fireEvent.click(screen.getByRole("button", { name: "Modall overview" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(connectionAction).toHaveBeenCalledTimes(2));
+    expect(connectionAction.mock.calls[1]?.[2]).toBe(originalKey);
+  });
+
+  it("keeps cancellation available when the event timeline fails", async () => {
+    const cancelRun = vi.fn<ControlPlane["cancelRun"]>().mockResolvedValue({ ...run, cancellation_requested: true });
+    window.history.replaceState({}, "", `/runs/${runId}`);
+    renderApp(fakeApi({ listRunEvents: vi.fn().mockRejectedValue(new Error("offline")), cancelRun }));
+    fireEvent.click(await screen.findByRole("button", { name: "Request cancellation" }));
+    await waitFor(() => expect(cancelRun).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 
   it("shows output contracts, cancellation progress, and paginated audit history", async () => {

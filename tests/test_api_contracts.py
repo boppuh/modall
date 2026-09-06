@@ -38,6 +38,7 @@ from modall.persistence.models import (
     McpToolBinding,
     RegistryEntry,
     RegistryEntryVersion,
+    RunResult,
     ServerConnectionVersion,
     WorkspaceMembership,
 )
@@ -796,6 +797,26 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             )
             assert replayed_cancel.status_code == 200
             assert replayed_cancel.json()["id"] == run_id
+
+            expired_at = datetime.now(UTC) - timedelta(seconds=1)
+            factory = create_session_factory(engine)
+            async with transaction(factory) as session:
+                session.add(
+                    RunResult(
+                        run_id=UUID(run_id),
+                        workspace_id=workspace_id,
+                        payload={"secret": "redacted"},
+                        canonical_digest="d" * 64,
+                        byte_count=21,
+                        captured_at=expired_at - timedelta(seconds=1),
+                        expires_at=expired_at,
+                    )
+                )
+            redacted = await client.get(f"/v1/runs/{run_id}", headers=headers)
+            assert redacted.json()["result"] is None
+            assert redacted.json()["result_expires_at"] == expired_at.isoformat().replace(
+                "+00:00", "Z"
+            )
 
             disabled = await client.post(
                 f"/v1/capability-versions/{version.id}/disable",

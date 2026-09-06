@@ -848,7 +848,6 @@ def build_control_plane_router(
                         select(RunResult).where(
                             RunResult.workspace_id == state.context.workspace_id,
                             RunResult.run_id.in_([run.id for run in page_runs]),
-                            RunResult.expires_at > datetime.now(UTC),
                         )
                     )
                 ).all()
@@ -1194,7 +1193,6 @@ async def _run_response(session: AsyncSession, run: Run) -> RunResponse:
         select(RunResult).where(
             RunResult.run_id == run.id,
             RunResult.workspace_id == run.workspace_id,
-            RunResult.expires_at > now,
         )
     )
     return _run_response_value(run, result, now=now)
@@ -1205,6 +1203,9 @@ def _run_response_value(
 ) -> RunResponse:
     current = now or datetime.now(UTC)
     arguments = run.arguments if _utc(run.arguments_expires_at) > current else None
+    result_payload = (
+        result.payload if result is not None and _utc(result.expires_at) > current else None
+    )
     return RunResponse(
         id=run.id,
         actor_user_id=run.actor_user_id,
@@ -1214,10 +1215,10 @@ def _run_response_value(
         connection_version_id=run.connection_version_id,
         status=run.status,
         arguments=arguments,
-        result=result.payload if result else None,
+        result=result_payload,
         safe_error_code=run.safe_error_code,
         arguments_expires_at=run.arguments_expires_at,
-        result_expires_at=result.expires_at if result else None,
+        result_expires_at=_utc(result.expires_at) if result else None,
         cancellation_requested=run.cancellation_requested,
         deadline=run.deadline,
         created_at=run.created_at,

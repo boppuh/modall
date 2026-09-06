@@ -258,7 +258,7 @@ function EmptyState({ title, copy }: { title: string; copy: string }) {
 }
 
 function Overview({ api, open, scope }: { api: ControlPlane; open: (view: View, capabilityFilter?: CapabilityFilter) => void; scope: QueryScope }) {
-  const query = useQuery({ queryKey: queryKey(scope, "overview"), queryFn: () => api.overview() });
+  const query = useQuery({ queryKey: queryKey(scope, "overview"), queryFn: () => api.overview(), refetchInterval: (current) => current.state.status === "error" ? false : 5000 });
   if (query.isPending) return <LoadingState label="Loading workspace overview" />;
   if (query.isError) return <QueryFailure error={query.error} retry={() => void query.refetch()} />;
 
@@ -335,9 +335,8 @@ function Overview({ api, open, scope }: { api: ControlPlane; open: (view: View, 
   );
 }
 
-function Registry({ api, scope, role, selectedId, select }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; select: (id: string | null) => void }) {
+function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; select: (id: string | null) => void; mutationKeys: { current: Map<string, string> } }) {
   const queryClient = useQueryClient();
-  const mutationKeys = useRef(new Map<string, string>());
   const keyFor = (operation: string) => {
     const existing = mutationKeys.current.get(operation);
     if (existing) return existing;
@@ -563,9 +562,8 @@ function Registry({ api, scope, role, selectedId, select }: { api: ControlPlane;
   );
 }
 
-function Capabilities({ api, scope, role, selectedId, filter, select, setFilter }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; filter: CapabilityFilter; select: (id: string | null) => void; setFilter: (filter: CapabilityFilter) => void }) {
+function Capabilities({ api, scope, role, selectedId, filter, select, setFilter, mutationKeys }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; filter: CapabilityFilter; select: (id: string | null) => void; setFilter: (filter: CapabilityFilter) => void; mutationKeys: { current: Map<string, string> } }) {
   const queryClient = useQueryClient();
-  const mutationKeys = useRef(new Map<string, string>());
   const keyFor = (operation: string) => mutationKeys.current.get(operation) ?? (() => { const key = mutationId(); mutationKeys.current.set(operation, key); return key; })();
   const capabilities = useQuery({
     queryKey: queryKey(scope, "capabilities", filter),
@@ -577,6 +575,7 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter 
     queryKey: queryKey(scope, "capability", selectedId),
     queryFn: () => api.getCapability(selectedId as string),
     enabled: selectedId !== null,
+    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
   });
   const action = useMutation({
     mutationFn: ({ versionId, verb, key }: { versionId: string; verb: "enable" | "disable"; key: string }) => api.capabilityAction(versionId, verb, key),
@@ -624,6 +623,7 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter 
                 const pending = detail.data.pending_version_id === version.id;
                 const enabled = detail.data.status === "enabled" && retained;
                 const reenable = detail.data.status === "disabled" && detail.data.pending_version_id === null && retained;
+                const rejected = detail.data.status === "disabled" && pending;
                 const actionable = enabled || reenable || pending;
                 const verb = enabled ? "disable" : "enable";
                 return (
@@ -634,7 +634,7 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter 
                   <div className="digest-line"><span>connection version</span><code>{version.connection_version_id}</code></div>
                   <details><summary>Input schema</summary><pre>{JSON.stringify(version.input_schema, null, 2)}</pre></details>
                   {version.output_schema && <details><summary>Output schema</summary><pre>{JSON.stringify(version.output_schema, null, 2)}</pre></details>}
-                  {pending ? <div className="action-strip">
+                  {pending && !rejected ? <div className="action-strip">
                     <button className="danger-action" type="button" disabled={!canOperate(role) || action.isPending} onClick={() => action.mutate({ versionId: version.id, verb: "disable", key: keyFor(`capability:${version.id}:disable`) })}>Reject version</button>
                     <button className="secondary-action" type="button" disabled={!canOperate(role) || !version.schema_supported || action.isPending} onClick={() => action.mutate({ versionId: version.id, verb: "enable", key: keyFor(`capability:${version.id}:enable`) })}>Enable exact version</button>
                   </div> : <button
@@ -643,7 +643,7 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter 
                     disabled={!canOperate(role) || !actionable || !version.schema_supported || action.isPending}
                     onClick={() => action.mutate({ versionId: version.id, verb, key: keyFor(`capability:${version.id}:${verb}`) })}
                   >
-                    {!actionable ? "Historical version" : enabled ? "Disable version" : "Re-enable version"}
+                    {!actionable ? "Historical version" : enabled ? "Disable version" : rejected ? "Reconsider version" : "Re-enable version"}
                   </button>}
                 </article>
               );})}
@@ -656,10 +656,9 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter 
   );
 }
 
-function Runs({ api, scope, role, selectedId, select, runKeys, draft, setDraft }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; select: (id: string | null) => void; runKeys: { current: Map<string, string> }; draft: RunDraft; setDraft: Dispatch<SetStateAction<RunDraft>> }) {
+function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft, setDraft }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; select: (id: string | null) => void; runKeys: { current: Map<string, string> }; cancelKeys: { current: Map<string, string> }; draft: RunDraft; setDraft: Dispatch<SetStateAction<RunDraft>> }) {
   const queryClient = useQueryClient();
   const { selectedVersionId, argumentsText, pendingArguments, preflight } = draft;
-  const cancelKeys = useRef(new Map<string, string>());
   const finalEventFetchRun = useRef<string | null>(null);
   const runsKey = useMemo(() => queryKey(scope, "runs"), [scope]);
   const eventsKey = useMemo(() => queryKey(scope, "run-events", selectedId), [scope, selectedId]);
@@ -826,14 +825,14 @@ function Runs({ api, scope, role, selectedId, select, runKeys, draft, setDraft }
       )}
       {invoke.isError && !preflight && <p className="field-error" role="alert">{failureMessage(invoke.error)} Run preflight again.</p>}
       <section className="detail-panel run-detail">
-        {selectedId === null ? <EmptyState title="Select a run" copy="Inspect lineage, safe output, and status events." /> : runDetail.isPending || events.isPending ? <LoadingState label="Loading run timeline" /> : runDetail.isError ? <QueryFailure error={runDetail.error} retry={() => void runDetail.refetch()} /> : events.isError ? <QueryFailure error={events.error} retry={() => void events.refetch()} /> : (
+        {selectedId === null ? <EmptyState title="Select a run" copy="Inspect lineage, safe output, and status events." /> : runDetail.isPending ? <LoadingState label="Loading run detail" /> : runDetail.isError ? <QueryFailure error={runDetail.error} retry={() => void runDetail.refetch()} /> : (
           <>
             <div className="detail-title"><div><span className="index">Run {shortId(runDetail.data.id)}</span><h2>Execution timeline</h2></div><StatusMark value={runDetail.data.status} /></div>
             <dl className="detail-facts"><div><dt>Capability</dt><dd>{capabilityNames.get(runDetail.data.capability_id) ?? shortId(runDetail.data.capability_id)} · {shortId(runDetail.data.capability_version_id)}</dd></div><div><dt>Source connection</dt><dd>{connectionNames.get(runDetail.data.connection_id) ?? shortId(runDetail.data.connection_id)}</dd></div><div><dt>Initiating actor</dt><dd>{shortId(runDetail.data.actor_user_id)}</dd></div><div><dt>Connection version</dt><dd>{shortId(runDetail.data.connection_version_id)}</dd></div><div><dt>Deadline</dt><dd>{formatTime(runDetail.data.deadline)}</dd></div><div><dt>Updated</dt><dd>{formatTime(runDetail.data.updated_at)}</dd></div></dl>
             {runDetail.data.cancellation_requested && !terminal(runDetail.data.status) && <p className="incident-note">Cancellation requested; waiting for the worker to reach a safe boundary.</p>}
             {canOperate(role) && !terminal(runDetail.data.status) && !runDetail.data.cancellation_requested && <button className="danger-action" disabled={cancel.isPending} type="button" onClick={() => { const key = cancelKeys.current.get(runDetail.data.id) ?? mutationId(); cancelKeys.current.set(runDetail.data.id, key); cancel.mutate({ id: runDetail.data.id, key }); }}>Request cancellation</button>}
             {cancel.isError && <p className="field-error" role="alert">{failureMessage(cancel.error)}</p>}
-            <ol className="timeline">{events.data.map((event) => <li key={event.id}><span aria-hidden="true" /><div><strong>{event.event_type.replaceAll("_", " ")}</strong><small>{formatTime(event.occurred_at)} · {event.status}</small>{event.safe_error_code && <code>{event.safe_error_code}</code>}</div></li>)}</ol>
+            {events.isPending ? <LoadingState label="Loading run timeline" /> : events.isError ? <QueryFailure error={events.error} retry={() => void events.refetch()} /> : <ol className="timeline">{events.data.map((event) => <li key={event.id}><span aria-hidden="true" /><div><strong>{event.event_type.replaceAll("_", " ")}</strong><small>{formatTime(event.occurred_at)} · {event.status}</small>{event.safe_error_code && <code>{event.safe_error_code}</code>}</div></li>)}</ol>}
             <details><summary>Retained arguments</summary><pre>{JSON.stringify(runDetail.data.arguments, null, 2)}</pre></details>
             {runDetail.data.result && <details open><summary>Validated result</summary><pre>{JSON.stringify(runDetail.data.result, null, 2)}</pre></details>}
             {runDetail.data.safe_error_code && <p className="incident-note">Run ended with {runDetail.data.safe_error_code}.</p>}
@@ -878,7 +877,10 @@ function Audit({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
 
 function WorkspaceApp({ session, api, onLogout }: { session: WorkspaceSession; api: ControlPlane; onLogout: () => void }) {
   const scope: QueryScope = ["workspace", session.identityId, session.workspaceId];
+  const registryMutationKeys = useRef(new Map<string, string>());
+  const capabilityMutationKeys = useRef(new Map<string, string>());
   const runKeys = useRef(new Map<string, string>());
+  const cancelKeys = useRef(new Map<string, string>());
   const [runDraft, setRunDraft] = useState<RunDraft>({ selectedVersionId: "", argumentsText: "{\n  \"query\": \"status\"\n}", pendingArguments: null, preflight: null });
   const access = useQuery({ queryKey: queryKey(scope, "session"), queryFn: () => api.currentSession() });
   const [route, setRoute] = useState<Route>(() => readRoute());
@@ -909,9 +911,9 @@ function WorkspaceApp({ session, api, onLogout }: { session: WorkspaceSession; a
       </header>
       <main id="main-content" tabIndex={-1}>
         {view === "overview" && <Overview api={api} open={(next, filter) => navigate(next, null, filter)} scope={scope} />}
-        {view === "registry" && <Registry api={api} scope={scope} role={role} selectedId={route.selectedId} select={(id) => navigate("registry", id)} />}
-        {view === "capabilities" && <Capabilities api={api} scope={scope} role={role} selectedId={route.selectedId} filter={capabilityFilterFromLocation()} select={(id) => navigate("capabilities", id, capabilityFilterFromLocation())} setFilter={(filter) => navigate("capabilities", null, filter)} />}
-        {view === "runs" && <Runs api={api} scope={scope} role={role} selectedId={route.selectedId} select={(id) => navigate("runs", id)} runKeys={runKeys} draft={runDraft} setDraft={setRunDraft} />}
+        {view === "registry" && <Registry api={api} scope={scope} role={role} selectedId={route.selectedId} select={(id) => navigate("registry", id)} mutationKeys={registryMutationKeys} />}
+        {view === "capabilities" && <Capabilities api={api} scope={scope} role={role} selectedId={route.selectedId} filter={capabilityFilterFromLocation()} select={(id) => navigate("capabilities", id, capabilityFilterFromLocation())} setFilter={(filter) => navigate("capabilities", null, filter)} mutationKeys={capabilityMutationKeys} />}
+        {view === "runs" && <Runs api={api} scope={scope} role={role} selectedId={route.selectedId} select={(id) => navigate("runs", id)} runKeys={runKeys} cancelKeys={cancelKeys} draft={runDraft} setDraft={setRunDraft} />}
         {view === "audit" && canOperate(role) && <Audit api={api} scope={scope} />}
       </main>
       <footer><span>Modall Registry Alpha</span><span>Exact lineage · bounded retention · fail closed</span></footer>

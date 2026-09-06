@@ -145,6 +145,8 @@ describe("control-plane operations", () => {
     await api.capabilityAction(otherId, "enable", "cap-enable-key");
     await api.capabilityAction(otherId, "disable", "cap-disable-key");
     expect(await api.listRuns()).toHaveLength(1);
+    const runStatuses = requests.filter((request) => new URL(request.url).pathname === "/v1/runs" && request.method === "GET").map((request) => new URL(request.url).searchParams.get("status"));
+    expect(runStatuses).toEqual(expect.arrayContaining(["queued", "preparing", "session_fenced", "dispatch_fenced"]));
     expect((await api.getRun(id)).status).toBe("succeeded");
     expect(await api.listRunEvents(id)).toEqual([]);
     const preflight = await api.preflight(otherId, { query: "status" });
@@ -199,15 +201,24 @@ describe("control-plane operations", () => {
     expect(await api.listConnections()).toHaveLength(2);
 
     page = 0;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(() => {
+    const runRequestUrls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>((input) => {
       page += 1;
+      const request = input instanceof Request ? input : new Request(input);
+      runRequestUrls.push(request.url);
+      if (new URL(request.url).searchParams.has("status")) {
+        return Promise.resolve(new Response(JSON.stringify({ items: [], page: { next_cursor: null } }), { status: 200, headers: { "Content-Type": "application/json" } }));
+      }
       return Promise.resolve(new Response(JSON.stringify({
         items: [run],
         page: { next_cursor: "older-runs" },
       }), { status: 200, headers: { "Content-Type": "application/json" } }));
     }));
-    expect(await api.listRuns()).toHaveLength(1);
-    expect(page).toBe(1);
+    const runApi = createControlPlane({ identityId: "reviewer", workspaceId: id });
+    const listedRuns = await runApi.listRuns();
+    expect(runRequestUrls.filter((url) => new URL(url).searchParams.has("status"))).toHaveLength(4);
+    expect(listedRuns.map((item) => item.id)).toEqual([id]);
+    expect(page).toBe(5);
 
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(() => Promise.resolve(new Response(JSON.stringify({
       items: [connection], page: { next_cursor: "same" },
