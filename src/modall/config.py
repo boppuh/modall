@@ -96,8 +96,9 @@ class Settings(BaseSettings):
                 raise ValueError("invalid HMAC key versions")
         for origin in self.cors_allowed_origins:
             parsed_origin = HttpUrl(origin)
+            canonical_origin = str(parsed_origin).rstrip("/")
             if (
-                origin != origin.strip().rstrip("/")
+                origin != canonical_origin
                 or parsed_origin.username is not None
                 or parsed_origin.password is not None
                 or parsed_origin.query is not None

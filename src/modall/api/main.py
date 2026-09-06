@@ -1,6 +1,7 @@
 """FastAPI application entry point."""
 
 import logging
+import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
@@ -86,30 +87,6 @@ def create_app(
         lifespan=lifespan,
     )
 
-    @app.middleware("http")
-    async def response_policy(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        supplied = request.headers.get("X-Correlation-ID")
-        try:
-            correlation_id = UUID(supplied) if supplied is not None else uuid4()
-        except ValueError:
-            correlation_id = uuid4()
-        request.state.correlation_id = correlation_id
-        try:
-            response = await call_next(request)
-        except Exception:
-            logging.getLogger("modall.api").warning(
-                "unhandled_request_failure correlation_id=%s", correlation_id, exc_info=True
-            )
-            response = error_response(
-                "internal_error", "The request could not be completed.", 500, request
-            )
-        response.headers["X-Correlation-ID"] = str(correlation_id)
-        if request.url.path.startswith("/v1/"):
-            response.headers["Cache-Control"] = "no-store"
-        return response
-
     if resolved_settings.cors_allowed_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -124,6 +101,42 @@ def create_app(
             ],
             expose_headers=["X-Correlation-ID"],
         )
+
+    @app.middleware("http")
+    async def response_policy(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        supplied = request.headers.get("X-Correlation-ID")
+        try:
+            correlation_id = UUID(supplied) if supplied is not None else uuid4()
+        except ValueError:
+            correlation_id = uuid4()
+        request.state.correlation_id = correlation_id
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            safe_stack = " <- ".join(
+                f"{frame.filename}:{frame.lineno}:{frame.name}"
+                for frame in traceback.extract_tb(exc.__traceback__)
+            )
+            logging.getLogger("modall.api").warning(
+                "unhandled_request_failure correlation_id=%s exception_type=%s stack=%s",
+                correlation_id,
+                type(exc).__name__,
+                safe_stack,
+            )
+            response = error_response(
+                "internal_error", "The request could not be completed.", 500, request
+            )
+            origin = request.headers.get("Origin")
+            if origin in resolved_settings.cors_allowed_origins:
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Expose-Headers"] = "X-Correlation-ID"
+                response.headers.add_vary_header("Origin")
+        response.headers["X-Correlation-ID"] = str(correlation_id)
+        if request.url.path.startswith("/v1/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     def error_response(code: str, message: str, http_status: int, request: Request) -> JSONResponse:
         return JSONResponse(

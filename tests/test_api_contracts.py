@@ -156,6 +156,8 @@ def test_browser_origin_can_preflight_workspace_requests() -> None:
             assert response.status_code == 200
             assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
             assert "x-workspace-id" in response.headers["access-control-allow-headers"].lower()
+            assert UUID(response.headers["x-correlation-id"])
+            assert response.headers["cache-control"] == "no-store"
 
     asyncio.run(scenario())
 
@@ -569,22 +571,36 @@ def test_official_registry_search_import_and_replay_contract() -> None:
     asyncio.run(scenario())
 
 
-def test_unhandled_v1_failure_keeps_safe_response_policy() -> None:
+def test_unhandled_v1_failure_keeps_safe_response_policy(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     def broken_upstream(_: httpx.Request) -> httpx.Response:
-        raise RuntimeError("fixture failure")
+        raise RuntimeError("sensitive-upstream-value")
 
     async def scenario() -> None:
         adapter = OfficialRegistryAdapter(transport=httpx.MockTransport(broken_upstream))
-        async with api_client(adapter) as (client, _engine, workspace_id):
+        settings = Settings(
+            environment="test",
+            local_subject="api-user",
+            cors_allowed_origins=("http://localhost:5173",),
+        )
+        async with api_client(adapter, settings) as (client, _engine, workspace_id):
             response = await client.post(
                 "/v1/registry/searches",
-                headers={"X-Workspace-ID": str(workspace_id)},
+                headers={
+                    "Origin": "http://localhost:5173",
+                    "X-Workspace-ID": str(workspace_id),
+                },
                 json={"query": "weather"},
             )
             assert response.status_code == 500
             assert response.json()["error"]["code"] == "internal_error"
             assert response.headers["cache-control"] == "no-store"
             assert UUID(response.headers["x-correlation-id"])
+            assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+            assert "RuntimeError" in caplog.text
+            assert "broken_upstream" in caplog.text
+            assert "sensitive-upstream-value" not in caplog.text
 
     asyncio.run(scenario())
 
