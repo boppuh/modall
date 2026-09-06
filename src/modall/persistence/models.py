@@ -753,6 +753,17 @@ class Run(Base):
             postgresql_where=text("terminal_at IS NOT NULL"),
             sqlite_where=text("terminal_at IS NOT NULL"),
         ),
+        Index(
+            "ix_runs_restore_reconciliation",
+            "created_at",
+            "id",
+            postgresql_where=text(
+                "status IN ('queued', 'preparing', 'session_fenced', 'dispatch_fenced')"
+            ),
+            sqlite_where=text(
+                "status IN ('queued', 'preparing', 'session_fenced', 'dispatch_fenced')"
+            ),
+        ),
     )
 
     id: Mapped[UuidPrimaryKey]
@@ -979,6 +990,11 @@ class IdempotencyRecord(Base):
         CheckConstraint("length(key_hmac) = 64", name="ck_idempotency_key_hmac"),
         CheckConstraint("length(request_hmac) = 64", name="ck_idempotency_request_hmac"),
         CheckConstraint("resource_type = 'run'", name="ck_idempotency_resource_type"),
+        CheckConstraint(
+            "length(confirmation_key_version) BETWEEN 1 AND 32",
+            name="ck_idempotency_confirmation_key_version",
+        ),
+        Index("ix_idempotency_confirmation_key_version", "confirmation_key_version"),
         Index("ix_idempotency_key_version", "key_version"),
         Index("ix_idempotency_expiry", "expires_at"),
     )
@@ -988,6 +1004,7 @@ class IdempotencyRecord(Base):
     actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     method: Mapped[str] = mapped_column(String(8))
     route: Mapped[str] = mapped_column(String(128))
+    confirmation_key_version: Mapped[str] = mapped_column(String(32))
     key_version: Mapped[str] = mapped_column(String(32))
     key_hmac: Mapped[str] = mapped_column(String(64))
     request_hmac: Mapped[str] = mapped_column(String(64))

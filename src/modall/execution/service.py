@@ -92,6 +92,7 @@ class _ConfirmationClaims:
     argument_digest: str
     route: str
     nonce: str
+    key_version: str
     issued_at: datetime
     expires_at: datetime
 
@@ -185,6 +186,8 @@ class ExecutionService:
             serialize_workspace=True,
         )
         normalized, argument_digest = self._normalize_arguments(arguments)
+        await self._require_confirmation_key_history()
+        await self._require_idempotency_key_history()
         claims = self._decode_confirmation(confirmation_token)
         now = await self._durable_now()
         self._require_confirmation_bindings(
@@ -204,7 +207,6 @@ class ExecutionService:
             argument_digest=argument_digest,
             deadline=requested_deadline,
         )
-        await self._require_idempotency_key_history()
         existing_record = await self._find_idempotency_record(context, raw_key)
         nonce_digest = _sha256(claims.nonce.encode())
         used_nonce = await self._session.scalar(
@@ -333,6 +335,7 @@ class ExecutionService:
                 actor_user_id=context.actor_user_id,
                 method=_RUN_METHOD,
                 route=_RUN_ROUTE,
+                confirmation_key_version=claims.key_version,
                 key_version=active_key.version,
                 key_hmac=self._idempotency_hmac(active_key, context, raw_key),
                 request_hmac=_hmac_hex(active_key.secret, b"request\0" + canonical_request),
@@ -404,6 +407,25 @@ class ExecutionService:
             return None
         job = await self._session.scalar(select(Job).where(Job.run_id == run.id).with_for_update())
         if job is None:
+            return None
+        now = await self._durable_now()
+        if _utc(job.deadline) <= now:
+            await self._terminalize_run(
+                run,
+                RunStatus.TIMED_OUT,
+                now,
+                RunFailureCode.DEADLINE_EXCEEDED,
+            )
+            await self._session.flush()
+            return None
+        if not await self._claim_target_is_current(run):
+            await self._terminalize_run(
+                run,
+                RunStatus.FAILED,
+                now,
+                RunFailureCode.PREPARATION_FAILED,
+            )
+            await self._session.flush()
             return None
         if job.status == JobStatus.LEASED.value:
             previous = await self._active_attempt(run.id)
@@ -478,9 +500,9 @@ class ExecutionService:
     async def heartbeat(self, lease: JobLease, *, lease_duration: timedelta) -> JobLease:
         if lease_duration <= timedelta(0):
             raise ValueError("invalid worker lease")
-        now = await self._durable_now()
         state = await self._execution_state(lock="shared")
         run, job = await self._locked_lease_lineage(lease)
+        now = await self._durable_now()
         if (
             state.dispatch_quarantined
             or state.execution_epoch != lease.execution_epoch
@@ -519,9 +541,9 @@ class ExecutionService:
             raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
         if status == RunStatus.SUCCEEDED and safe_error_code is not None:
             raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
-        now = await self._durable_now()
         state = await self._execution_state(lock="shared")
         run, job = await self._locked_lease_lineage(lease)
+        now = await self._durable_now()
         if (
             state.execution_epoch != lease.execution_epoch
             or job.status != JobStatus.LEASED.value
@@ -582,6 +604,7 @@ class ExecutionService:
         run_id: UUID,
         correlation_id: UUID | None = None,
     ) -> Run:
+        run = await self._locked_run(context.workspace_id, run_id)
         await require_current_role(
             self._session,
             context,
@@ -589,7 +612,6 @@ class ExecutionService:
             Role.OPERATOR,
             serialize_workspace=True,
         )
-        run = await self._locked_run(context.workspace_id, run_id)
         status = RunStatus(run.status)
         if status in _TERMINAL_RUN_STATUSES:
             return run
@@ -624,18 +646,35 @@ class ExecutionService:
         return run
 
     async def enter_restore_quarantine(self) -> int:
+        """Enter quarantine and advance the epoch; commit before reconciliation."""
+
         self._require_system_authority()
         now = await self._durable_now()
         state = await self._execution_state(lock="exclusive")
         state.execution_epoch += 1
         state.dispatch_quarantined = True
         state.updated_at = now
+        await self._session.flush()
+        return state.execution_epoch
+
+    async def reconcile_restore_quarantine(self, *, batch_size: int = 100) -> int:
+        """Terminalize one bounded batch after quarantine entry has committed."""
+
+        self._require_system_authority()
+        if batch_size <= 0 or batch_size > 1000:
+            raise ValueError("invalid reconciliation batch")
+        state = await self._execution_state(lock="shared")
+        if not state.dispatch_quarantined:
+            raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
+        now = await self._durable_now()
         runs = list(
             (
                 await self._session.scalars(
                     select(Run)
                     .where(Run.status.not_in([status.value for status in _TERMINAL_RUN_STATUSES]))
-                    .with_for_update()
+                    .order_by(Run.created_at, Run.id)
+                    .limit(batch_size)
+                    .with_for_update(skip_locked=True)
                 )
             ).all()
         )
@@ -653,7 +692,7 @@ class ExecutionService:
                 event_type=RunEventType.RESTORE_RECONCILED,
             )
         await self._session.flush()
-        return state.execution_epoch
+        return len(runs)
 
     async def clear_restore_quarantine(self) -> int:
         self._require_system_authority()
@@ -887,6 +926,7 @@ class ExecutionService:
                 argument_digest=str(payload["ad"]),
                 route=str(payload["r"]),
                 nonce=str(payload["jti"]),
+                key_version=key.version,
                 issued_at=datetime.fromtimestamp(int(payload["iat"]), UTC),
                 expires_at=datetime.fromtimestamp(int(payload["exp"]), UTC),
             )
@@ -950,6 +990,16 @@ class ExecutionService:
         )
         if missing_version is not None:
             raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_KEY_HISTORY_INCOMPLETE)
+
+    async def _require_confirmation_key_history(self) -> None:
+        configured_versions = [key.version for key in self._confirmation_keys]
+        missing_version = await self._session.scalar(
+            select(IdempotencyRecord.confirmation_key_version)
+            .where(IdempotencyRecord.confirmation_key_version.not_in(configured_versions))
+            .limit(1)
+        )
+        if missing_version is not None:
+            raise ExecutionError(ExecutionFailureCode.CONFIRMATION_KEY_HISTORY_INCOMPLETE)
 
     @staticmethod
     def _idempotency_hmac(key: HmacKeyVersion, context: WorkspaceContext, raw_key: bytes) -> str:
@@ -1061,12 +1111,12 @@ class ExecutionService:
         )
         if lineage.one_or_none() is None:
             raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
+        run, job = await self._locked_lease_lineage(lease)
         workspace_id = await self._session.scalar(
             select(Workspace.id).where(Workspace.id == lease.workspace_id).with_for_update()
         )
         if workspace_id is None:
             raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
-        run, job = await self._locked_lease_lineage(lease)
         now = await self._durable_now()
         membership = await self._session.scalar(
             select(WorkspaceMembership).where(
@@ -1149,6 +1199,70 @@ class ExecutionService:
         await self._append_next_event(run, event_type, target, now=now)
         await self._session.flush()
         return run
+
+    async def _claim_target_is_current(self, run: Run) -> bool:
+        """Lock and revalidate the authority/configuration pinned by an admitted run."""
+
+        workspace_id = await self._session.scalar(
+            select(Workspace.id).where(Workspace.id == run.workspace_id).with_for_update()
+        )
+        membership = await self._session.scalar(
+            select(WorkspaceMembership).where(
+                WorkspaceMembership.workspace_id == run.workspace_id,
+                WorkspaceMembership.user_id == run.actor_user_id,
+            )
+        )
+        capability = await self._session.scalar(
+            select(Capability)
+            .where(Capability.id == run.capability_id, Capability.workspace_id == run.workspace_id)
+            .with_for_update()
+        )
+        connection = await self._session.scalar(
+            select(ServerConnection)
+            .where(
+                ServerConnection.id == run.connection_id,
+                ServerConnection.workspace_id == run.workspace_id,
+            )
+            .with_for_update()
+        )
+        observed = None
+        if connection is not None and connection.current_snapshot_id is not None:
+            observed = await self._session.scalar(
+                select(DiscoverySnapshotCapability.id).where(
+                    DiscoverySnapshotCapability.workspace_id == run.workspace_id,
+                    DiscoverySnapshotCapability.connection_id == run.connection_id,
+                    DiscoverySnapshotCapability.connection_version_id == run.connection_version_id,
+                    DiscoverySnapshotCapability.snapshot_id == connection.current_snapshot_id,
+                    DiscoverySnapshotCapability.capability_version_id == run.capability_version_id,
+                )
+            )
+        binding = await self._session.scalar(
+            select(McpToolBinding).where(
+                McpToolBinding.workspace_id == run.workspace_id,
+                McpToolBinding.capability_id == run.capability_id,
+                McpToolBinding.capability_version_id == run.capability_version_id,
+                McpToolBinding.connection_id == run.connection_id,
+                McpToolBinding.connection_version_id == run.connection_version_id,
+                McpToolBinding.protocol_revision == run.protocol_revision,
+            )
+        )
+        return bool(
+            workspace_id is not None
+            and membership is not None
+            and membership.role in {Role.ADMIN.value, Role.OPERATOR.value}
+            and capability is not None
+            and capability.status == CapabilityStatus.ENABLED.value
+            and capability.enabled_version_id == run.capability_version_id
+            and capability.pending_version_id is None
+            and capability.status_epoch == run.capability_status_epoch
+            and connection is not None
+            and connection.lifecycle == ConnectionLifecycle.ACTIVE.value
+            and connection.pending_version_id is None
+            and connection.verified_version_id == run.connection_version_id
+            and connection.control_epoch == run.connection_control_epoch
+            and observed is not None
+            and binding is not None
+        )
 
     async def _locked_lease_lineage(self, lease: JobLease) -> tuple[Run, Job]:
         lineage = await self._session.execute(

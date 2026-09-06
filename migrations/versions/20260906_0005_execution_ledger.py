@@ -143,6 +143,17 @@ def upgrade() -> None:
         postgresql_where=sa.text("terminal_at IS NOT NULL"),
         sqlite_where=sa.text("terminal_at IS NOT NULL"),
     )
+    op.create_index(
+        "ix_runs_restore_reconciliation",
+        "runs",
+        ["created_at", "id"],
+        postgresql_where=sa.text(
+            "status IN ('queued', 'preparing', 'session_fenced', 'dispatch_fenced')"
+        ),
+        sqlite_where=sa.text(
+            "status IN ('queued', 'preparing', 'session_fenced', 'dispatch_fenced')"
+        ),
+    )
 
     op.create_table(
         "jobs",
@@ -316,6 +327,7 @@ def upgrade() -> None:
         sa.Column("actor_user_id", sa.Uuid(), nullable=False),
         sa.Column("method", sa.String(8), nullable=False),
         sa.Column("route", sa.String(128), nullable=False),
+        sa.Column("confirmation_key_version", sa.String(32), nullable=False),
         sa.Column("key_version", sa.String(32), nullable=False),
         sa.Column("key_hmac", sa.String(64), nullable=False),
         sa.Column("request_hmac", sa.String(64), nullable=False),
@@ -327,6 +339,10 @@ def upgrade() -> None:
         sa.CheckConstraint("length(key_hmac) = 64", name="ck_idempotency_key_hmac"),
         sa.CheckConstraint("length(request_hmac) = 64", name="ck_idempotency_request_hmac"),
         sa.CheckConstraint("resource_type = 'run'", name="ck_idempotency_resource_type"),
+        sa.CheckConstraint(
+            "length(confirmation_key_version) BETWEEN 1 AND 32",
+            name="ck_idempotency_confirmation_key_version",
+        ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["actor_user_id"], ["users.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(
@@ -343,6 +359,11 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_idempotency_expiry", "idempotency_records", ["expires_at"])
+    op.create_index(
+        "ix_idempotency_confirmation_key_version",
+        "idempotency_records",
+        ["confirmation_key_version"],
+    )
     op.create_index("ix_idempotency_key_version", "idempotency_records", ["key_version"])
 
     for table in ("run_events", "confirmation_nonces", "idempotency_records"):
@@ -371,6 +392,7 @@ def downgrade() -> None:
     for table in ("idempotency_records", "confirmation_nonces", "run_events"):
         op.execute(f"DROP TRIGGER IF EXISTS {table}_immutable ON {table}")
     op.drop_index("ix_idempotency_key_version", table_name="idempotency_records")
+    op.drop_index("ix_idempotency_confirmation_key_version", table_name="idempotency_records")
     op.drop_index("ix_idempotency_expiry", table_name="idempotency_records")
     op.drop_table("idempotency_records")
     op.drop_table("confirmation_nonces")
@@ -383,6 +405,7 @@ def downgrade() -> None:
     op.drop_index("ix_jobs_claim", table_name="jobs")
     op.drop_table("jobs")
     op.drop_index("ix_runs_terminal_expiry", table_name="runs")
+    op.drop_index("ix_runs_restore_reconciliation", table_name="runs")
     op.drop_index("ix_runs_arguments_expiry", table_name="runs")
     op.drop_index("ix_runs_workspace_created", table_name="runs")
     op.drop_table("runs")

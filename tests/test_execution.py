@@ -352,6 +352,7 @@ def test_idempotency_survives_key_rotation_and_detects_conflict() -> None:
     async def scenario() -> None:
         now = datetime(2026, 9, 6, tzinfo=UTC)
         rotated = HmacKeyVersion("idem-v2", b"n" * 32)
+        rotated_confirmation = HmacKeyVersion("confirm-v2", b"r" * 32)
         async with database() as factory:
             user_id, workspace_id = await bootstrap(factory, subject="rotation")
             async with transaction(factory) as session:
@@ -406,6 +407,29 @@ def test_idempotency_survives_key_rotation_and_detects_conflict() -> None:
                 assert (
                     incomplete_history.value.code
                     == ExecutionFailureCode.IDEMPOTENCY_KEY_HISTORY_INCOMPLETE
+                )
+                confirmation_rotation = service(
+                    session,
+                    now=now,
+                    confirmation_keys=(rotated_confirmation,),
+                    idempotency_keys=(rotated, *IDEMPOTENCY_KEYS),
+                )
+                confirmation_rotation_token = await confirmation_rotation.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "confirmation rotation"},
+                )
+                with pytest.raises(ExecutionError) as missing_confirmation_history:
+                    await confirmation_rotation.create_run(
+                        context=context,
+                        capability_version_id=version.id,
+                        arguments={"query": "confirmation rotation"},
+                        confirmation_token=confirmation_rotation_token.confirmation_token,
+                        idempotency_key="confirmation-rotation",
+                    )
+                assert (
+                    missing_confirmation_history.value.code
+                    == ExecutionFailureCode.CONFIRMATION_KEY_HISTORY_INCOMPLETE
                 )
                 changed_token = await rotated_service.preflight(
                     context=context,
@@ -542,6 +566,52 @@ def test_job_leasing_reclaims_only_with_a_new_epoch_and_rejects_stale_heartbeat(
     asyncio.run(scenario())
 
 
+def test_claim_terminalizes_work_with_stale_pinned_authority() -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="stale-claim")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=now)
+                token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "stale"},
+                )
+                run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "stale"},
+                    confirmation_token=token.confirmation_token,
+                    idempotency_key="stale-claim",
+                )
+
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                await CapabilityService(session).disable(
+                    context=context,
+                    capability_id=version.capability_id,
+                    expected_version_id=version.id,
+                )
+
+            async with transaction(factory) as session:
+                assert (
+                    await service(session, now=now).claim_job(
+                        worker_id="worker", lease_duration=timedelta(seconds=10)
+                    )
+                    is None
+                )
+                stale = await session.get(Run, run.id)
+                assert stale is not None
+                assert stale.status == RunStatus.FAILED.value
+                assert stale.safe_error_code == RunFailureCode.PREPARATION_FAILED.value
+                assert await session.scalar(select(func.count()).select_from(RunAttempt)) == 0
+
+    asyncio.run(scenario())
+
+
 def test_restore_quarantine_fences_old_jobs_and_retention_erases_content() -> None:
     async def scenario() -> None:
         current = datetime(2026, 9, 6, tzinfo=UTC)
@@ -575,21 +645,45 @@ def test_restore_quarantine_fences_old_jobs_and_retention_erases_content() -> No
                 old_epoch = (await session.get(SystemExecutionState, 1)).execution_epoch  # type: ignore[union-attr]
                 with pytest.raises(PermissionError, match="system execution authority"):
                     await service(session, now=current).enter_restore_quarantine()
+                run_id = run.id
+
+            async with transaction(factory) as session:
+                execution = service(
+                    session,
+                    now=current,
+                    limits=limits,
+                    system_authority=SYSTEM_AUTHORITY,
+                )
                 new_epoch = await execution.enter_restore_quarantine()
                 assert new_epoch == old_epoch + 1
-                assert run.status == RunStatus.CANCELLED.value
+
+            async with transaction(factory) as session:
+                execution = service(
+                    session,
+                    now=current,
+                    limits=limits,
+                    system_authority=SYSTEM_AUTHORITY,
+                )
                 with pytest.raises(ExecutionError) as quarantined:
                     await execution.claim_job(
                         worker_id="blocked", lease_duration=timedelta(seconds=10)
                     )
                 assert quarantined.value.code == ExecutionFailureCode.DISPATCH_QUARANTINED
+                with pytest.raises(ExecutionError) as unreconciled:
+                    await execution.clear_restore_quarantine()
+                assert unreconciled.value.code == ExecutionFailureCode.INVALID_TRANSITION
+                assert await execution.reconcile_restore_quarantine(batch_size=1) == 1
+                assert await execution.reconcile_restore_quarantine(batch_size=1) == 0
+                restored = await session.get(Run, run_id)
+                assert restored is not None
+                assert restored.status == RunStatus.CANCELLED.value
                 assert await execution.clear_restore_quarantine() == new_epoch
 
             current += timedelta(days=1, seconds=1)
             async with transaction(factory) as session:
                 execution = service(session, now=current, limits=limits)
                 assert await execution.expire_retained_content() == 1
-                retained = await session.get(Run, run.id)
+                retained = await session.get(Run, run_id)
                 assert retained is not None
                 assert retained.arguments is None
                 assert await execution.expire_retained_content() == 0
@@ -599,7 +693,7 @@ def test_restore_quarantine_fences_old_jobs_and_retention_erases_content() -> No
                 execution = service(session, now=current, limits=limits)
                 assert await execution.delete_expired_run_metadata() == 1
             async with factory() as session:
-                assert await session.get(Run, run.id) is None
+                assert await session.get(Run, run_id) is None
                 assert (
                     await session.scalar(select(func.count()).select_from(IdempotencyRecord)) == 0
                 )

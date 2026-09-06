@@ -53,6 +53,7 @@ class ExecutionFailureCode(StrEnum):
     INVALID_IDEMPOTENCY_KEY = "invalid_idempotency_key"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     IDEMPOTENCY_KEY_HISTORY_INCOMPLETE = "idempotency_key_history_incomplete"
+    CONFIRMATION_KEY_HISTORY_INCOMPLETE = "confirmation_key_history_incomplete"
     DISPATCH_QUARANTINED = "dispatch_quarantined"
     NO_JOB_AVAILABLE = "no_job_available"
     LEASE_LOST = "lease_lost"
