@@ -855,6 +855,12 @@ class OfficialRegistryService:
         except OfficialRegistryError:
             await self._purge_rejected_cache(context=context, cache=cache)
             raise
+        validated_at = self._utc_now()
+        if (
+            _utc_timestamp(cache.expires_at) <= validated_at
+            or _utc_timestamp(cache.fetched_at) <= validated_at - self._limits.cache_ttl
+        ):
+            raise OfficialRegistryError(OfficialRegistryFailureCode.CACHE_MISS)
         item = next(
             (candidate for candidate in items if candidate.provenance_digest == provenance_digest),
             None,

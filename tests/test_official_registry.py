@@ -1951,6 +1951,62 @@ def test_cache_freshness_is_rechecked_after_metadata_screening() -> None:
     asyncio.run(scenario())
 
 
+def test_import_rechecks_cache_freshness_after_metadata_screening() -> None:
+    async def scenario() -> None:
+        current = datetime(2026, 9, 6, tzinfo=UTC)
+
+        class AgingCacheAdapter(OfficialRegistryAdapter):
+            async def parse_cached_items(self, values: object):  # type: ignore[no-untyped-def]
+                nonlocal current
+                current += timedelta(seconds=2)
+                return await super().parse_cached_items(values)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads((FIXTURES / "search_page_1.json").read_text())
+            payload["metadata"].pop("nextCursor", None)
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                request=request,
+            )
+
+        limits = OfficialRegistryLimits(cache_ttl=timedelta(seconds=1))
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="import-screening-freshness")
+            transport = httpx.MockTransport(handler)
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                result = await OfficialRegistryService(
+                    session,
+                    OfficialRegistryAdapter(transport=transport, limits=limits),
+                    now=lambda: current,
+                ).search(context=context, query="weather")
+
+            current += timedelta(milliseconds=500)
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                service = OfficialRegistryService(
+                    session,
+                    AgingCacheAdapter(transport=transport, limits=limits),
+                    now=lambda: current,
+                )
+                with pytest.raises(OfficialRegistryError) as raised:
+                    await service.import_cached(
+                        context=context,
+                        cache_id=result.cache_id,
+                        provenance_digest=result.items[0].provenance_digest,
+                    )
+                assert raised.value.code == OfficialRegistryFailureCode.CACHE_MISS
+                assert await session.scalar(select(func.count()).select_from(RegistryEntry)) == 0
+                assert (
+                    await session.scalar(select(func.count()).select_from(RegistryEntryVersion))
+                    == 0
+                )
+
+    asyncio.run(scenario())
+
+
 def test_cache_reuse_and_import_respect_a_stricter_rolling_ttl() -> None:
     async def scenario() -> None:
         calls = 0
