@@ -72,7 +72,9 @@ describe("control-plane operations", () => {
         }
         const path = new URL(request.url).pathname;
         let payload: unknown = {};
-        if (path === "/v1/server-connections" && request.method === "GET") {
+        if (path === "/v1/session") {
+          payload = { workspace_id: id, actor_user_id: otherId, role: "admin" };
+        } else if (path === "/v1/server-connections" && request.method === "GET") {
           payload = { items: [connection], page: { next_cursor: null } };
         } else if (path === "/v1/server-connections" && request.method === "POST") {
           payload = connection;
@@ -106,6 +108,8 @@ describe("control-plane operations", () => {
           payload = run;
         } else if (path === "/v1/run-preflights") {
           payload = { capability_version_id: otherId, connection_version_id: otherId, argument_digest: "a".repeat(64), confirmation_token: "token", expires_at: timestamp };
+        } else if (path === "/v1/audit-events") {
+          payload = { items: [], page: { next_cursor: null } };
         }
         return Promise.resolve(
           new Response(JSON.stringify(payload), {
@@ -119,6 +123,7 @@ describe("control-plane operations", () => {
 
   it("executes the complete generated-client operator surface", async () => {
     const api = createControlPlane({ identityId: "reviewer", workspaceId: id });
+    expect((await api.currentSession()).role).toBe("admin");
     expect((await api.overview()).connections).toHaveLength(1);
     expect(await api.listConnections()).toHaveLength(1);
     expect((await api.getConnection(id)).id).toBe(id);
@@ -141,6 +146,7 @@ describe("control-plane operations", () => {
     const preflight = await api.preflight(otherId, { query: "status" });
     expect((await api.createRun(preflight, { query: "status" }, "run-key")).id).toBe(id);
     expect((await api.cancelRun(id, "cancel-key")).id).toBe(id);
+    expect(await api.listAuditEvents()).toEqual({ items: [] });
 
     expect(requests.every((request) => request.headers.get("X-Workspace-ID") === id)).toBe(true);
     expect(

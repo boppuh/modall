@@ -2,7 +2,6 @@ import type { IdentityContext } from "./api/client";
 
 export interface WorkspaceSession extends IdentityContext {
   workspaceLabel: string;
-  role: "admin" | "operator" | "viewer";
 }
 
 const storageKey = "modall.workspace-session.v1";
@@ -21,7 +20,6 @@ export function loadSession(storage: Storage = localStorage): WorkspaceSession |
       typeof parsed.identityId !== "string" ||
       typeof parsed.workspaceId !== "string" ||
       typeof parsed.workspaceLabel !== "string" ||
-      !["admin", "operator", "viewer"].includes(parsed.role ?? "") ||
       !isWorkspaceId(parsed.workspaceId)
     ) {
       return null;
@@ -30,7 +28,6 @@ export function loadSession(storage: Storage = localStorage): WorkspaceSession |
       identityId: parsed.identityId,
       workspaceId: parsed.workspaceId,
       workspaceLabel: parsed.workspaceLabel,
-      role: parsed.role as WorkspaceSession["role"],
     };
   } catch {
     return null;
@@ -48,7 +45,6 @@ export function saveSession(session: WorkspaceSession, storage: Storage = localS
       identityId: session.identityId,
       workspaceId: session.workspaceId,
       workspaceLabel: session.workspaceLabel,
-      role: session.role,
     }),
   );
 }

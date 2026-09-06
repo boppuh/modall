@@ -57,13 +57,14 @@ const run: Run = {
 
 function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
   return {
+    currentSession: vi.fn().mockResolvedValue({ workspace_id: workspaceId, actor_user_id: connectionId, role: "admin" }),
     overview: vi.fn().mockResolvedValue({ connections: [connection], capabilities: [capability], runs: [run] }),
     listConnections: vi.fn().mockResolvedValue([connection]),
     getConnection: vi.fn().mockResolvedValue({ ...connection, versions: [{ id: versionId, sequence: 1, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http", created_at: timestamp }], versions_truncated: false }),
     createConnection: vi.fn().mockResolvedValue(connection),
     appendConnectionVersion: vi.fn().mockResolvedValue({ id: versionId, sequence: 2, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http", created_at: timestamp }),
     connectionAction: vi.fn().mockResolvedValue(undefined),
-    searchRegistry: vi.fn().mockResolvedValue({ cache_id: connectionId, fetched_at: timestamp, expires_at: timestamp, from_cache: false, items: [{ external_id: "io.modall/search", source_version: "1.2.0", name: "Public search", description: "Search public records", advertised_urls: ["https://mcp.example/tools"], provenance_digest: "a".repeat(64) }] }),
+    searchRegistry: vi.fn().mockResolvedValue({ cache_id: connectionId, fetched_at: timestamp, expires_at: "2026-09-06T23:00:00Z", from_cache: false, items: [{ external_id: "io.modall/search", source_version: "1.2.0", name: "Public search", description: "Search public records", advertised_urls: ["https://mcp.example/tools"], provenance_digest: "a".repeat(64) }] }),
     importRegistry: vi.fn().mockResolvedValue({ id: connectionId, source: "official", external_id: "io.modall/search", current_version_id: versionId, name: "Public search", description: "Search public records", created_at: timestamp }),
     listRegistryEntries: vi.fn().mockResolvedValue([]),
     listCapabilities: vi.fn().mockResolvedValue([capability]),
@@ -75,20 +76,21 @@ function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
     preflight: vi.fn().mockResolvedValue({ capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "confirmation", expires_at: "2026-09-06T12:03:00Z" }),
     createRun: vi.fn().mockResolvedValue(run),
     cancelRun: vi.fn().mockResolvedValue({ ...run, status: "cancelled" }),
+    listAuditEvents: vi.fn().mockResolvedValue({ items: [] }),
     ...overrides,
   };
 }
 
-function renderApp(api: ControlPlane, authenticated = true, role: WorkspaceSession["role"] = "admin") {
+function renderApp(api: ControlPlane, authenticated = true, role: "admin" | "operator" | "viewer" = "admin") {
   if (authenticated) {
     const session: WorkspaceSession = {
       identityId: "pilot-reviewer",
       workspaceId,
       workspaceLabel: "iOS pilot",
-      role,
     };
     saveSession(session);
   }
+  vi.mocked(api.currentSession).mockResolvedValue({ workspace_id: workspaceId, actor_user_id: connectionId, role });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
@@ -161,11 +163,11 @@ describe("App", () => {
 
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Internal developer tools" } });
     fireEvent.change(screen.getByLabelText("HTTPS endpoint"), { target: { value: "https://mcp.example/tools" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add and verify" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add connection" }));
     await waitFor(() => expect(api.createConnection).toHaveBeenCalled());
 
     fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
-    expect(await screen.findByText("https://mcp.example/tools")).toBeTruthy();
+    expect((await screen.findAllByText("https://mcp.example/tools")).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Verify pending" }));
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     fireEvent.click(screen.getByRole("button", { name: "Disable" }));
@@ -175,7 +177,7 @@ describe("App", () => {
   it("reviews an immutable capability version and changes its approval", async () => {
     const api = fakeApi();
     renderApp(api);
-    fireEvent.click(screen.getByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
     expect(await screen.findByRole("heading", { name: "Capabilities" })).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
     expect(await screen.findByText("Search public records")).toBeTruthy();
@@ -187,10 +189,10 @@ describe("App", () => {
   it("preflights, confirms, follows, and cancels a run", async () => {
     const api = fakeApi();
     renderApp(api);
-    fireEvent.click(screen.getByRole("button", { name: /Runs$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
     expect(await screen.findByRole("heading", { name: "Runs" })).toBeTruthy();
 
-    await screen.findByRole("option", { name: "tools/search" });
+    await screen.findByRole("option", { name: /tools\/search/ });
     fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
     fireEvent.change(screen.getByLabelText("Arguments"), { target: { value: "[]" } });
     fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
@@ -245,9 +247,11 @@ describe("App", () => {
   it("makes viewer sessions read-only", async () => {
     const api = fakeApi();
     renderApp(api, true, "viewer");
-    fireEvent.click(screen.getByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
     expect(await screen.findByRole("heading", { name: "Server registry" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Add manually" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Search" })).toHaveProperty("disabled", true);
+    expect(screen.queryByRole("button", { name: /Audit/ })).toBeNull();
     fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
     expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Disable" })).toBeNull();
@@ -270,10 +274,12 @@ describe("App", () => {
       getConnection: vi.fn().mockResolvedValue({ ...disabled, versions: [], versions_truncated: false }),
     });
     renderApp(api);
-    fireEvent.click(screen.getByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
     fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
     expect(await screen.findByRole("button", { name: "Re-enable" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Verify pending" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Append immutable version" })).toBeNull();
   });
 
   it("applies operator and immutable-version action boundaries", async () => {
@@ -289,7 +295,7 @@ describe("App", () => {
       }),
     });
     renderApp(api, true, "operator");
-    fireEvent.click(screen.getByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
     expect(await screen.findByRole("heading", { name: "Server registry" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Add manually" })).toBeNull();
     fireEvent.change(screen.getByLabelText("Registry search"), { target: { value: "search" } });
@@ -304,12 +310,53 @@ describe("App", () => {
   it("requires a fresh preflight after a definitive confirmation failure", async () => {
     const api = fakeApi({ createRun: vi.fn().mockRejectedValue(new ApiFailure("confirmation_expired", "Confirmation expired.")) });
     renderApp(api);
-    fireEvent.click(screen.getByRole("button", { name: /Runs$/ }));
-    await screen.findByRole("option", { name: "tools/search" });
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
+    await screen.findByRole("option", { name: /tools\/search/ });
     fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
     fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm and run" }));
     expect((await screen.findByRole("alert")).textContent).toContain("Run preflight again");
     expect(screen.queryByRole("heading", { name: "Confirm exact invocation" })).toBeNull();
+  });
+
+  it("retries failed searches and expires stale import controls", async () => {
+    const recovered = { cache_id: connectionId, fetched_at: timestamp, expires_at: "2026-09-06T23:00:00Z", from_cache: false, items: [{ external_id: "entry", source_version: "1", name: "Recovered", description: null, advertised_urls: [], provenance_digest: "a".repeat(64) }] };
+    const searchRegistry = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(recovered);
+    const api = fakeApi({ searchRegistry });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.change(screen.getByLabelText("Registry search"), { target: { value: "search" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Recovered")).toBeTruthy();
+    expect(searchRegistry).toHaveBeenCalledTimes(2);
+
+    searchRegistry.mockResolvedValueOnce({ ...recovered, expires_at: "2020-01-01T00:00:00Z" });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    expect(await screen.findByText(/results expired/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Import" })).toHaveProperty("disabled", true);
+  });
+
+  it("shows output contracts, cancellation progress, and paginated audit history", async () => {
+    const event = { id: connectionId, actor_user_id: connectionId, action: "connection.created", resource_type: "connection", resource_id: connectionId, outcome: "succeeded", correlation_id: runId, occurred_at: timestamp };
+    const api = fakeApi({
+      getCapability: vi.fn().mockResolvedValue({ ...capability, versions: [{ id: versionId, capability_id: capabilityId, sequence: 1, display_name: "Search", description: null, input_schema: {}, output_schema: { type: "object" }, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false }),
+      getRun: vi.fn().mockResolvedValue({ ...run, cancellation_requested: true }),
+      listAuditEvents: vi.fn().mockResolvedValueOnce({ items: [event], nextCursor: "older" }).mockResolvedValueOnce({ items: [{ ...event, id: versionId }]}),
+    });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
+    expect(await screen.findByText("Output schema")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /Runs$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /55555555/ }));
+    expect(await screen.findByText(/Cancellation requested/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Request cancellation" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Audit/ }));
+    expect(await screen.findByText("connection created")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Load older events" }));
+    await waitFor(() => expect(api.listAuditEvents).toHaveBeenCalledTimes(2));
   });
 });

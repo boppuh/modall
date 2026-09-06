@@ -52,7 +52,9 @@ async function mockControlPlane(route: Route) {
   const path = new URL(request.url()).pathname;
   const key = `${request.method()} ${path}`;
   let body: unknown;
-  if (key === "GET /v1/server-connections") {
+  if (key === "GET /v1/session") {
+    body = { workspace_id: workspaceId, actor_user_id: connectionId, role: "admin" };
+  } else if (key === "GET /v1/server-connections") {
     body = { items: [connection], page: { next_cursor: null } };
   } else if (key === "POST /v1/server-connections") {
     body = connection;
@@ -74,6 +76,8 @@ async function mockControlPlane(route: Route) {
     body = { items: [{ id: connectionId, sequence: 1, event_type: "completed", status: "succeeded", safe_error_code: null, occurred_at: timestamp }], page: { next_cursor: null } };
   } else if (key === "POST /v1/run-preflights") {
     body = { capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "token", expires_at: "2026-09-06T12:03:00Z" };
+  } else if (key === "GET /v1/audit-events") {
+    body = { items: [], page: { next_cursor: null } };
   } else {
     throw new Error(`Unexpected control-plane request: ${key}`);
   }

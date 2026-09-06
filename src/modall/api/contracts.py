@@ -87,6 +87,12 @@ class PageInfo(BaseModel):
     next_cursor: str | None
 
 
+class SessionResponse(BaseModel):
+    workspace_id: UUID
+    actor_user_id: UUID
+    role: Role
+
+
 class ErrorDetail(BaseModel):
     code: str
     message: str
@@ -358,6 +364,16 @@ def build_control_plane_router(
             required_roles=required_roles,
             record_response=record_response,
             replay_response=replay_response,
+        )
+
+    @router.get("/session", response_model=SessionResponse)
+    async def get_session(state: State) -> SessionResponse:
+        """Return the server-authoritative workspace membership for UI gating."""
+
+        return SessionResponse(
+            workspace_id=state.context.workspace_id,
+            actor_user_id=state.context.actor_user_id,
+            role=state.context.role,
         )
 
     @router.post("/registry/searches", response_model=RegistrySearchResponse)

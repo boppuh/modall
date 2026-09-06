@@ -128,6 +128,11 @@ def test_control_plane_requires_workspace_and_has_stable_errors() -> None:
             )
             assert invalid_base64_cursor.status_code == 422
 
+            current = await client.get("/v1/session", headers={"X-Workspace-ID": str(workspace_id)})
+            assert current.status_code == 200
+            assert current.json()["workspace_id"] == str(workspace_id)
+            assert current.json()["role"] == "admin"
+
             unknown = await client.get(
                 f"/v1/capabilities/{uuid4()}",
                 headers={"X-Workspace-ID": str(workspace_id)},
@@ -883,6 +888,7 @@ def test_openapi_publishes_every_planned_alpha_route() -> None:
     paths = app.openapi()["paths"]
     assert {
         "/v1/registry/searches",
+        "/v1/session",
         "/v1/registry/imports",
         "/v1/registry/entries",
         "/v1/server-connections",
