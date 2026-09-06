@@ -1032,9 +1032,7 @@ def _encode_audit_cursor(occurred_at: datetime, identifier: UUID) -> str:
     )
     epoch = datetime(1970, 1, 1, tzinfo=UTC)
     delta = normalized - epoch
-    microseconds = (
-        delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
-    )
+    microseconds = delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
     payload = microseconds.to_bytes(8, "big", signed=True) + identifier.bytes
     return base64.urlsafe_b64encode(payload).decode("ascii")
 

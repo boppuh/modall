@@ -833,10 +833,7 @@ def test_retryable_and_internal_service_failures_have_server_statuses(
                 },
             )
             assert unavailable.status_code == 503
-            assert (
-                unavailable.json()["error"]["code"]
-                == "idempotency_key_history_incomplete"
-            )
+            assert unavailable.json()["error"]["code"] == "idempotency_key_history_incomplete"
 
             monkeypatch.setattr(ExecutionService, "create_run", persistence_run)
             persistence_failure = await client.post(
