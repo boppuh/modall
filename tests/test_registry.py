@@ -473,6 +473,8 @@ def test_connection_versions_are_immutable() -> None:
         "https://token.AbCdEf12.GhIjKl34.MnOpQr56.example.com/mcp",
         "https://token-abcdefgh12345678.example.com/mcp",
         "https://cdn-token-AbCdEfGhIjKlMnOpQrStUvWx.example.com/mcp",
+        "https://cdn-token-AbCdEfGh-IjKlMnOpQrStUvWx.example.com/mcp",
+        "https://mcp.example/cdn-token-AbCdEfGh-IjKlMnOpQrStUvWx",
         "https://mcp.example/\ud800",
         "https://mcp.example../path",
         "https://☃.com/path",

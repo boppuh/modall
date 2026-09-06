@@ -61,7 +61,7 @@ _SENSITIVE_HOST_LABEL_MARKER = re.compile(
     r"(?:^|.*-)(?:api[-_]?key|"
     r"(?:(?:access|refresh|session|auth|bearer)[-_]?)?token|credential|"
     r"private[-_]?key|secret|password)"
-    r"[-_](?P<value>[A-Za-z0-9_~+=]{8,})\Z",
+    r"[-_](?P<value>[A-Za-z0-9_~+=\-]{8,})\Z",
     re.IGNORECASE,
 )
 _URL_CANDIDATE = re.compile(r"https?://[^\s<>\[\]{}\"']+", re.IGNORECASE)
@@ -151,6 +151,13 @@ def _looks_like_marker_suffix(value: str) -> bool:
     )
 
 
+def _looks_like_internal_marker_suffix(value: str) -> bool:
+    words = value.split("-")
+    if len(words) > 1 and all(word.isalpha() and word.islower() for word in words):
+        return False
+    return _looks_like_marker_suffix(value)
+
+
 def contains_sensitive_hostname(hostname: str) -> bool:
     """Detect credential markers adjacent to opaque DNS-label content."""
 
@@ -190,7 +197,7 @@ def contains_sensitive_url_path(path: str) -> bool:
     )
     internal_segment_match = any(
         (match := _SENSITIVE_HOST_LABEL_MARKER.fullmatch(segment)) is not None
-        and _looks_like_marker_suffix(match.group("value"))
+        and _looks_like_internal_marker_suffix(match.group("value"))
         for segment in path.split("/")
     )
     return (

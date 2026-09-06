@@ -500,6 +500,7 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         response_bytes: int,
         *,
         forbidden_response_values: tuple[str, ...] = (),
+        before_request: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._inner = inner
         self._budget = RawByteBudget(response_bytes)
@@ -508,6 +509,7 @@ class LimitedTransport(httpx.AsyncBaseTransport):
             value.encode("utf-8") for value in forbidden_response_values
         )
         self._sensitive_response_detected = False
+        self._before_request = before_request
 
     @property
     def sensitive_response_detected(self) -> bool:
@@ -517,6 +519,8 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         self._sensitive_response_detected = True
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if self._before_request is not None:
+            await self._before_request()
         response = await self._inner.handle_async_request(request)
         content_encoding = response.headers.get("content-encoding", "identity").lower()
         if content_encoding != "identity":

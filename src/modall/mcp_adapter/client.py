@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from threading import Lock
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 import re2  # type: ignore[import-untyped]
@@ -170,8 +171,6 @@ class McpClientAdapter:
         try:
             async with asyncio.timeout(self._limits.total_seconds):
                 resolution = await self._endpoint_policy.validate(endpoint)
-                if before_connect is not None:
-                    await before_connect()
                 inner = self._transport or PinnedHTTPTransport(resolution)
                 transport = LimitedTransport(
                     inner,
@@ -184,6 +183,7 @@ class McpClientAdapter:
                         if credential_text is not None
                         else ()
                     ),
+                    before_request=before_connect,
                 )
                 timeout = httpx.Timeout(
                     self._limits.read_seconds,
@@ -524,8 +524,18 @@ def _contains_decoded_credential(value: object, credential: str) -> bool:
             stack.extend(current.values())
         elif isinstance(current, list):
             stack.extend(current)
-        elif isinstance(current, str) and credential in current:
-            return True
+        elif isinstance(current, str):
+            decoded = current
+            for _ in range(4):
+                if credential in decoded:
+                    return True
+                try:
+                    next_decoded = unquote(decoded, errors="strict")
+                except UnicodeError:
+                    break
+                if next_decoded == decoded:
+                    break
+                decoded = next_decoded
     return False
 
 

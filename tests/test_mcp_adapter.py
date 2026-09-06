@@ -14,6 +14,7 @@ from modall.mcp_adapter.client import (
     DiscoveryError,
     McpClientAdapter,
     ProtocolMismatch,
+    _contains_decoded_credential,
     _contains_sensitive_tool,
     _schema_is_supported,
     _suppress_untrusted_sdk_logs,
@@ -433,6 +434,45 @@ def test_adapter_revalidates_lease_after_resolution_before_transport_contact() -
 
     asyncio.run(scenario())
     assert events == ["resolved", "lease-revalidated"]
+
+
+def test_limited_transport_revalidates_before_every_request() -> None:
+    validations = 0
+    contacts = 0
+
+    async def validate() -> None:
+        nonlocal validations
+        validations += 1
+        if validations == 2:
+            raise RuntimeError("lease revoked")
+
+    async def contact(request: httpx.Request) -> httpx.Response:
+        nonlocal contacts
+        contacts += 1
+        return httpx.Response(204, request=request)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(
+                httpx.MockTransport(contact),
+                100,
+                before_request=validate,
+            )
+        ) as client:
+            assert (await client.get("https://example.test/one")).status_code == 204
+            with pytest.raises(RuntimeError, match="lease revoked"):
+                await client.get("https://example.test/two")
+
+    asyncio.run(scenario())
+    assert validations == 2
+    assert contacts == 1
+
+
+def test_decoded_credential_screen_handles_percent_encoded_metadata() -> None:
+    assert _contains_decoded_credential(
+        {"description": "https://cdn.example/redirect?next=%41bCdEfGhIjKlMnOpQrStUvWx"},
+        "AbCdEfGhIjKlMnOpQrStUvWx",
+    )
 
 
 def test_raw_structured_screen_handles_sse_and_invalid_utf8() -> None:
