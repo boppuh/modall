@@ -334,6 +334,16 @@ def test_scanner_failure_and_unsafe_metadata_write_no_cache() -> None:
             OfficialRegistryFailureCode.INVALID_RESPONSE,
         ),
         (
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                content=b'{"servers":[],"metadata":{"count":0,"nextCursor":"\\ud800"}}',
+                request=request,
+            ),
+            OfficialRegistryLimits(),
+            OfficialRegistryFailureCode.INVALID_RESPONSE,
+        ),
+        (
             lambda request: fixture_response("search_page_1.json", request),
             OfficialRegistryLimits(max_response_bytes=32),
             OfficialRegistryFailureCode.RESPONSE_LIMIT,
@@ -562,6 +572,14 @@ def test_adapter_bounds_streams_timeouts_transport_errors_and_direct_queries() -
             with pytest.raises(OfficialRegistryError) as unavailable:
                 await OfficialRegistryAdapter(client).search("weather")
             assert unavailable.value.code == OfficialRegistryFailureCode.UPSTREAM_UNAVAILABLE
+
+        async def client_timeout(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("fixture timeout", request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(client_timeout)) as client:
+            with pytest.raises(OfficialRegistryError) as timed_out_by_client:
+                await OfficialRegistryAdapter(client).search("weather")
+            assert timed_out_by_client.value.code == OfficialRegistryFailureCode.TIMEOUT
 
     asyncio.run(scenario())
 

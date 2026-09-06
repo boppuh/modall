@@ -369,6 +369,8 @@ class OfficialRegistryAdapter:
                     seen_cursors.add(cursor)
         except TimeoutError as exc:
             raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from exc
+        except httpx.TimeoutException as exc:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from exc
         except httpx.DecodingError as exc:
             raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from exc
         except httpx.HTTPError as exc:
@@ -413,6 +415,11 @@ class OfficialRegistryAdapter:
             or any(ord(character) < 32 or ord(character) == 127 for character in cursor)
         ):
             raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
+        if cursor is not None:
+            try:
+                cursor.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from exc
         return self._normalize_items(servers), cursor
 
     async def _screen(self, value: object) -> None:
