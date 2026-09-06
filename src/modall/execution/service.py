@@ -183,7 +183,6 @@ class ExecutionService:
             context,
             Role.ADMIN,
             Role.OPERATOR,
-            serialize_workspace=True,
         )
         normalized, argument_digest = self._normalize_arguments(arguments)
         await self._require_confirmation_key_history()
@@ -209,55 +208,45 @@ class ExecutionService:
         )
         existing_record = await self._find_idempotency_record(context, raw_key)
         nonce_digest = _sha256(claims.nonce.encode())
-        used_nonce = await self._session.scalar(
-            select(ConfirmationNonce).where(ConfirmationNonce.nonce_digest == nonce_digest)
-        )
         if existing_record is not None:
-            key = self._key_by_version(self._idempotency_keys, existing_record.key_version)
-            if key is None or not hmac.compare_digest(
-                existing_record.request_hmac,
-                _hmac_hex(key.secret, b"request\0" + canonical_request),
-            ):
-                raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
-            run = await self._session.scalar(
-                select(Run)
-                .where(
-                    Run.id == existing_record.resource_id,
-                    Run.workspace_id == context.workspace_id,
-                )
-                .with_for_update()
+            return await self._replay_existing_run(
+                context=context,
+                existing_record=existing_record,
+                canonical_request=canonical_request,
+                claims=claims,
+                nonce_digest=nonce_digest,
+                now=now,
+                lock_run=True,
+                lock_workspace=True,
             )
-            if run is None:
-                raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
-            existing_record = await self._session.scalar(
-                select(IdempotencyRecord)
-                .where(IdempotencyRecord.id == existing_record.id)
-                .with_for_update()
+
+        await require_current_role(
+            self._session,
+            context,
+            Role.ADMIN,
+            Role.OPERATOR,
+            serialize_workspace=True,
+        )
+        # A concurrent creator may have committed while this transaction waited
+        # for the workspace admission lock. Its run is new/nonterminal, so the
+        # immutable idempotency row safely pins it without reversing lock order.
+        existing_record = await self._find_idempotency_record(context, raw_key)
+        if existing_record is not None:
+            return await self._replay_existing_run(
+                context=context,
+                existing_record=existing_record,
+                canonical_request=canonical_request,
+                claims=claims,
+                nonce_digest=nonce_digest,
+                now=now,
+                lock_run=False,
+                lock_workspace=False,
             )
-            if existing_record is None:
-                raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
-            if (
-                run.capability_id != claims.capability_id
-                or run.capability_version_id != claims.capability_version_id
-                or run.connection_id != claims.connection_id
-                or run.connection_version_id != claims.connection_version_id
-            ):
-                raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
-            if used_nonce is not None and used_nonce.run_id != run.id:
-                raise ExecutionError(ExecutionFailureCode.CONFIRMATION_REPLAYED)
-            if used_nonce is None:
-                self._session.add(
-                    ConfirmationNonce(
-                        workspace_id=context.workspace_id,
-                        actor_user_id=context.actor_user_id,
-                        nonce_digest=nonce_digest,
-                        run_id=run.id,
-                        expires_at=claims.expires_at,
-                        consumed_at=now,
-                    )
-                )
-                await self._session.flush()
-            return run
+        used_nonce = await self._session.scalar(
+            select(ConfirmationNonce)
+            .where(ConfirmationNonce.nonce_digest == nonce_digest)
+            .with_for_update()
+        )
         if claims.expires_at <= now:
             raise ExecutionError(ExecutionFailureCode.CONFIRMATION_EXPIRED)
         if used_nonce is not None:
@@ -978,6 +967,76 @@ class ExecutionService:
                 )
             ),
         )
+
+    async def _replay_existing_run(
+        self,
+        *,
+        context: WorkspaceContext,
+        existing_record: IdempotencyRecord,
+        canonical_request: bytes,
+        claims: _ConfirmationClaims,
+        nonce_digest: str,
+        now: datetime,
+        lock_run: bool,
+        lock_workspace: bool,
+    ) -> Run:
+        key = self._key_by_version(self._idempotency_keys, existing_record.key_version)
+        if key is None or not hmac.compare_digest(
+            existing_record.request_hmac,
+            _hmac_hex(key.secret, b"request\0" + canonical_request),
+        ):
+            raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
+        run_statement = select(Run).where(
+            Run.id == existing_record.resource_id,
+            Run.workspace_id == context.workspace_id,
+        )
+        if lock_run:
+            run_statement = run_statement.with_for_update()
+        run = await self._session.scalar(run_statement)
+        if run is None:
+            raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
+        locked_record = await self._session.scalar(
+            select(IdempotencyRecord)
+            .where(IdempotencyRecord.id == existing_record.id)
+            .with_for_update()
+        )
+        if locked_record is None:
+            raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
+        if lock_workspace:
+            await require_current_role(
+                self._session,
+                context,
+                Role.ADMIN,
+                Role.OPERATOR,
+                serialize_workspace=True,
+            )
+        if (
+            run.capability_id != claims.capability_id
+            or run.capability_version_id != claims.capability_version_id
+            or run.connection_id != claims.connection_id
+            or run.connection_version_id != claims.connection_version_id
+        ):
+            raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
+        used_nonce = await self._session.scalar(
+            select(ConfirmationNonce)
+            .where(ConfirmationNonce.nonce_digest == nonce_digest)
+            .with_for_update()
+        )
+        if used_nonce is not None and used_nonce.run_id != run.id:
+            raise ExecutionError(ExecutionFailureCode.CONFIRMATION_REPLAYED)
+        if used_nonce is None:
+            self._session.add(
+                ConfirmationNonce(
+                    workspace_id=context.workspace_id,
+                    actor_user_id=context.actor_user_id,
+                    nonce_digest=nonce_digest,
+                    run_id=run.id,
+                    expires_at=claims.expires_at,
+                    consumed_at=now,
+                )
+            )
+            await self._session.flush()
+        return run
 
     async def _require_idempotency_key_history(self) -> None:
         configured_versions = [key.version for key in self._idempotency_keys]

@@ -965,6 +965,7 @@ class ConfirmationNonce(Base):
             ondelete="CASCADE",
         ),
         CheckConstraint("length(nonce_digest) = 64", name="ck_confirmation_nonce_digest"),
+        Index("ix_confirmation_nonces_run", "workspace_id", "run_id"),
     )
 
     id: Mapped[UuidPrimaryKey]
@@ -996,6 +997,7 @@ class IdempotencyRecord(Base):
         ),
         Index("ix_idempotency_confirmation_key_version", "confirmation_key_version"),
         Index("ix_idempotency_key_version", "key_version"),
+        Index("ix_idempotency_resource", "workspace_id", "resource_id"),
         Index("ix_idempotency_expiry", "expires_at"),
     )
 

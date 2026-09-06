@@ -319,6 +319,11 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("nonce_digest"),
     )
+    op.create_index(
+        "ix_confirmation_nonces_run",
+        "confirmation_nonces",
+        ["workspace_id", "run_id"],
+    )
 
     op.create_table(
         "idempotency_records",
@@ -365,6 +370,11 @@ def upgrade() -> None:
         ["confirmation_key_version"],
     )
     op.create_index("ix_idempotency_key_version", "idempotency_records", ["key_version"])
+    op.create_index(
+        "ix_idempotency_resource",
+        "idempotency_records",
+        ["workspace_id", "resource_id"],
+    )
 
     for table in ("run_events", "confirmation_nonces", "idempotency_records"):
         op.execute(
@@ -391,10 +401,12 @@ def downgrade() -> None:
     op.execute("DROP FUNCTION IF EXISTS modall_reject_terminal_execution_update()")
     for table in ("idempotency_records", "confirmation_nonces", "run_events"):
         op.execute(f"DROP TRIGGER IF EXISTS {table}_immutable ON {table}")
+    op.drop_index("ix_idempotency_resource", table_name="idempotency_records")
     op.drop_index("ix_idempotency_key_version", table_name="idempotency_records")
     op.drop_index("ix_idempotency_confirmation_key_version", table_name="idempotency_records")
     op.drop_index("ix_idempotency_expiry", table_name="idempotency_records")
     op.drop_table("idempotency_records")
+    op.drop_index("ix_confirmation_nonces_run", table_name="confirmation_nonces")
     op.drop_table("confirmation_nonces")
     op.drop_index("ix_run_events_run_sequence", table_name="run_events")
     op.drop_table("run_events")
