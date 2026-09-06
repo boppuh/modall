@@ -1,6 +1,7 @@
 """FastAPI application entry point."""
 
 import logging
+import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
@@ -8,6 +9,7 @@ from uuid import UUID, uuid4
 import uvicorn
 from fastapi import FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
@@ -18,7 +20,7 @@ from modall.api.errors import InvalidRequest
 from modall.api.idempotency import ApiIdempotencyConflict, ApiIdempotencyHistoryIncomplete
 from modall.config import Settings, get_settings
 from modall.execution.runtime import build_execution_keyrings
-from modall.execution.types import ExecutionError, HmacKeyVersion
+from modall.execution.types import ExecutionError, ExecutionFailureCode, HmacKeyVersion
 from modall.identity.auth import AuthenticationError, build_authenticator
 from modall.identity.repository import AuthorizationDenied
 from modall.persistence.database import (
@@ -27,7 +29,11 @@ from modall.persistence.database import (
     create_engine,
     create_session_factory,
 )
-from modall.registry.official import OfficialRegistryAdapter, OfficialRegistryError
+from modall.registry.official import (
+    OfficialRegistryAdapter,
+    OfficialRegistryError,
+    OfficialRegistryFailureCode,
+)
 from modall.registry.service import InvalidCapabilityTransition, InvalidConnectionTransition
 
 
@@ -81,6 +87,21 @@ def create_app(
         lifespan=lifespan,
     )
 
+    if resolved_settings.cors_allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(resolved_settings.cors_allowed_origins),
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=[
+                "Authorization",
+                "Content-Type",
+                "Idempotency-Key",
+                "X-Correlation-ID",
+                "X-Workspace-ID",
+            ],
+            expose_headers=["X-Correlation-ID"],
+        )
+
     @app.middleware("http")
     async def response_policy(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -93,13 +114,25 @@ def create_app(
         request.state.correlation_id = correlation_id
         try:
             response = await call_next(request)
-        except Exception:
+        except Exception as exc:
+            safe_stack = " <- ".join(
+                f"{frame.filename}:{frame.lineno}:{frame.name}"
+                for frame in traceback.extract_tb(exc.__traceback__)
+            )
             logging.getLogger("modall.api").warning(
-                "unhandled_request_failure correlation_id=%s", correlation_id
+                "unhandled_request_failure correlation_id=%s exception_type=%s stack=%s",
+                correlation_id,
+                type(exc).__name__,
+                safe_stack,
             )
             response = error_response(
                 "internal_error", "The request could not be completed.", 500, request
             )
+            origin = request.headers.get("Origin")
+            if origin in resolved_settings.cors_allowed_origins:
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Expose-Headers"] = "X-Correlation-ID"
+                response.headers.add_vary_header("Origin")
         response.headers["X-Correlation-ID"] = str(correlation_id)
         if request.url.path.startswith("/v1/"):
             response.headers["Cache-Control"] = "no-store"
@@ -133,11 +166,29 @@ def create_app(
 
     @app.exception_handler(OfficialRegistryError)
     async def registry_error(request: Request, exc: OfficialRegistryError) -> JSONResponse:
-        return error_response(exc.code.value, "Registry operation failed.", 422, request)
+        if exc.code in {
+            OfficialRegistryFailureCode.TIMEOUT,
+            OfficialRegistryFailureCode.UPSTREAM_UNAVAILABLE,
+        }:
+            http_status = 503
+        elif exc.code is OfficialRegistryFailureCode.PERSISTENCE_FAILURE:
+            http_status = 500
+        else:
+            http_status = 422
+        return error_response(exc.code.value, "Registry operation failed.", http_status, request)
 
     @app.exception_handler(ExecutionError)
     async def execution_error(request: Request, exc: ExecutionError) -> JSONResponse:
-        return error_response(exc.code.value, "Run operation failed.", 409, request)
+        if exc.code in {
+            ExecutionFailureCode.IDEMPOTENCY_KEY_HISTORY_INCOMPLETE,
+            ExecutionFailureCode.CONFIRMATION_KEY_HISTORY_INCOMPLETE,
+        }:
+            http_status = 503
+        elif exc.code is ExecutionFailureCode.PERSISTENCE_FAILURE:
+            http_status = 500
+        else:
+            http_status = 409
+        return error_response(exc.code.value, "Run operation failed.", http_status, request)
 
     @app.exception_handler(InvalidConnectionTransition)
     @app.exception_handler(InvalidCapabilityTransition)

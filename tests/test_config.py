@@ -101,6 +101,26 @@ def test_hmac_key_versions_are_bounded_and_unique(versions: tuple[str, ...]) -> 
 
 
 @pytest.mark.parametrize(
+    "origin",
+    [
+        "HTTP://LOCALHOST:5173",
+        "http://example.com:80",
+        "https://example.com/",
+        "https://user@example.com",
+        "https://example.com/path",
+        "https://example.com?tenant=x",
+    ],
+)
+def test_cors_origins_must_be_canonical_bare_origins(origin: str) -> None:
+    with pytest.raises(ValidationError, match="bare HTTP origins"):
+        Settings(_env_file=None, cors_allowed_origins=(origin,))
+
+    assert Settings(
+        _env_file=None, cors_allowed_origins=("http://localhost:5173",)
+    ).cors_allowed_origins == ("http://localhost:5173",)
+
+
+@pytest.mark.parametrize(
     "issuer",
     [
         "https://user@issuer.example",
