@@ -620,6 +620,8 @@ def test_adapter_bounds_streams_timeouts_transport_errors_and_direct_queries() -
             with pytest.raises(OfficialRegistryError) as unavailable:
                 await OfficialRegistryAdapter(transport=client._transport).search("weather")
             assert unavailable.value.code == OfficialRegistryFailureCode.UPSTREAM_UNAVAILABLE
+            assert unavailable.value.__cause__ is None
+            assert unavailable.value.__context__ is None
 
         async def client_timeout(request: httpx.Request) -> httpx.Response:
             raise httpx.ReadTimeout("fixture timeout", request=request)
@@ -628,6 +630,32 @@ def test_adapter_bounds_streams_timeouts_transport_errors_and_direct_queries() -
             with pytest.raises(OfficialRegistryError) as timed_out_by_client:
                 await OfficialRegistryAdapter(transport=client._transport).search("weather")
             assert timed_out_by_client.value.code == OfficialRegistryFailureCode.TIMEOUT
+            assert timed_out_by_client.value.__cause__ is None
+            assert timed_out_by_client.value.__context__ is None
+
+    asyncio.run(scenario())
+
+
+def test_canonicalization_failure_detaches_payload_bearing_exception() -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                content=(
+                    b'{"servers":[{"server":{"name":"io.modall.fixture.surrogate",'
+                    b'"version":"1.0.0","annotations":{"value":"\\ud800"}}}],'
+                    b'"metadata":{"count":1}}'
+                ),
+                request=request,
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(OfficialRegistryError) as raised:
+                await OfficialRegistryAdapter(transport=client._transport).search("weather")
+        assert raised.value.code == OfficialRegistryFailureCode.INVALID_RESPONSE
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
 
     asyncio.run(scenario())
 

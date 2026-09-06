@@ -159,6 +159,7 @@ class _DecodeWorkExceeded(ValueError):
 
 
 _JSON_DECODE_FAILED = object()
+_CANONICAL_JSON_FAILED = object()
 
 
 def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -201,7 +202,7 @@ def _decode_registry_json(body: bytes) -> object:
         return _JSON_DECODE_FAILED
 
 
-def _canonical_json(value: object) -> bytes:
+def _try_canonical_json(value: object) -> bytes | object:
     try:
         return json.dumps(
             value,
@@ -211,7 +212,22 @@ def _canonical_json(value: object) -> bytes:
             sort_keys=True,
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError):
-        raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from None
+        return _CANONICAL_JSON_FAILED
+
+
+def _canonical_json(value: object) -> bytes:
+    encoded = _try_canonical_json(value)
+    if encoded is _CANONICAL_JSON_FAILED:
+        raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
+    return cast(bytes, encoded)
+
+
+def _is_bounded_json(value: object) -> bool:
+    try:
+        validate_bounded_json(value)
+    except MetadataValidationError:
+        return False
+    return True
 
 
 def _digest(value: object) -> str:
@@ -320,6 +336,7 @@ class OfficialRegistryAdapter:
         cursor: str | None = None
         seen_cursors: set[str] = set()
         total_bytes = 0
+        failure_code = OfficialRegistryFailureCode.RESPONSE_LIMIT
         try:
             async with asyncio.timeout(self._limits.total_timeout_seconds):
                 query = await self.screen_query(query)
@@ -417,14 +434,14 @@ class OfficialRegistryAdapter:
                         raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
                     seen_cursors.add(cursor)
         except TimeoutError:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from None
+            failure_code = OfficialRegistryFailureCode.TIMEOUT
         except httpx.TimeoutException:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from None
+            failure_code = OfficialRegistryFailureCode.TIMEOUT
         except httpx.DecodingError:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from None
+            failure_code = OfficialRegistryFailureCode.INVALID_RESPONSE
         except httpx.HTTPError:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.UPSTREAM_UNAVAILABLE) from None
-        raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT)
+            failure_code = OfficialRegistryFailureCode.UPSTREAM_UNAVAILABLE
+        raise OfficialRegistryError(failure_code)
 
     async def parse_cached_items(self, values: object) -> tuple[OfficialRegistryItem, ...]:
         if not isinstance(values, list) or len(values) > self._limits.max_items:
@@ -436,10 +453,8 @@ class OfficialRegistryAdapter:
         payload = _decode_registry_json(body)
         if payload is _JSON_DECODE_FAILED:
             raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
-        try:
-            validate_bounded_json(payload)
-        except MetadataValidationError:
-            raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT) from None
+        if not _is_bounded_json(payload):
+            raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT)
         await self._screen(payload)
         if not isinstance(payload, dict) or set(payload) - {"servers", "metadata"}:
             raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE)
