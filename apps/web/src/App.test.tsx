@@ -64,7 +64,7 @@ function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
     createConnection: vi.fn().mockResolvedValue(connection),
     appendConnectionVersion: vi.fn().mockResolvedValue({ id: versionId, sequence: 2, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http", created_at: timestamp }),
     connectionAction: vi.fn().mockResolvedValue(undefined),
-    searchRegistry: vi.fn().mockResolvedValue({ cache_id: connectionId, fetched_at: timestamp, expires_at: "2026-09-06T23:00:00Z", from_cache: false, items: [{ external_id: "io.modall/search", source_version: "1.2.0", name: "Public search", description: "Search public records", advertised_urls: ["https://mcp.example/tools"], provenance_digest: "a".repeat(64) }] }),
+    searchRegistry: vi.fn().mockImplementation(() => Promise.resolve({ cache_id: connectionId, fetched_at: timestamp, expires_at: new Date(Date.now() + 60_000).toISOString(), from_cache: false, items: [{ external_id: "io.modall/search", source_version: "1.2.0", name: "Public search", description: "Search public records", advertised_urls: ["https://mcp.example/tools"], provenance_digest: "a".repeat(64) }] })),
     importRegistry: vi.fn().mockResolvedValue({ id: connectionId, source: "official", external_id: "io.modall/search", current_version_id: versionId, name: "Public search", description: "Search public records", created_at: timestamp }),
     listRegistryEntries: vi.fn().mockResolvedValue([]),
     listCapabilities: vi.fn().mockResolvedValue([capability]),
@@ -125,7 +125,7 @@ describe("App", () => {
     expect(localStorage.length).toBe(1);
 
     fireEvent.click(screen.getByRole("button", { name: "Log out" }));
-    expect(screen.getByRole("heading", { name: "Open a workspace" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Open a workspace" })).toBeTruthy();
     expect(localStorage.length).toBe(0);
   });
 
@@ -201,7 +201,9 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Arguments"), { target: { value: '{"query":"status"}' } });
     fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
     expect(await screen.findByRole("heading", { name: "Confirm exact invocation" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Confirm and run" }));
+    const confirm = screen.getByRole("button", { name: "Confirm and run" });
+    await waitFor(() => expect(confirm).toHaveProperty("disabled", false));
+    fireEvent.click(confirm);
     await waitFor(() => expect(api.createRun).toHaveBeenCalled());
 
     expect(await screen.findByRole("heading", { name: "Execution timeline" })).toBeTruthy();
@@ -314,13 +316,15 @@ describe("App", () => {
     await screen.findByRole("option", { name: /tools\/search/ });
     fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
     fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Confirm and run" }));
+    const confirm = await screen.findByRole("button", { name: "Confirm and run" });
+    await waitFor(() => expect(confirm).toHaveProperty("disabled", false));
+    fireEvent.click(confirm);
     expect((await screen.findByRole("alert")).textContent).toContain("Run preflight again");
     expect(screen.queryByRole("heading", { name: "Confirm exact invocation" })).toBeNull();
   });
 
   it("retries failed searches and expires stale import controls", async () => {
-    const recovered = { cache_id: connectionId, fetched_at: timestamp, expires_at: "2026-09-06T23:00:00Z", from_cache: false, items: [{ external_id: "entry", source_version: "1", name: "Recovered", description: null, advertised_urls: [], provenance_digest: "a".repeat(64) }] };
+    const recovered = { cache_id: connectionId, fetched_at: timestamp, expires_at: new Date(Date.now() + 60_000).toISOString(), from_cache: false, items: [{ external_id: "entry", source_version: "1", name: "Recovered", description: null, advertised_urls: [], provenance_digest: "a".repeat(64) }] };
     const searchRegistry = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(recovered);
     const api = fakeApi({ searchRegistry });
     renderApp(api);

@@ -474,7 +474,8 @@ function Registry({ api, scope, role, selectedId, select }: { api: ControlPlane;
       </section>
       <section className="split-detail">
         <div className="section-block">
-          <div className="section-heading"><div><span className="index">Connections / 03</span><h2>Trust inventory</h2></div><span>{entries.data?.length ?? 0} catalog entries</span></div>
+          <div className="section-heading"><div><span className="index">Connections / 03</span><h2>Trust inventory</h2></div><span>{entries.isError ? "—" : entries.data?.length ?? 0} catalog entries</span></div>
+          {entries.isError && <QueryFailure error={entries.error} retry={() => void entries.refetch()} />}
           {connections.isPending ? <LoadingState label="Loading connections" /> : connections.isError ? (
             <QueryFailure error={connections.error} retry={() => void connections.refetch()} />
           ) : connections.data.length === 0 ? (
@@ -615,7 +616,8 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const runKey = useRef(mutationId());
   const cancelKeys = useRef(new Map<string, string>());
-  const runs = useQuery({ queryKey: queryKey(scope, "runs"), queryFn: () => api.listRuns() });
+  const runsKey = useMemo(() => queryKey(scope, "runs"), [scope]);
+  const runs = useQuery({ queryKey: runsKey, queryFn: () => api.listRuns() });
   const capabilities = useQuery({ queryKey: queryKey(scope, "capabilities"), queryFn: () => api.listCapabilities() });
   const connections = useQuery({ queryKey: queryKey(scope, "connections"), queryFn: () => api.listConnections() });
   const [argumentsText, setArgumentsText] = useState("{\n  \"query\": \"status\"\n}");
@@ -626,14 +628,21 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
     queryKey: queryKey(scope, "run", selectedId),
     queryFn: () => api.getRun(selectedId as string),
     enabled: selectedId !== null,
-    refetchInterval: (query) => query.state.data && terminal(query.state.data.status) ? false : 1500,
+    refetchInterval: (query) => query.state.status === "error" || (query.state.data && terminal(query.state.data.status)) ? false : 1500,
   });
   const events = useQuery({
     queryKey: queryKey(scope, "run-events", selectedId),
     queryFn: () => api.listRunEvents(selectedId as string),
     enabled: selectedId !== null,
-    refetchInterval: runDetail.data && terminal(runDetail.data.status) ? false : 1500,
+    refetchInterval: (query) => query.state.status === "error" || (runDetail.data && terminal(runDetail.data.status)) ? false : 1500,
   });
+  useEffect(() => {
+    const current = runDetail.data;
+    if (!current) return;
+    queryClient.setQueryData<Awaited<ReturnType<ControlPlane["listRuns"]>>>(runsKey, (previous) =>
+      previous?.map((item) => item.id === current.id ? current : item),
+    );
+  }, [queryClient, runDetail.data, runsKey]);
   const prepare = useMutation({
     mutationFn: ({ versionId, args }: { versionId: string; args: Record<string, unknown> }) => api.preflight(versionId, args),
     onSuccess: setPreflight,
@@ -664,6 +673,13 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
   const enabledCapabilities = (capabilities.data ?? []).filter((item) => item.status === "enabled" && item.enabled_version_id);
   const connectionNames = new Map((connections.data ?? []).map((item) => [item.id, item.name]));
   const orderedRuns = [...(runs.data ?? [])].sort((left, right) => right.created_at.localeCompare(left.created_at));
+  const selectedCapability = enabledCapabilities.find((item) => item.enabled_version_id === selectedVersionId);
+  const confirmationConnection = useQuery({
+    queryKey: queryKey(scope, "confirmation-connection", selectedCapability?.connection_id),
+    queryFn: () => api.getConnection(selectedCapability?.connection_id as string),
+    enabled: Boolean(preflight && selectedCapability),
+  });
+  const confirmedEndpoint = confirmationConnection.data?.versions.find((version) => version.id === preflight?.connection_version_id)?.endpoint_url;
 
   function invalidatePreparedRun() {
     setPreflight(null); setPendingArguments(null); prepare.reset(); invoke.reset(); runKey.current = mutationId();
@@ -699,9 +715,11 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
             <p className="incident-note">Only public, synthetic, or explicitly non-confidential data.</p>
             {argumentsError && <p className="field-error" role="alert">{argumentsError}</p>}
             {prepare.isError && <p className="field-error" role="alert">{failureMessage(prepare.error)}</p>}
+            {capabilities.isError && <QueryFailure error={capabilities.error} retry={() => void capabilities.refetch()} />}
+            {connections.isError && <QueryFailure error={connections.error} retry={() => void connections.refetch()} />}
             <button className="primary-action" disabled={!canOperate(role) || prepare.isPending || enabledCapabilities.length === 0} type="submit">{prepare.isPending ? "Checking…" : "Review invocation"}</button>
           </form>
-          {enabledCapabilities.length === 0 && <p className="field-help">Enable a capability version before opening a run.</p>}
+          {!capabilities.isError && enabledCapabilities.length === 0 && <p className="field-help">Enable a capability version before opening a run.</p>}
         </div>
         <div className="section-block run-inventory">
           <div className="section-heading"><div><span className="index">Ledger / 02</span><h2>Recent runs</h2></div></div>
@@ -714,10 +732,12 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
         <section className="confirmation-panel" aria-labelledby="confirmation-title">
           <div><span className="index">One-time confirmation</span><h2 id="confirmation-title">Confirm exact invocation</h2><p>This token expires {formatTime(preflight.expires_at)} and cannot move to another request.</p></div>
           <p className="incident-note">Only public, synthetic, or explicitly non-confidential data.</p>
-          <dl><div><dt>Capability version</dt><dd><code>{shortId(preflight.capability_version_id)}</code></dd></div><div><dt>Argument digest</dt><dd><code>{shortId(preflight.argument_digest)}</code></dd></div></dl>
+          <dl><div><dt>Capability version</dt><dd><code>{shortId(preflight.capability_version_id)}</code></dd></div><div><dt>Pinned endpoint</dt><dd><code>{confirmedEndpoint ?? (confirmationConnection.isPending ? "Resolving…" : "Unavailable")}</code></dd></div><div><dt>Argument digest</dt><dd><code>{shortId(preflight.argument_digest)}</code></dd></div></dl>
+          {confirmationConnection.isError && <p className="field-error" role="alert">{failureMessage(confirmationConnection.error)}</p>}
+          {!confirmationConnection.isPending && !confirmationConnection.isError && !confirmedEndpoint && <p className="field-error" role="alert">The pinned connection version is unavailable. Run preflight again.</p>}
           <details open><summary>Exact prepared arguments</summary><pre>{JSON.stringify(pendingArguments, null, 2)}</pre></details>
           {invoke.isError && <p className="field-error" role="alert">{failureMessage(invoke.error)}{invoke.error instanceof ApiFailure && ["invalid_confirmation", "confirmation_expired", "confirmation_replayed"].includes(invoke.error.code) ? " Run preflight again." : " Retry to safely reuse this request."}</p>}
-          <div className="action-strip"><button type="button" onClick={invalidatePreparedRun}>Back</button><button className="primary-action" type="button" disabled={invoke.isPending} onClick={() => invoke.mutate({ prepared: preflight, args: pendingArguments })}>{invoke.isPending ? "Submitting…" : "Confirm and run"}</button></div>
+          <div className="action-strip"><button type="button" onClick={invalidatePreparedRun}>Back</button><button className="primary-action" type="button" disabled={invoke.isPending || !confirmedEndpoint} onClick={() => invoke.mutate({ prepared: preflight, args: pendingArguments })}>{invoke.isPending ? "Submitting…" : "Confirm and run"}</button></div>
         </section>
       )}
       {invoke.isError && !preflight && <p className="field-error" role="alert">{failureMessage(invoke.error)} Run preflight again.</p>}
@@ -795,16 +815,21 @@ function WorkspaceApp({ session, api, onLogout }: { session: WorkspaceSession; a
 }
 
 export function App({ apiFactory = createControlPlane }: { apiFactory?: ApiFactory }) {
+  const queryClient = useQueryClient();
   const [session, setSession] = useState<WorkspaceSession | null>(() => loadSession());
   const api = useMemo(() => (session ? apiFactory(session) : null), [apiFactory, session]);
 
-  function logout() {
+  async function logout() {
+    if (session) {
+      await queryClient.cancelQueries({ queryKey: ["workspace", session.identityId, session.workspaceId] });
+    }
+    queryClient.clear();
     clearSession();
     setSession(null);
   }
 
   return session && api ? (
-    <WorkspaceApp session={session} api={api} onLogout={logout} />
+    <WorkspaceApp session={session} api={api} onLogout={() => void logout()} />
   ) : (
     <SignIn onSignIn={setSession} />
   );
