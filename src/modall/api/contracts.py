@@ -29,6 +29,7 @@ from modall.persistence.models import (
     AuditEvent,
     Capability,
     CapabilityVersion,
+    McpToolBinding,
     RegistryEntry,
     RegistryEntryVersion,
     Run,
@@ -195,6 +196,7 @@ class CapabilityDetailResponse(CapabilityResponse):
 class CapabilityVersionResponse(BaseModel):
     id: UUID
     capability_id: UUID
+    connection_version_id: UUID
     sequence: int
     display_name: str
     description: str | None
@@ -682,8 +684,12 @@ def build_control_plane_router(
         )
         versions = list(
             (
-                await state.session.scalars(
-                    select(CapabilityVersion)
+                await state.session.execute(
+                    select(CapabilityVersion, McpToolBinding.connection_version_id)
+                    .join(
+                        McpToolBinding,
+                        McpToolBinding.capability_version_id == CapabilityVersion.id,
+                    )
                     .where(CapabilityVersion.capability_id == capability.id)
                     .order_by(CapabilityVersion.sequence.desc())
                     .limit(_DETAIL_VERSION_LIMIT + 1)
@@ -692,7 +698,10 @@ def build_control_plane_router(
         )
         return CapabilityDetailResponse(
             **_capability(capability).model_dump(),
-            versions=[_capability_version(item) for item in versions[:_DETAIL_VERSION_LIMIT]],
+            versions=[
+                _capability_version(item, connection_version_id)
+                for item, connection_version_id in versions[:_DETAIL_VERSION_LIMIT]
+            ],
             versions_truncated=len(versions) > _DETAIL_VERSION_LIMIT,
         )
 
@@ -705,7 +714,15 @@ def build_control_plane_router(
         version = await _scoped_one(
             state.session, CapabilityVersion, capability_version_id, state.context.workspace_id
         )
-        return _capability_version(version)
+        connection_version_id = await state.session.scalar(
+            select(McpToolBinding.connection_version_id).where(
+                McpToolBinding.capability_version_id == version.id,
+                McpToolBinding.workspace_id == state.context.workspace_id,
+            )
+        )
+        if connection_version_id is None:
+            raise RuntimeError("capability version is missing its immutable connection binding")
+        return _capability_version(version, connection_version_id)
 
     @router.post(
         "/capability-versions/{capability_version_id}/enable",
@@ -1153,10 +1170,13 @@ def _capability(item: Capability) -> CapabilityResponse:
     )
 
 
-def _capability_version(item: CapabilityVersion) -> CapabilityVersionResponse:
+def _capability_version(
+    item: CapabilityVersion, connection_version_id: UUID
+) -> CapabilityVersionResponse:
     return CapabilityVersionResponse(
         id=item.id,
         capability_id=item.capability_id,
+        connection_version_id=connection_version_id,
         sequence=item.sequence,
         display_name=item.display_name,
         description=item.description,

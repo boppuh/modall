@@ -31,7 +31,7 @@ const capability: Capability = {
   id: capabilityId,
   connection_id: connectionId,
   tool_identity: "tools/search",
-  pending_version_id: versionId,
+  pending_version_id: null,
   enabled_version_id: versionId,
   status: "enabled",
   status_epoch: 3,
@@ -71,7 +71,7 @@ function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
     importRegistry: vi.fn().mockResolvedValue({ id: connectionId, source: "official", external_id: "io.modall/search", current_version_id: versionId, name: "Public search", description: "Search public records", created_at: timestamp }),
     listRegistryEntries: vi.fn().mockResolvedValue([]),
     listCapabilities: vi.fn().mockResolvedValue([capability]),
-    getCapability: vi.fn().mockResolvedValue({ ...capability, versions: [{ id: versionId, capability_id: capabilityId, sequence: 1, display_name: "Search", description: "Search public records", input_schema: { type: "object" }, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false }),
+    getCapability: vi.fn().mockResolvedValue({ ...capability, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Search", description: "Search public records", input_schema: { type: "object" }, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false }),
     capabilityAction: vi.fn().mockResolvedValue(capability),
     listRuns: vi.fn().mockResolvedValue([run]),
     getRun: vi.fn().mockResolvedValue(run),
@@ -201,7 +201,7 @@ describe("App", () => {
     const disabled = { ...capability, pending_version_id: null, status: "disabled" as const };
     const api = fakeApi({
       listCapabilities: vi.fn().mockResolvedValue([disabled]),
-      getCapability: vi.fn().mockResolvedValue({ ...disabled, versions: [{ id: versionId, capability_id: capabilityId, sequence: 1, display_name: "Search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false }),
+      getCapability: vi.fn().mockResolvedValue({ ...disabled, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false }),
     });
     renderApp(api);
     fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
@@ -217,16 +217,31 @@ describe("App", () => {
     const api = fakeApi({
       listCapabilities: vi.fn().mockResolvedValue([disabled]),
       getCapability: vi.fn().mockResolvedValue({ ...disabled, versions: [
-        { id: pendingVersionId, capability_id: capabilityId, sequence: 2, display_name: "New search", description: null, input_schema: {}, output_schema: null, metadata_digest: "d".repeat(64), schema_supported: true, created_at: timestamp },
-        { id: versionId, capability_id: capabilityId, sequence: 1, display_name: "Old search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp },
+        { id: pendingVersionId, capability_id: capabilityId, connection_version_id: connectionId, sequence: 2, display_name: "New search", description: null, input_schema: {}, output_schema: null, metadata_digest: "d".repeat(64), schema_supported: true, created_at: timestamp },
+        { id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Old search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp },
       ], versions_truncated: false }),
     });
     renderApp(api);
     fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
     fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
     expect(await screen.findByRole("button", { name: "Historical version" })).toHaveProperty("disabled", true);
+    expect(screen.getByText(connectionId)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Enable exact version" }));
     await waitFor(() => expect(api.capabilityAction).toHaveBeenCalledWith(pendingVersionId, "enable", expect.any(String)));
+  });
+
+  it("allows an operator to reject an unsupported pending capability", async () => {
+    const pending = { ...capability, status: "pending_review" as const, pending_version_id: versionId, enabled_version_id: null };
+    const api = fakeApi({
+      listCapabilities: vi.fn().mockResolvedValue([pending]),
+      getCapability: vi.fn().mockResolvedValue({ ...pending, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: connectionId, sequence: 1, display_name: "Unsafe search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: false, created_at: timestamp }], versions_truncated: false }),
+    });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
+    expect(await screen.findByRole("button", { name: "Enable exact version" })).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByRole("button", { name: "Reject version" }));
+    await waitFor(() => expect(api.capabilityAction).toHaveBeenCalledWith(versionId, "disable", expect.any(String)));
   });
 
   it("preflights, confirms, follows, and cancels a run", async () => {
@@ -271,9 +286,8 @@ describe("App", () => {
     await waitFor(() => expect(createRun).toHaveBeenCalledTimes(1));
     const originalKey = createRun.mock.calls[0]?.[2] ?? "";
 
-    fireEvent.click(screen.getByRole("button", { name: "Back" }));
-    fireEvent.change(screen.getByLabelText("Arguments"), { target: { value: "{ \"query\" : \"status\" }" } });
-    fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Modall overview" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Runs in flight/ }));
     confirm = await screen.findByRole("button", { name: "Confirm and run" });
     await waitFor(() => expect(confirm).toHaveProperty("disabled", false));
     fireEvent.click(confirm);
@@ -414,8 +428,8 @@ describe("App", () => {
       getCapability: vi.fn().mockResolvedValue({
         ...capability,
         versions: [
-          { id: versionId, capability_id: capabilityId, sequence: 2, display_name: "Search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp },
-          { id: historicalId, capability_id: capabilityId, sequence: 1, display_name: "Old search", description: null, input_schema: {}, output_schema: null, metadata_digest: "d".repeat(64), schema_supported: true, created_at: timestamp },
+          { id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 2, display_name: "Search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp },
+          { id: historicalId, capability_id: capabilityId, connection_version_id: connectionId, sequence: 1, display_name: "Old search", description: null, input_schema: {}, output_schema: null, metadata_digest: "d".repeat(64), schema_supported: true, created_at: timestamp },
         ],
         versions_truncated: false,
       }),
@@ -468,9 +482,9 @@ describe("App", () => {
   it("shows output contracts, cancellation progress, and paginated audit history", async () => {
     const event = { id: connectionId, actor_user_id: connectionId, action: "connection.created", resource_type: "connection", resource_id: connectionId, outcome: "succeeded", correlation_id: runId, occurred_at: timestamp };
     const api = fakeApi({
-      getCapability: vi.fn().mockResolvedValue({ ...capability, versions: [{ id: versionId, capability_id: capabilityId, sequence: 1, display_name: "Search", description: null, input_schema: {}, output_schema: { type: "object" }, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false }),
+      getCapability: vi.fn().mockResolvedValue({ ...capability, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Search", description: null, input_schema: {}, output_schema: { type: "object" }, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false }),
       getRun: vi.fn().mockResolvedValue({ ...run, cancellation_requested: true }),
-      listAuditEvents: vi.fn().mockResolvedValueOnce({ items: [event], nextCursor: "older" }).mockResolvedValueOnce({ items: [{ ...event, id: versionId }]}),
+      listAuditEvents: vi.fn().mockResolvedValueOnce({ items: [event], nextCursor: "older" }).mockResolvedValueOnce({ items: [event], nextCursor: "older" }).mockResolvedValueOnce({ items: [{ ...event, id: versionId }]}),
     });
     renderApp(api);
     fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
@@ -484,7 +498,16 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Audit/ }));
     expect(await screen.findByText("connection created")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Resource type"), { target: { value: "server_connection" } });
+    fireEvent.change(screen.getByLabelText("Resource ID"), { target: { value: connectionId } });
+    fireEvent.change(screen.getByLabelText("Actor ID"), { target: { value: connectionId } });
+    fireEvent.change(screen.getByLabelText("Action"), { target: { value: "connection.created" } });
+    fireEvent.change(screen.getByLabelText("Outcome"), { target: { value: "succeeded" } });
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-09-06T08:00" } });
+    fireEvent.change(screen.getByLabelText("Before"), { target: { value: "2026-09-07T08:00" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    await waitFor(() => expect(api.listAuditEvents).toHaveBeenCalledWith({ resource_type: "server_connection", resource_id: connectionId, actor_id: connectionId, action: "connection.created", outcome: "succeeded", occurred_after: new Date("2026-09-06T08:00").toISOString(), occurred_before: new Date("2026-09-07T08:00").toISOString() }, undefined));
     fireEvent.click(screen.getByRole("button", { name: "Load older events" }));
-    await waitFor(() => expect(api.listAuditEvents).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.listAuditEvents).toHaveBeenCalledTimes(3));
   });
 });

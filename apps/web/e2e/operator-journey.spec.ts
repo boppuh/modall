@@ -78,7 +78,7 @@ async function mockControlPlane(route: Route) {
   } else if (key === "GET /v1/capabilities") {
     body = { items: [capability], page: { next_cursor: null } };
   } else if (key === `GET /v1/capabilities/${capabilityId}`) {
-    body = { ...capability, versions: [{ id: versionId, capability_id: capabilityId, sequence: 1, display_name: "Search", description: "Search public records", input_schema: { type: "object", properties: { query: { type: "string" } } }, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false };
+    body = { ...capability, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Search", description: "Search public records", input_schema: { type: "object", properties: { query: { type: "string" } } }, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false };
   } else if (key === "GET /v1/runs") {
     body = { items: [run], page: { next_cursor: null } };
   } else if (key === "POST /v1/runs") {

@@ -17,6 +17,7 @@ export type Run = Schemas["RunResponse"];
 export type RunEvent = Schemas["RunEventResponse"];
 export type RunPreflight = Schemas["RunPreflightResponse"];
 export type AuditEvent = Schemas["AuditEventResponse"];
+export type AuditFilters = Omit<NonNullable<paths["/v1/audit-events"]["get"]["parameters"]["query"]>, "cursor" | "limit">;
 export type EffectiveSession = Schemas["SessionResponse"];
 
 export class ApiFailure extends Error {
@@ -91,7 +92,7 @@ export interface ControlPlane {
   preflight(versionId: string, argumentsValue: Record<string, unknown>): Promise<RunPreflight>;
   createRun(preflight: RunPreflight, argumentsValue: Record<string, unknown>, idempotencyKey: string): Promise<Run>;
   cancelRun(id: string, idempotencyKey: string): Promise<Run>;
-  listAuditEvents(cursor?: string): Promise<{ items: AuditEvent[]; nextCursor?: string }>;
+  listAuditEvents(filters?: AuditFilters, cursor?: string): Promise<{ items: AuditEvent[]; nextCursor?: string }>;
 }
 
 class GeneratedControlPlane implements ControlPlane {
@@ -248,9 +249,9 @@ class GeneratedControlPlane implements ControlPlane {
     );
   }
 
-  async listAuditEvents(cursor?: string): Promise<{ items: AuditEvent[]; nextCursor?: string }> {
+  async listAuditEvents(filters: AuditFilters = {}, cursor?: string): Promise<{ items: AuditEvent[]; nextCursor?: string }> {
     const page = await unwrap(this.client.GET("/v1/audit-events", {
-      params: { query: { limit: 100, cursor } },
+      params: { query: { limit: 100, cursor, ...filters } },
     }));
     return { items: page.items, ...(page.page.next_cursor ? { nextCursor: page.page.next_cursor } : {}) };
   }

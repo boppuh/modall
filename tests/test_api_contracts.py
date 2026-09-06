@@ -35,6 +35,7 @@ from modall.persistence.models import (
     DiscoveryPayload,
     DiscoverySnapshot,
     DiscoverySnapshotCapability,
+    McpToolBinding,
     RegistryEntry,
     RegistryEntryVersion,
     ServerConnectionVersion,
@@ -360,6 +361,7 @@ def test_registry_capability_and_audit_read_contracts() -> None:
                 },
             )
             connection_id = UUID(connection.json()["id"])
+            connection_version_id = UUID(connection.json()["pending_version_id"])
             capability_id = uuid4()
             capability_version_id = uuid4()
             registry_id = uuid4()
@@ -389,6 +391,15 @@ def test_registry_capability_and_audit_read_contracts() -> None:
                             output_schema=None,
                             metadata_digest="a" * 64,
                             schema_supported=True,
+                        ),
+                        McpToolBinding(
+                            capability_version_id=capability_version_id,
+                            capability_id=capability_id,
+                            workspace_id=workspace_id,
+                            connection_id=connection_id,
+                            connection_version_id=connection_version_id,
+                            tool_name="test",
+                            protocol_revision="2025-06-18",
                         ),
                         RegistryEntry(
                             id=registry_id,
@@ -424,12 +435,16 @@ def test_registry_capability_and_audit_read_contracts() -> None:
             capability = await client.get(f"/v1/capabilities/{capability_id}", headers=headers)
             assert capability.status_code == 200
             assert capability.json()["versions"][0]["display_name"] == "Test tool"
+            assert capability.json()["versions"][0]["connection_version_id"] == str(
+                connection_version_id
+            )
 
             version = await client.get(
                 f"/v1/capability-versions/{capability_version_id}", headers=headers
             )
             assert version.status_code == 200
             assert version.json()["input_schema"] == {"type": "object"}
+            assert version.json()["connection_version_id"] == str(connection_version_id)
 
             disabled = await client.post(
                 f"/v1/capability-versions/{capability_version_id}/disable",

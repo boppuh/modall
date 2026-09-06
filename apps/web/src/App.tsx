@@ -1,9 +1,10 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   ApiFailure,
   createControlPlane,
+  type AuditFilters,
   type CapabilityStatus,
   type ControlPlane,
   type RegistrySearch,
@@ -22,6 +23,12 @@ type Role = "admin" | "operator" | "viewer";
 type CapabilityFilter = CapabilityStatus | "all";
 type ApiFactory = (session: WorkspaceSession) => ControlPlane;
 type QueryScope = readonly ["workspace", string, string];
+type RunDraft = {
+  selectedVersionId: string;
+  argumentsText: string;
+  pendingArguments: Record<string, unknown> | null;
+  preflight: RunPreflight | null;
+};
 
 const navItems: { id: View; label: string; marker: string }[] = [
   { id: "overview", label: "Overview", marker: "01" },
@@ -43,6 +50,12 @@ function formatTime(value: string | null): string {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function localDateTimeValue(value: string | null | undefined): string {
+  if (!value) return "";
+  const date = new Date(value);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
 function shortId(value: string): string {
@@ -618,16 +631,20 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter 
                   <header><div><span>Version {version.sequence}</span><h3>{version.display_name}</h3></div>{index === 0 && <small>Latest observed</small>}</header>
                   <p>{version.description ?? "No description supplied."}</p>
                   <div className="digest-line"><span>metadata</span><code>{version.metadata_digest}</code></div>
+                  <div className="digest-line"><span>connection version</span><code>{version.connection_version_id}</code></div>
                   <details><summary>Input schema</summary><pre>{JSON.stringify(version.input_schema, null, 2)}</pre></details>
                   {version.output_schema && <details><summary>Output schema</summary><pre>{JSON.stringify(version.output_schema, null, 2)}</pre></details>}
-                  <button
+                  {pending ? <div className="action-strip">
+                    <button className="danger-action" type="button" disabled={!canOperate(role) || action.isPending} onClick={() => action.mutate({ versionId: version.id, verb: "disable", key: keyFor(`capability:${version.id}:disable`) })}>Reject version</button>
+                    <button className="secondary-action" type="button" disabled={!canOperate(role) || !version.schema_supported || action.isPending} onClick={() => action.mutate({ versionId: version.id, verb: "enable", key: keyFor(`capability:${version.id}:enable`) })}>Enable exact version</button>
+                  </div> : <button
                     className={enabled ? "danger-action" : "secondary-action"}
                     type="button"
                     disabled={!canOperate(role) || !actionable || !version.schema_supported || action.isPending}
                     onClick={() => action.mutate({ versionId: version.id, verb, key: keyFor(`capability:${version.id}:${verb}`) })}
                   >
-                    {!actionable ? "Historical version" : enabled ? "Disable version" : reenable ? "Re-enable version" : "Enable exact version"}
-                  </button>
+                    {!actionable ? "Historical version" : enabled ? "Disable version" : "Re-enable version"}
+                  </button>}
                 </article>
               );})}
               {detail.data.versions_truncated && <p className="field-help">Older versions are retained but omitted from this response.</p>}
@@ -639,10 +656,9 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter 
   );
 }
 
-function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; select: (id: string | null) => void }) {
+function Runs({ api, scope, role, selectedId, select, runKeys, draft, setDraft }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; select: (id: string | null) => void; runKeys: { current: Map<string, string> }; draft: RunDraft; setDraft: Dispatch<SetStateAction<RunDraft>> }) {
   const queryClient = useQueryClient();
-  const [selectedVersionId, setSelectedVersionId] = useState("");
-  const runKeys = useRef(new Map<string, string>());
+  const { selectedVersionId, argumentsText, pendingArguments, preflight } = draft;
   const cancelKeys = useRef(new Map<string, string>());
   const finalEventFetchRun = useRef<string | null>(null);
   const runsKey = useMemo(() => queryKey(scope, "runs"), [scope]);
@@ -654,10 +670,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
   });
   const capabilities = useQuery({ queryKey: queryKey(scope, "capabilities"), queryFn: () => api.listCapabilities() });
   const connections = useQuery({ queryKey: queryKey(scope, "connections"), queryFn: () => api.listConnections() });
-  const [argumentsText, setArgumentsText] = useState("{\n  \"query\": \"status\"\n}");
   const [argumentsError, setArgumentsError] = useState("");
-  const [pendingArguments, setPendingArguments] = useState<Record<string, unknown> | null>(null);
-  const [preflight, setPreflight] = useState<RunPreflight | null>(null);
   const [confirmationClock, setConfirmationClock] = useState(() => Date.now());
   const runDetail = useQuery({
     queryKey: queryKey(scope, "run", selectedId),
@@ -707,7 +720,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
   }, [preflight]);
   const prepare = useMutation({
     mutationFn: ({ versionId, args }: { versionId: string; args: Record<string, unknown> }) => api.preflight(versionId, args),
-    onSuccess: (prepared) => { setConfirmationClock(Date.now()); setPreflight(prepared); },
+    onSuccess: (prepared) => { setConfirmationClock(Date.now()); setDraft((current) => ({ ...current, preflight: prepared })); },
   });
   const invoke = useMutation({
     mutationFn: ({ prepared, args }: { prepared: RunPreflight; args: Record<string, unknown> }) => {
@@ -719,14 +732,13 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
     onSuccess: async (run, variables) => {
       runKeys.current.delete(`${variables.prepared.capability_version_id}:${variables.prepared.argument_digest}`);
       select(run.id);
-      setPreflight(null);
-      setPendingArguments(null);
+      setDraft((current) => ({ ...current, preflight: null, pendingArguments: null }));
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "runs") });
     },
     onError: (error, variables) => {
       if (error instanceof ApiFailure && ["invalid_confirmation", "confirmation_expired", "confirmation_replayed"].includes(error.code)) {
         runKeys.current.delete(`${variables.prepared.capability_version_id}:${variables.prepared.argument_digest}`);
-        setPreflight(null); setPendingArguments(null);
+        setDraft((current) => ({ ...current, preflight: null, pendingArguments: null }));
       }
     },
   });
@@ -752,7 +764,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
   const confirmationExpired = preflight ? Date.parse(preflight.expires_at) <= confirmationClock : false;
 
   function invalidatePreparedRun() {
-    setPreflight(null); setPendingArguments(null); prepare.reset(); invoke.reset();
+    setDraft((current) => ({ ...current, preflight: null, pendingArguments: null })); prepare.reset(); invoke.reset();
   }
 
   function submitPreflight(event: FormEvent<HTMLFormElement>) {
@@ -766,7 +778,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
       const parsed = JSON.parse(argumentsText) as unknown;
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error();
       setArgumentsError("");
-      setPendingArguments(parsed as Record<string, unknown>);
+      setDraft((current) => ({ ...current, pendingArguments: parsed as Record<string, unknown> }));
       prepare.mutate({ versionId, args: parsed as Record<string, unknown> });
     } catch {
       setArgumentsError("Arguments must be a JSON object.");
@@ -780,8 +792,8 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
         <div className="section-block playground">
           <div className="section-heading"><div><span className="index">Playground / 01</span><h2>Prepare a run</h2></div></div>
           <form className="stacked-form" onSubmit={submitPreflight} noValidate>
-            <label>Enabled capability<select name="capability" required value={selectedVersionId} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(); setSelectedVersionId(event.target.value); }}><option value="" disabled>Select a capability</option>{enabledCapabilities.map((item) => <option key={item.id} value={item.enabled_version_id ?? ""}>{item.tool_identity} — {connectionNames.get(item.connection_id) ?? shortId(item.connection_id)}</option>)}</select></label>
-            <label>Arguments<textarea value={argumentsText} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(); setArgumentsText(event.target.value); }} rows={8} spellCheck={false} aria-invalid={Boolean(argumentsError)} /></label>
+            <label>Enabled capability<select name="capability" required value={selectedVersionId} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(); setDraft((current) => ({ ...current, selectedVersionId: event.target.value })); }}><option value="" disabled>Select a capability</option>{enabledCapabilities.map((item) => <option key={item.id} value={item.enabled_version_id ?? ""}>{item.tool_identity} — {connectionNames.get(item.connection_id) ?? shortId(item.connection_id)}</option>)}</select></label>
+            <label>Arguments<textarea value={argumentsText} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(); setDraft((current) => ({ ...current, argumentsText: event.target.value })); }} rows={8} spellCheck={false} aria-invalid={Boolean(argumentsError)} /></label>
             <p className="incident-note">Only public, synthetic, or explicitly non-confidential data.</p>
             {argumentsError && <p className="field-error" role="alert">{argumentsError}</p>}
             {prepare.isError && <p className="field-error" role="alert">{failureMessage(prepare.error)}</p>}
@@ -836,9 +848,11 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
 }
 
 function Audit({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
+  const [draft, setDraft] = useState<AuditFilters>({});
+  const [filters, setFilters] = useState<AuditFilters>({});
   const events = useInfiniteQuery({
-    queryKey: queryKey(scope, "audit-events"),
-    queryFn: ({ pageParam }) => api.listAuditEvents(pageParam),
+    queryKey: queryKey(scope, "audit-events", filters),
+    queryFn: ({ pageParam }) => api.listAuditEvents(filters, pageParam),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.nextCursor,
   });
@@ -847,6 +861,16 @@ function Audit({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
     <header className="page-heading"><div><p className="kicker">Workspace accountability</p><h1>Audit ledger</h1><p>Payload-free mutation history, actors, outcomes, and correlation lineage.</p></div></header>
     <section className="section-block">
       <div className="section-heading"><div><span className="index">Append-only history / 01</span><h2>Recorded events</h2></div></div>
+      <form className="audit-filters" onSubmit={(event) => { event.preventDefault(); setFilters(draft); }}>
+        <label>Resource type<select value={draft.resource_type ?? ""} onChange={(event) => setDraft({ ...draft, resource_type: event.target.value as AuditFilters["resource_type"] || undefined })}><option value="">Any</option>{["workspace", "membership", "secret_binding", "server_connection", "capability", "registry_entry", "run"].map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
+        <label>Resource ID<input value={draft.resource_id ?? ""} onChange={(event) => setDraft({ ...draft, resource_id: event.target.value || undefined })} placeholder="UUID" /></label>
+        <label>Actor ID<input value={draft.actor_id ?? ""} onChange={(event) => setDraft({ ...draft, actor_id: event.target.value || undefined })} placeholder="UUID" /></label>
+        <label>Action<select value={draft.action ?? ""} onChange={(event) => setDraft({ ...draft, action: event.target.value as AuditFilters["action"] || undefined })}><option value="">Any</option>{["workspace.created", "membership.changed", "secret_binding.created", "connection.created", "connection.version_appended", "connection.verified", "connection.disabled", "connection.enabled", "capability.version_recorded", "capability.enabled", "capability.disabled", "registry_entry.imported", "run.created", "run.cancellation_requested", "run.cancelled"].map((value) => <option key={value} value={value}>{value.replaceAll(".", " ")}</option>)}</select></label>
+        <label>Outcome<select value={draft.outcome ?? ""} onChange={(event) => setDraft({ ...draft, outcome: event.target.value as AuditFilters["outcome"] || undefined })}><option value="">Any</option><option value="succeeded">Succeeded</option><option value="denied">Denied</option><option value="failed">Failed</option></select></label>
+        <label>From<input type="datetime-local" value={localDateTimeValue(draft.occurred_after)} onChange={(event) => setDraft({ ...draft, occurred_after: event.target.value ? new Date(event.target.value).toISOString() : undefined })} /></label>
+        <label>Before<input type="datetime-local" value={localDateTimeValue(draft.occurred_before)} onChange={(event) => setDraft({ ...draft, occurred_before: event.target.value ? new Date(event.target.value).toISOString() : undefined })} /></label>
+        <div className="action-strip"><button type="button" onClick={() => { setDraft({}); setFilters({}); }}>Clear</button><button className="secondary-action" type="submit">Apply filters</button></div>
+      </form>
       {events.isPending ? <LoadingState label="Loading audit events" /> : events.isError ? <QueryFailure error={events.error} retry={() => void events.refetch()} /> : rows.length === 0 ? <EmptyState title="No audit events" copy="Authorized mutations will appear here." /> : <><ol className="timeline">{rows.map((event) => <li key={event.id}><span aria-hidden="true" /><div><strong>{event.action.replaceAll(".", " ")}</strong><small>{formatTime(event.occurred_at)} · {event.outcome}</small><code>{event.resource_type} / {shortId(event.resource_id)}</code><small>Actor {shortId(event.actor_user_id)} · Correlation {shortId(event.correlation_id)}</small></div></li>)}</ol>{events.hasNextPage && <button className="secondary-action" disabled={events.isFetchingNextPage} type="button" onClick={() => void events.fetchNextPage()}>{events.isFetchingNextPage ? "Loading…" : "Load older events"}</button>}</>}
     </section>
   </div>;
@@ -854,6 +878,8 @@ function Audit({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
 
 function WorkspaceApp({ session, api, onLogout }: { session: WorkspaceSession; api: ControlPlane; onLogout: () => void }) {
   const scope: QueryScope = ["workspace", session.identityId, session.workspaceId];
+  const runKeys = useRef(new Map<string, string>());
+  const [runDraft, setRunDraft] = useState<RunDraft>({ selectedVersionId: "", argumentsText: "{\n  \"query\": \"status\"\n}", pendingArguments: null, preflight: null });
   const access = useQuery({ queryKey: queryKey(scope, "session"), queryFn: () => api.currentSession() });
   const [route, setRoute] = useState<Route>(() => readRoute());
   useEffect(() => {
@@ -885,7 +911,7 @@ function WorkspaceApp({ session, api, onLogout }: { session: WorkspaceSession; a
         {view === "overview" && <Overview api={api} open={(next, filter) => navigate(next, null, filter)} scope={scope} />}
         {view === "registry" && <Registry api={api} scope={scope} role={role} selectedId={route.selectedId} select={(id) => navigate("registry", id)} />}
         {view === "capabilities" && <Capabilities api={api} scope={scope} role={role} selectedId={route.selectedId} filter={capabilityFilterFromLocation()} select={(id) => navigate("capabilities", id, capabilityFilterFromLocation())} setFilter={(filter) => navigate("capabilities", null, filter)} />}
-        {view === "runs" && <Runs api={api} scope={scope} role={role} selectedId={route.selectedId} select={(id) => navigate("runs", id)} />}
+        {view === "runs" && <Runs api={api} scope={scope} role={role} selectedId={route.selectedId} select={(id) => navigate("runs", id)} runKeys={runKeys} draft={runDraft} setDraft={setRunDraft} />}
         {view === "audit" && canOperate(role) && <Audit api={api} scope={scope} />}
       </main>
       <footer><span>Modall Registry Alpha</span><span>Exact lineage · bounded retention · fail closed</span></footer>

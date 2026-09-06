@@ -545,6 +545,11 @@ export interface components {
              */
             capability_id: string;
             /**
+             * Connection Version Id
+             * Format: uuid
+             */
+            connection_version_id: string;
+            /**
              * Created At
              * Format: date-time
              */

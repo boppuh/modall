@@ -150,7 +150,14 @@ describe("control-plane operations", () => {
     const preflight = await api.preflight(otherId, { query: "status" });
     expect((await api.createRun(preflight, { query: "status" }, "run-key")).id).toBe(id);
     expect((await api.cancelRun(id, "cancel-key")).id).toBe(id);
-    expect(await api.listAuditEvents()).toEqual({ items: [] });
+    expect(await api.listAuditEvents({ resource_type: "run", resource_id: id, actor_id: otherId, action: "run.created", outcome: "succeeded", occurred_after: timestamp, occurred_before: "2026-09-07T12:00:00Z" })).toEqual({ items: [] });
+    const auditQuery = new URL(requests.at(-1)?.url ?? "http://localhost").searchParams;
+    expect(auditQuery.get("resource_type")).toBe("run");
+    expect(auditQuery.get("resource_id")).toBe(id);
+    expect(auditQuery.get("actor_id")).toBe(otherId);
+    expect(auditQuery.get("action")).toBe("run.created");
+    expect(auditQuery.get("outcome")).toBe("succeeded");
+    expect(auditQuery.get("occurred_after")).toBe(timestamp);
 
     expect(requests.every((request) => request.headers.get("X-Workspace-ID") === id)).toBe(true);
     expect(
