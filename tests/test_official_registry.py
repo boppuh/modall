@@ -1,13 +1,15 @@
 import asyncio
+import gc
 import json
 import logging
 import multiprocessing
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
+from weakref import ReferenceType, ref
 
 import httpx
 import pytest
@@ -904,6 +906,33 @@ def test_scanner_semaphore_supports_uvloop() -> None:
         loop.close()
 
 
+def test_contended_scanner_semaphore_does_not_retain_closed_loop() -> None:
+    def exercise_loop() -> ReferenceType[asyncio.AbstractEventLoop]:
+        loop = asyncio.new_event_loop()
+
+        async def scenario() -> None:
+            semaphore = official_registry._scanner_process_semaphore()
+            for _ in range(4):
+                await semaphore.acquire()
+            waiter = asyncio.create_task(semaphore.acquire())
+            await asyncio.sleep(0)
+            assert not waiter.done()
+            waiter.cancel()
+            with suppress(asyncio.CancelledError):
+                await waiter
+            for _ in range(4):
+                semaphore.release()
+
+        loop.run_until_complete(scenario())
+        loop_reference = ref(loop)
+        loop.close()
+        return loop_reference
+
+    loop_reference = exercise_loop()
+    gc.collect()
+    assert loop_reference() is None
+
+
 def test_scanning_runs_off_loop_under_the_configured_deadline() -> None:
     async def scenario() -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -949,6 +978,38 @@ def test_service_deadline_is_detached_from_scanned_metadata() -> None:
         assert raised.value.code == OfficialRegistryFailureCode.TIMEOUT
         assert raised.value.__cause__ is None
         assert raised.value.__context__ is None
+
+    asyncio.run(scenario())
+
+
+def test_service_screens_each_search_only_once() -> None:
+    class CountingAdapter(OfficialRegistryAdapter):
+        def __init__(self, *, transport: httpx.AsyncBaseTransport) -> None:
+            super().__init__(transport=transport)
+            self.screen_calls = 0
+
+        async def screen_query(self, query: str) -> str:
+            self.screen_calls += 1
+            return await super().screen_query(query)
+
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={"servers": [], "metadata": {"count": 0}},
+                request=request,
+            )
+
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="single-query-screen")
+            adapter = CountingAdapter(transport=httpx.MockTransport(handler))
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                await OfficialRegistryService(session, adapter).search(
+                    context=context, query="weather"
+                )
+            assert adapter.screen_calls == 1
 
     asyncio.run(scenario())
 

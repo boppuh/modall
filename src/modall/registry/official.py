@@ -19,7 +19,7 @@ from threading import Lock
 from typing import cast
 from urllib.parse import unquote
 from uuid import UUID, uuid4
-from weakref import WeakKeyDictionary
+from weakref import ReferenceType, WeakKeyDictionary, ref
 
 import httpx
 from sqlalchemy import delete, func, or_, select
@@ -73,18 +73,19 @@ _SCANNER_PROCESS_CONTEXT = multiprocessing.get_context("spawn")
 _SCANNER_PROCESS_LIMIT = 4
 _CACHE_CLEANUP_BATCH_SIZE = 500
 _SCANNER_SEMAPHORE_LOCK = Lock()
-_SCANNER_SEMAPHORES: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
-    WeakKeyDictionary()
-)
+_SCANNER_SEMAPHORES: WeakKeyDictionary[
+    asyncio.AbstractEventLoop, ReferenceType[asyncio.Semaphore]
+] = WeakKeyDictionary()
 
 
 def _scanner_process_semaphore() -> asyncio.Semaphore:
     loop = asyncio.get_running_loop()
     with _SCANNER_SEMAPHORE_LOCK:
-        semaphore = _SCANNER_SEMAPHORES.get(loop)
+        semaphore_ref = _SCANNER_SEMAPHORES.get(loop)
+        semaphore = None if semaphore_ref is None else semaphore_ref()
         if semaphore is None:
             semaphore = asyncio.Semaphore(_SCANNER_PROCESS_LIMIT)
-            _SCANNER_SEMAPHORES[loop] = semaphore
+            _SCANNER_SEMAPHORES[loop] = ref(semaphore)
         return semaphore
 
 
@@ -386,6 +387,15 @@ class OfficialRegistryAdapter:
         return await _screen_query(query, self._limits, self._query_scanner)
 
     async def search(self, query: str) -> tuple[OfficialRegistryItem, ...]:
+        try:
+            async with asyncio.timeout(self._limits.total_timeout_seconds):
+                normalized_query = await self.screen_query(query)
+                return await self._search_screened(normalized_query)
+        except TimeoutError:
+            pass
+        raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT)
+
+    async def _search_screened(self, query: str) -> tuple[OfficialRegistryItem, ...]:
         transport = None if self._transport is None else _BorrowedAsyncTransport(self._transport)
         async with httpx.AsyncClient(
             transport=transport,
@@ -407,7 +417,6 @@ class OfficialRegistryAdapter:
         failure_code = OfficialRegistryFailureCode.RESPONSE_LIMIT
         try:
             async with asyncio.timeout(self._limits.total_timeout_seconds):
-                query = await self.screen_query(query)
                 for _ in range(self._limits.max_pages):
                     params: dict[str, str | int] = {
                         "search": query,
@@ -681,7 +690,7 @@ class OfficialRegistryService:
             if rejected_cache is not None:
                 await self._purge_rejected_cache(context=context, cache=rejected_cache)
 
-        items = await self._adapter.search(normalized_query)
+        items = await self._adapter._search_screened(normalized_query)
         normalized_results = cast(
             list[dict[str, object]],
             json.loads(_canonical_json([item.normalized_metadata for item in items])),
