@@ -32,13 +32,16 @@ const capability = {
 };
 const run = {
   id: runId,
+  actor_user_id: connectionId,
   capability_id: capabilityId,
   capability_version_id: versionId,
   connection_id: connectionId,
   connection_version_id: versionId,
   status: "succeeded",
   arguments: { query: "status" },
+  arguments_expires_at: new Date(Date.now() + 60_000).toISOString(),
   result: { matches: 17 },
+  result_expires_at: new Date(Date.now() + 60_000).toISOString(),
   safe_error_code: null,
   cancellation_requested: false,
   deadline: "2026-09-06T12:05:00Z",

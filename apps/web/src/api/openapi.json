@@ -1224,6 +1224,11 @@
       },
       "RunResponse": {
         "properties": {
+          "actor_user_id": {
+            "format": "uuid",
+            "title": "Actor User Id",
+            "type": "string"
+          },
           "arguments": {
             "anyOf": [
               {
@@ -1235,6 +1240,11 @@
               }
             ],
             "title": "Arguments"
+          },
+          "arguments_expires_at": {
+            "format": "date-time",
+            "title": "Arguments Expires At",
+            "type": "string"
           },
           "cancellation_requested": {
             "title": "Cancellation Requested",
@@ -1287,6 +1297,18 @@
             ],
             "title": "Result"
           },
+          "result_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Expires At"
+          },
           "safe_error_code": {
             "anyOf": [
               {
@@ -1322,6 +1344,7 @@
         },
         "required": [
           "id",
+          "actor_user_id",
           "capability_id",
           "capability_version_id",
           "connection_id",
@@ -1330,6 +1353,8 @@
           "arguments",
           "result",
           "safe_error_code",
+          "arguments_expires_at",
+          "result_expires_at",
           "cancellation_requested",
           "deadline",
           "created_at",

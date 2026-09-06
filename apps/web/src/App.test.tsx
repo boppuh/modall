@@ -40,13 +40,16 @@ const capability: Capability = {
 
 const run: Run = {
   id: runId,
+  actor_user_id: connectionId,
   capability_id: capabilityId,
   capability_version_id: versionId,
   connection_id: connectionId,
   connection_version_id: versionId,
   status: "running",
   arguments: { query: "status" },
+  arguments_expires_at: new Date(Date.now() + 60_000).toISOString(),
   result: null,
+  result_expires_at: null,
   safe_error_code: null,
   cancellation_requested: false,
   deadline: "2026-09-06T12:05:00Z",
@@ -249,6 +252,7 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Execution timeline" })).toBeTruthy();
     expect(screen.getByText("admitted")).toBeTruthy();
+    expect(screen.getByText("Initiating actor").parentElement?.textContent).toContain("22222222");
     fireEvent.click(screen.getByRole("button", { name: "Request cancellation" }));
     await waitFor(() => expect(api.cancelRun).toHaveBeenCalledWith(runId, expect.any(String)));
   });
@@ -302,6 +306,33 @@ describe("App", () => {
     const expired = await screen.findByRole("button", { name: "Confirmation expired" });
     expect(expired).toHaveProperty("disabled", true);
     expect(screen.getByRole("alert").textContent).toContain("confirmation expired");
+  });
+
+  it("retries pinned endpoint resolution before confirmation expires", async () => {
+    const recovered = { ...connection, versions: [{ id: versionId, sequence: 1, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http", created_at: timestamp }], versions_truncated: false };
+    const getConnection = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(recovered);
+    const api = fakeApi({ getConnection });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
+    await screen.findByRole("option", { name: /tools\/search/ });
+    fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
+    fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    const confirm = await screen.findByRole("button", { name: "Confirm and run" });
+    await waitFor(() => expect(confirm).toHaveProperty("disabled", false));
+    expect(getConnection).toHaveBeenCalledTimes(2);
+  });
+
+  it("evicts selected terminal content at its retention deadline", async () => {
+    const expiresAt = new Date(Date.now() + 1500).toISOString();
+    const retained = { ...run, status: "succeeded" as const, result: { matches: 17 }, result_expires_at: expiresAt, arguments_expires_at: expiresAt, terminal_at: timestamp };
+    const expired = { ...retained, arguments: null, result: null, result_expires_at: null };
+    const getRun = vi.fn().mockResolvedValueOnce(retained).mockResolvedValue(expired);
+    window.history.replaceState({}, "", `/runs/${runId}`);
+    renderApp(fakeApi({ listRuns: vi.fn().mockResolvedValue([retained]), getRun }));
+    expect(await screen.findByText(/"matches": 17/)).toBeTruthy();
+    await waitFor(() => expect(getRun).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    await waitFor(() => expect(screen.queryByText(/"matches": 17/)).toBeNull());
   });
 
   it("renders useful empty and failure states", async () => {

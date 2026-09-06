@@ -919,10 +919,20 @@ export interface components {
         };
         /** RunResponse */
         RunResponse: {
+            /**
+             * Actor User Id
+             * Format: uuid
+             */
+            actor_user_id: string;
             /** Arguments */
             arguments: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * Arguments Expires At
+             * Format: date-time
+             */
+            arguments_expires_at: string;
             /** Cancellation Requested */
             cancellation_requested: boolean;
             /**
@@ -964,6 +974,8 @@ export interface components {
             result: {
                 [key: string]: unknown;
             } | null;
+            /** Result Expires At */
+            result_expires_at: string | null;
             /** Safe Error Code */
             safe_error_code: string | null;
             /** Status */

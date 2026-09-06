@@ -724,6 +724,9 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             )
             assert created.status_code == 201
             assert created.json()["status"] == "queued"
+            assert created.json()["actor_user_id"]
+            assert created.json()["arguments_expires_at"]
+            assert created.json()["result_expires_at"] is None
             run_id = created.json()["id"]
 
             result_queries = 0

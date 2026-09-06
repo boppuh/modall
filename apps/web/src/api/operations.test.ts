@@ -30,13 +30,16 @@ const capability = {
 };
 const run = {
   id,
+  actor_user_id: otherId,
   capability_id: id,
   capability_version_id: otherId,
   connection_id: id,
   connection_version_id: otherId,
   status: "succeeded",
   arguments: {},
+  arguments_expires_at: timestamp,
   result: {},
+  result_expires_at: timestamp,
   safe_error_code: null,
   cancellation_requested: false,
   deadline: timestamp,

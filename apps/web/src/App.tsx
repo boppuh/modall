@@ -554,7 +554,11 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter 
   const queryClient = useQueryClient();
   const mutationKeys = useRef(new Map<string, string>());
   const keyFor = (operation: string) => mutationKeys.current.get(operation) ?? (() => { const key = mutationId(); mutationKeys.current.set(operation, key); return key; })();
-  const capabilities = useQuery({ queryKey: queryKey(scope, "capabilities", filter), queryFn: () => api.listCapabilities(filter === "all" ? undefined : filter) });
+  const capabilities = useQuery({
+    queryKey: queryKey(scope, "capabilities", filter),
+    queryFn: () => api.listCapabilities(filter === "all" ? undefined : filter),
+    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
+  });
   const connections = useQuery({ queryKey: queryKey(scope, "connections"), queryFn: () => api.listConnections() });
   const detail = useQuery({
     queryKey: queryKey(scope, "capability", selectedId),
@@ -681,6 +685,21 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
     void queryClient.refetchQueries({ queryKey: eventsKey, exact: true });
   }, [eventsKey, queryClient, runDetail.data]);
   useEffect(() => {
+    const current = runDetail.data;
+    if (!current || !terminal(current.status)) return;
+    const expiries = [
+      current.arguments ? current.arguments_expires_at : null,
+      current.result ? current.result_expires_at : null,
+    ].filter((value): value is string => value !== null);
+    if (expiries.length === 0) return;
+    const nextExpiry = Math.min(...expiries.map((value) => Date.parse(value)));
+    const timer = window.setTimeout(() => {
+      void queryClient.refetchQueries({ queryKey: queryKey(scope, "run", current.id), exact: true });
+      void queryClient.refetchQueries({ queryKey: eventsKey, exact: true });
+    }, Math.max(0, nextExpiry - Date.now()) + 1);
+    return () => window.clearTimeout(timer);
+  }, [eventsKey, queryClient, runDetail.data, scope]);
+  useEffect(() => {
     if (!preflight) return;
     const delay = Math.max(0, Date.parse(preflight.expires_at) - Date.now());
     const timer = window.setTimeout(() => setConfirmationClock(Date.now()), delay + 1);
@@ -775,7 +794,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
         <div className="section-block run-inventory">
           <div className="section-heading"><div><span className="index">Ledger / 02</span><h2>Recent runs</h2></div></div>
           {runs.isPending ? <LoadingState label="Loading runs" /> : runs.isError ? <QueryFailure error={runs.error} retry={() => void runs.refetch()} /> : runs.data.length === 0 ? <EmptyState title="No runs retained" copy="Completed and in-flight work will appear here." /> : (
-            <ul className="select-list">{orderedRuns.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{capabilityNames.get(run.capability_id) ?? shortId(run.capability_id)}</strong><small>{connectionNames.get(run.connection_id) ?? shortId(run.connection_id)} · {shortId(run.id)} · {formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
+            <ul className="select-list">{orderedRuns.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{capabilityNames.get(run.capability_id) ?? shortId(run.capability_id)}</strong><small>{connectionNames.get(run.connection_id) ?? shortId(run.connection_id)} · actor {shortId(run.actor_user_id)} · {shortId(run.id)} · {formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
           )}
           {(runs.data?.length ?? 0) === 100 && <p className="field-help">Showing the 100 most recent runs.</p>}
         </div>
@@ -785,7 +804,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
           <div><span className="index">One-time confirmation</span><h2 id="confirmation-title">Confirm exact invocation</h2><p>This token expires {formatTime(preflight.expires_at)} and cannot move to another request.</p></div>
           <p className="incident-note">Only public, synthetic, or explicitly non-confidential data.</p>
           <dl><div><dt>Capability version</dt><dd><code>{shortId(preflight.capability_version_id)}</code></dd></div><div><dt>Pinned endpoint</dt><dd><code>{confirmedEndpoint ?? (confirmationConnection.isPending ? "Resolving…" : "Unavailable")}</code></dd></div><div><dt>Argument digest</dt><dd><code>{shortId(preflight.argument_digest)}</code></dd></div></dl>
-          {confirmationConnection.isError && <p className="field-error" role="alert">{failureMessage(confirmationConnection.error)}</p>}
+          {confirmationConnection.isError && <QueryFailure error={confirmationConnection.error} retry={() => void confirmationConnection.refetch()} />}
           {!confirmationConnection.isPending && !confirmationConnection.isError && !confirmedEndpoint && <p className="field-error" role="alert">The pinned connection version is unavailable. Run preflight again.</p>}
           {confirmationExpired && <p className="field-error" role="alert">This confirmation expired. Go back and run preflight again.</p>}
           <details open><summary>Exact prepared arguments</summary><pre>{JSON.stringify(pendingArguments, null, 2)}</pre></details>
@@ -798,7 +817,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
         {selectedId === null ? <EmptyState title="Select a run" copy="Inspect lineage, safe output, and status events." /> : runDetail.isPending || events.isPending ? <LoadingState label="Loading run timeline" /> : runDetail.isError ? <QueryFailure error={runDetail.error} retry={() => void runDetail.refetch()} /> : events.isError ? <QueryFailure error={events.error} retry={() => void events.refetch()} /> : (
           <>
             <div className="detail-title"><div><span className="index">Run {shortId(runDetail.data.id)}</span><h2>Execution timeline</h2></div><StatusMark value={runDetail.data.status} /></div>
-            <dl className="detail-facts"><div><dt>Capability</dt><dd>{capabilityNames.get(runDetail.data.capability_id) ?? shortId(runDetail.data.capability_id)} · {shortId(runDetail.data.capability_version_id)}</dd></div><div><dt>Source connection</dt><dd>{connectionNames.get(runDetail.data.connection_id) ?? shortId(runDetail.data.connection_id)}</dd></div><div><dt>Connection version</dt><dd>{shortId(runDetail.data.connection_version_id)}</dd></div><div><dt>Deadline</dt><dd>{formatTime(runDetail.data.deadline)}</dd></div><div><dt>Updated</dt><dd>{formatTime(runDetail.data.updated_at)}</dd></div></dl>
+            <dl className="detail-facts"><div><dt>Capability</dt><dd>{capabilityNames.get(runDetail.data.capability_id) ?? shortId(runDetail.data.capability_id)} · {shortId(runDetail.data.capability_version_id)}</dd></div><div><dt>Source connection</dt><dd>{connectionNames.get(runDetail.data.connection_id) ?? shortId(runDetail.data.connection_id)}</dd></div><div><dt>Initiating actor</dt><dd>{shortId(runDetail.data.actor_user_id)}</dd></div><div><dt>Connection version</dt><dd>{shortId(runDetail.data.connection_version_id)}</dd></div><div><dt>Deadline</dt><dd>{formatTime(runDetail.data.deadline)}</dd></div><div><dt>Updated</dt><dd>{formatTime(runDetail.data.updated_at)}</dd></div></dl>
             {runDetail.data.cancellation_requested && !terminal(runDetail.data.status) && <p className="incident-note">Cancellation requested; waiting for the worker to reach a safe boundary.</p>}
             {canOperate(role) && !terminal(runDetail.data.status) && !runDetail.data.cancellation_requested && <button className="danger-action" disabled={cancel.isPending} type="button" onClick={() => { const key = cancelKeys.current.get(runDetail.data.id) ?? mutationId(); cancelKeys.current.set(runDetail.data.id, key); cancel.mutate({ id: runDetail.data.id, key }); }}>Request cancellation</button>}
             {cancel.isError && <p className="field-error" role="alert">{failureMessage(cancel.error)}</p>}

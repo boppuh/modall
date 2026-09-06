@@ -220,6 +220,7 @@ class RunPreflightResponse(BaseModel):
 
 class RunResponse(BaseModel):
     id: UUID
+    actor_user_id: UUID
     capability_id: UUID
     capability_version_id: UUID
     connection_id: UUID
@@ -228,6 +229,8 @@ class RunResponse(BaseModel):
     arguments: dict[str, object] | None
     result: dict[str, object] | None
     safe_error_code: str | None
+    arguments_expires_at: datetime
+    result_expires_at: datetime | None
     cancellation_requested: bool
     deadline: datetime
     created_at: datetime
@@ -808,8 +811,15 @@ def build_control_plane_router(
         statement: Select[Any] = select(Run).where(Run.workspace_id == state.context.workspace_id)
         if run_status is not None:
             statement = statement.where(Run.status == run_status)
-        statement = statement.order_by(Run.id.desc())
-        statement = _after_cursor(statement, Run.id, cursor)
+        statement = statement.order_by(Run.created_at.desc(), Run.id.desc())
+        if cursor is not None:
+            cursor_time, cursor_id = _decode_audit_cursor(cursor)
+            statement = statement.where(
+                or_(
+                    Run.created_at < cursor_time,
+                    and_(Run.created_at == cursor_time, Run.id < cursor_id),
+                )
+            )
         rows = list((await state.session.scalars(statement.limit(limit + 1))).all())
         page_runs = rows[:limit]
         results: dict[UUID, RunResult] = {}
@@ -828,7 +838,13 @@ def build_control_plane_router(
             }
         return RunPage(
             items=[_run_response_value(run, results.get(run.id)) for run in page_runs],
-            page=PageInfo(next_cursor=_next_cursor(rows, limit, lambda row: row.id)),
+            page=PageInfo(
+                next_cursor=(
+                    _encode_audit_cursor(page_runs[-1].created_at, page_runs[-1].id)
+                    if len(rows) > limit
+                    else None
+                )
+            ),
         )
 
     @router.get("/runs/{run_id}", response_model=RunResponse)
@@ -1171,6 +1187,7 @@ def _run_response_value(
     arguments = run.arguments if _utc(run.arguments_expires_at) > current else None
     return RunResponse(
         id=run.id,
+        actor_user_id=run.actor_user_id,
         capability_id=run.capability_id,
         capability_version_id=run.capability_version_id,
         connection_id=run.connection_id,
@@ -1179,6 +1196,8 @@ def _run_response_value(
         arguments=arguments,
         result=result.payload if result else None,
         safe_error_code=run.safe_error_code,
+        arguments_expires_at=run.arguments_expires_at,
+        result_expires_at=result.expires_at if result else None,
         cancellation_requested=run.cancellation_requested,
         deadline=run.deadline,
         created_at=run.created_at,
