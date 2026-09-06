@@ -14,6 +14,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import InstrumentedAttribute
 
+from modall.api.errors import InvalidRequest
 from modall.api.idempotency import idempotent_mutation
 from modall.audit.types import AuditAction, AuditOutcome, ResourceType
 from modall.execution.service import ExecutionService
@@ -442,18 +443,21 @@ def build_control_plane_router(
         body: ConnectionCreateRequest, state: State, idempotency_key: Idempotency
     ) -> ConnectionResponse:
         async def operation() -> ConnectionResponse:
-            connection = await ConnectionService(
-                state.session,
-                environment=environment,
-                allow_loopback_http=environment in {"local", "test"},
-            ).create(
-                context=state.context,
-                name=body.name,
-                endpoint_url=body.endpoint_url,
-                secret_binding_id=body.secret_binding_id,
-                policy_version=body.policy_version,
-                correlation_id=_correlation_id(state.session),
-            )
+            try:
+                connection = await ConnectionService(
+                    state.session,
+                    environment=environment,
+                    allow_loopback_http=environment in {"local", "test"},
+                ).create(
+                    context=state.context,
+                    name=body.name,
+                    endpoint_url=body.endpoint_url,
+                    secret_binding_id=body.secret_binding_id,
+                    policy_version=body.policy_version,
+                    correlation_id=_correlation_id(state.session),
+                )
+            except ValueError:
+                raise InvalidRequest("invalid connection configuration") from None
             return _connection(connection)
 
         return await mutate(
@@ -517,18 +521,21 @@ def build_control_plane_router(
         idempotency_key: Idempotency,
     ) -> ConnectionVersionResponse:
         async def operation() -> ConnectionVersionResponse:
-            version = await ConnectionService(
-                state.session,
-                environment=environment,
-                allow_loopback_http=environment in {"local", "test"},
-            ).append_version(
-                context=state.context,
-                connection_id=connection_id,
-                endpoint_url=body.endpoint_url,
-                secret_binding_id=body.secret_binding_id,
-                policy_version=body.policy_version,
-                correlation_id=_correlation_id(state.session),
-            )
+            try:
+                version = await ConnectionService(
+                    state.session,
+                    environment=environment,
+                    allow_loopback_http=environment in {"local", "test"},
+                ).append_version(
+                    context=state.context,
+                    connection_id=connection_id,
+                    endpoint_url=body.endpoint_url,
+                    secret_binding_id=body.secret_binding_id,
+                    policy_version=body.policy_version,
+                    correlation_id=_correlation_id(state.session),
+                )
+            except ValueError:
+                raise InvalidRequest("invalid connection configuration") from None
             return _connection_version(version)
 
         return await mutate(
@@ -918,7 +925,7 @@ def build_control_plane_router(
             and occurred_before is not None
             and occurred_after >= occurred_before
         ):
-            raise ValueError("invalid audit time range")
+            raise InvalidRequest("invalid audit time range")
         statement = statement.order_by(AuditEvent.id.desc())
         statement = _after_cursor(statement, AuditEvent.id, cursor)
         rows = list((await state.session.scalars(statement.limit(limit + 1))).all())
@@ -963,11 +970,11 @@ def _encode_cursor(value: UUID) -> str:
 
 def _decode_cursor(value: str) -> UUID:
     if len(value) != 22:
-        raise ValueError("invalid cursor")
+        raise InvalidRequest("invalid cursor")
     try:
         return UUID(bytes=base64.urlsafe_b64decode(value + "=="))
     except (ValueError, TypeError) as exc:
-        raise ValueError("invalid cursor") from exc
+        raise InvalidRequest("invalid cursor") from exc
 
 
 def _encode_sequence_cursor(value: int) -> str:
@@ -976,14 +983,14 @@ def _encode_sequence_cursor(value: int) -> str:
 
 def _decode_sequence_cursor(value: str) -> int:
     if not 1 <= len(value) <= 16:
-        raise ValueError("invalid cursor")
+        raise InvalidRequest("invalid cursor")
     try:
         decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode("ascii")
         sequence = int(decoded)
     except (ValueError, UnicodeError) as exc:
-        raise ValueError("invalid cursor") from exc
+        raise InvalidRequest("invalid cursor") from exc
     if sequence < 1:
-        raise ValueError("invalid cursor")
+        raise InvalidRequest("invalid cursor")
     return sequence
 
 
@@ -1123,5 +1130,5 @@ def _utc(value: datetime) -> datetime:
 
 def _require_aware_datetime(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("audit timestamps require an offset")
+        raise InvalidRequest("audit timestamps require an offset")
     return value.astimezone(UTC)

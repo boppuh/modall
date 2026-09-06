@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from modall.api.contracts import build_control_plane_router
+from modall.api.errors import InvalidRequest
 from modall.api.idempotency import ApiIdempotencyConflict, ApiIdempotencyHistoryIncomplete
 from modall.config import Settings, get_settings
 from modall.execution.runtime import build_execution_keyrings
@@ -126,8 +127,8 @@ def create_app(
     async def request_validation_error(request: Request, _: RequestValidationError) -> JSONResponse:
         return error_response("invalid_request", "Request validation failed.", 422, request)
 
-    @app.exception_handler(ValueError)
-    async def value_error(request: Request, _: ValueError) -> JSONResponse:
+    @app.exception_handler(InvalidRequest)
+    async def invalid_request_error(request: Request, _: InvalidRequest) -> JSONResponse:
         return error_response("invalid_request", "Request validation failed.", 422, request)
 
     @app.exception_handler(OfficialRegistryError)

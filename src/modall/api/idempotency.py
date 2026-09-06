@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from modall.api.errors import InvalidRequest
 from modall.execution.types import HmacKeyVersion
 from modall.identity.repository import require_current_role
 from modall.identity.types import Role, WorkspaceContext
@@ -41,7 +42,7 @@ async def idempotent_mutation[ResponseT: BaseModel](
     """Serialize, replay, or persist one workspace mutation response."""
 
     if not 1 <= len(idempotency_key) <= 256 or any(ord(char) < 32 for char in idempotency_key):
-        raise ValueError("invalid idempotency key")
+        raise InvalidRequest("invalid idempotency key")
     if not keys:
         raise RuntimeError("idempotency keyring is empty")
     canonical = json.dumps(
@@ -52,7 +53,7 @@ async def idempotent_mutation[ResponseT: BaseModel](
         separators=(",", ":"),
     ).encode("utf-8")
     if len(canonical) > 262_144:
-        raise ValueError("request exceeds idempotency limit")
+        raise InvalidRequest("request exceeds idempotency limit")
 
     await require_current_role(session, context, *required_roles, serialize_workspace=True)
     key_bytes = idempotency_key.encode("utf-8")
@@ -149,7 +150,7 @@ async def purge_expired_api_idempotency(
     """Delete one bounded batch of expired non-run replay records."""
 
     if not 1 <= batch_size <= 1000:
-        raise ValueError("invalid idempotency cleanup batch size")
+        raise InvalidRequest("invalid idempotency cleanup batch size")
     cutoff = now or datetime.now(UTC)
     identifiers = list(
         (
