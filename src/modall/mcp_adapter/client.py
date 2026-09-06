@@ -353,6 +353,14 @@ class McpClientAdapter:
             raise
         except Exception as exc:
             if transport is not None and transport.sensitive_response_detected:
+                if (
+                    dispatched
+                    and not response_received
+                    and not transport.tool_call_response_completed
+                ):
+                    raise InvocationIndeterminate(
+                        InvocationFailureCode.SENSITIVE_RESULT, dispatched=True
+                    ) from exc
                 raise InvocationError(
                     InvocationFailureCode.SENSITIVE_RESULT, dispatched=dispatched
                 ) from exc

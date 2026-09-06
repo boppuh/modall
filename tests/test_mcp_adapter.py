@@ -347,6 +347,20 @@ def test_adapter_invokes_once_between_fences_and_normalizes_safe_results() -> No
                 before_dispatch=dispatch_fence,
             )
 
+        sensitive_incomplete, sensitive_incomplete_endpoint = adapter_for(
+            "sensitive-incomplete-call"
+        )
+        with pytest.raises(InvocationIndeterminate) as incomplete:
+            await sensitive_incomplete.invoke(
+                sensitive_incomplete_endpoint,
+                tool_name="status",
+                arguments={},
+                output_schema=None,
+                before_session=session_fence,
+                before_dispatch=dispatch_fence,
+            )
+        assert incomplete.value.dispatched is True
+
         teardown, teardown_endpoint = adapter_for(
             "teardown-timeout", limits=TransportLimits(read_seconds=0.2, total_seconds=0.05)
         )

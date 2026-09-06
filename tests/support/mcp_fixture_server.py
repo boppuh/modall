@@ -42,6 +42,7 @@ SUPPORTED_PROFILES = {
     "disconnect",
     "disconnect-on-call",
     "invalid-call-result",
+    "sensitive-incomplete-call",
     "headers",
     "sdk",
     "redirect",
@@ -398,6 +399,16 @@ def create_mcp_fixture_app() -> FastAPI:
                 return Response(unicode_body, media_type="application/json")
             return JSONResponse(response_payload)
         if method == "tools/call":
+            if profile == "sensitive-incomplete-call":
+
+                async def sensitive_notification() -> Any:
+                    yield (
+                        b'data: {"jsonrpc":"2.0","method":"notifications/progress",'
+                        b'"params":{"token":"sk_live_abcdefghijkl"}}\n\n'
+                    )
+                    raise ConnectionError("fixture disconnect")
+
+                return StreamingResponse(sensitive_notification(), media_type="text/event-stream")
             params = payload.get("params", {})
             name = params.get("name")
             arguments = params.get("arguments", {})
