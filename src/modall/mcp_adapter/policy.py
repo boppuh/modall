@@ -19,12 +19,14 @@ from modall.security.metadata import (
     contains_obvious_secret,
     contains_sensitive_hostname,
     contains_sensitive_json,
+    contains_sensitive_url,
     contains_sensitive_url_path,
     decode_safe_url_path,
 )
 
 _SSE_EVENT_BOUNDARY = r"(?:\r\n|\r(?!\n)|(?<!\r)\n){2}"
 _SSE_EVENT_BOUNDARY_BYTES = re.compile(rb"(?:\r\n|\r(?!\n)|(?<!\r)\n){2}")
+_JSON_MEMBER_NAME = re.compile(r'"(?:\\.|[^"\\]){1,128}"\s*:')
 
 
 class EndpointPolicyError(Exception):
@@ -451,12 +453,26 @@ def _contains_sensitive_json_text(value: str) -> bool:
         except RecursionError:
             return True
         except json.JSONDecodeError as exc:
+            if _contains_sensitive_member_name(value):
+                return True
             next_object = value.find("{", max(index + 1, exc.pos + 1))
             next_array = value.find("[", max(index + 1, exc.pos + 1))
             candidates = [position for position in (next_object, next_array) if position >= 0]
             if not candidates:
                 return False
             index = min(candidates)
+
+
+def _contains_sensitive_member_name(value: str) -> bool:
+    for match in _JSON_MEMBER_NAME.finditer(value):
+        encoded_key = match.group().rsplit(":", 1)[0].rstrip()
+        try:
+            key = json.loads(encoded_key)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(key, str) and contains_sensitive_json({key: "AbCdEfGhIjKlMnOpQrStUvWx"}):
+            return True
+    return False
 
 
 def _contains_sensitive_json_document(value: bytes) -> bool:
@@ -533,6 +549,8 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         ) or any(
             contains_obvious_secret(header_name)
             or contains_obvious_secret(header_value)
+            or contains_sensitive_url(header_name)
+            or contains_sensitive_url(header_value)
             or _contains_sensitive_json_text(header_name)
             or _contains_sensitive_json_text(header_value)
             for header_name, header_value in response.headers.multi_items()

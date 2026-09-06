@@ -6,6 +6,8 @@ import re
 from collections import Counter
 from urllib.parse import unquote, urlsplit
 
+import re2  # type: ignore[import-untyped]
+
 from modall.security.endpoints import normalize_endpoint_host
 
 
@@ -51,7 +53,7 @@ _SENSITIVE_MARKER_PREFIX = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_PATH_MARKER = re.compile(
-    r"(?:^|[!$&'()*+,;:=@/])(?:api[-_]?key|"
+    r"(?:^|[!$&'()*+,.;:=@/])(?:api[-_]?key|"
     r"(?:(?:access|refresh|session|auth|bearer)[-_]?)?token|credential|"
     r"private[-_]?key|secret|password)"
     r"[-_](?P<value>[A-Za-z0-9._~+/=\-]{8,}?)(?=$|[!$&'()*,;:=@])",
@@ -95,12 +97,40 @@ _AUTH_MODE_WORDS = {
     "supported",
     "unsupported",
 }
+_SENSITIVE_FIELD_PROBES = (
+    "api_key",
+    "apiKey",
+    "access_token",
+    "refresh_token",
+    "session_token",
+    "auth_token",
+    "bearer_token",
+    "credential",
+    "credentials",
+    "authorization",
+    "authentication",
+    "private_key",
+    "privateKey",
+    "client_secret",
+    "clientSecret",
+    "secret",
+    "password",
+    "token",
+)
 
 
 def _is_sensitive_field(key: str) -> bool:
     normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
     normalized = re.sub(r"[^A-Za-z0-9]+", "_", normalized)
     return _SENSITIVE_JSON_FIELD.search(normalized) is not None
+
+
+def _pattern_matches_sensitive_field(pattern: str) -> bool:
+    try:
+        compiled = re2.compile(pattern)
+    except re2.error:
+        return True
+    return any(compiled.search(probe) is not None for probe in _SENSITIVE_FIELD_PROBES)
 
 
 def contains_obvious_secret(value: str) -> bool:
@@ -352,7 +382,12 @@ def contains_sensitive_schema(value: object) -> bool:
                     stack.extend(
                         (
                             schema,
-                            sensitive_property or _is_sensitive_field(property_pattern),
+                            sensitive_property
+                            or (
+                                _pattern_matches_sensitive_field(property_pattern)
+                                if key == "patternProperties"
+                                else _is_sensitive_field(property_pattern)
+                            ),
                         )
                         for property_pattern, schema in child.items()
                     )

@@ -519,8 +519,7 @@ def _contains_decoded_credential(value: object, credential: str) -> bool:
     while stack:
         current = stack.pop()
         if isinstance(current, dict):
-            if any(credential in key for key in current):
-                return True
+            stack.extend(current.keys())
             stack.extend(current.values())
         elif isinstance(current, list):
             stack.extend(current)

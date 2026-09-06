@@ -126,6 +126,9 @@ def test_schema_anchor_screen_ignores_anchors_in_instance_examples() -> None:
     assert contains_sensitive_schema(
         {"patternProperties": {"^token$": {"default": "AbCdEfGhIjKlMnOpQrStUvWx"}}}
     )
+    assert contains_sensitive_schema(
+        {"patternProperties": {"^t[o]ken$": {"default": "AbCdEfGhIjKlMnOpQrStUvWx"}}}
+    )
 
 
 @pytest.mark.parametrize(
@@ -471,6 +474,10 @@ def test_limited_transport_revalidates_before_every_request() -> None:
 def test_decoded_credential_screen_handles_percent_encoded_metadata() -> None:
     assert _contains_decoded_credential(
         {"description": "https://cdn.example/redirect?next=%41bCdEfGhIjKlMnOpQrStUvWx"},
+        "AbCdEfGhIjKlMnOpQrStUvWx",
+    )
+    assert _contains_decoded_credential(
+        {"%41bCdEfGhIjKlMnOpQrStUvWx": True},
         "AbCdEfGhIjKlMnOpQrStUvWx",
     )
 
@@ -829,6 +836,19 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
             with pytest.raises(EndpointPolicyError, match="response header"):
                 await client.get("https://example.test")
 
+        async def sensitive_url_header(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"X-Upstream-State": "https://cdn.example/token-AbCdEfGhIjKlMnOpQrStUvWx"},
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(sensitive_url_header), 100)
+        ) as client:
+            with pytest.raises(EndpointPolicyError, match="response header"):
+                await client.get("https://example.test")
+
         async def accepted_sensitive_body(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 202,
@@ -884,6 +904,21 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
 
         async with httpx.AsyncClient(
             transport=LimitedTransport(httpx.MockTransport(accepted_member_fragment), 100)
+        ) as client:
+            request = client.build_request("POST", "https://example.test")
+            with pytest.raises(EndpointPolicyError, match="response body"):
+                await client.send(request, stream=True)
+
+        async def accepted_prefixed_member_fragment(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                202,
+                headers={"Content-Type": "application/json"},
+                content=b'x "token":{"value":"AbCdEfGhIjKlMnOpQrStUvWx"}',
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(accepted_prefixed_member_fragment), 100)
         ) as client:
             request = client.build_request("POST", "https://example.test")
             with pytest.raises(EndpointPolicyError, match="response body"):

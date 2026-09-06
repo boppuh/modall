@@ -464,6 +464,7 @@ def test_connection_versions_are_immutable() -> None:
         "https://mcp.example/mcp=token-AbCdEfGhIjKlMnOpQrStUvWx",
         "https://mcp.example/mcp+token-AbCdEfGhIjKlMnOpQrStUvWx",
         "https://mcp.example/cdn-token-AbCdEfGhIjKlMnOpQrStUvWx",
+        "https://mcp.example/cdn.token-AbCdEfGhIjKlMnOpQrStUvWx",
         "https://mcp.example/token-12345678901234567890",
         "https://mcp.example/token-aaaaaaaaaaaa;token-AbCdEfGhIjKlMnOpQrStUvWx",
         "https://mcp.example/token-" + ("a" * 1000) + "=token-AbCdEfGhIjKlMnOpQrStUvWx",
