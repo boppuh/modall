@@ -215,34 +215,38 @@ class ExecutionService:
                 canonical_request=canonical_request,
                 claims=claims,
                 nonce_digest=nonce_digest,
-                lock_run=True,
-                lock_record=True,
-                lock_workspace=True,
             )
 
-        await require_current_role(
-            self._session,
-            context,
-            Role.ADMIN,
-            Role.OPERATOR,
-            serialize_workspace=True,
-        )
-        now = await self._durable_now()
-        # A concurrent creator may have committed while this transaction waited
-        # for the workspace admission lock. Its run is new/nonterminal, so the
-        # immutable idempotency row safely pins it without reversing lock order.
-        existing_record = await self._find_idempotency_record(context, raw_key)
+        # The savepoint makes the admission lock releasable when a concurrent
+        # creator wins while this transaction waits. PostgreSQL releases locks
+        # acquired after a savepoint when it is rolled back, letting replay
+        # restart in the canonical run -> idempotency -> workspace order.
+        admission_lock = await self._session.begin_nested()
+        try:
+            await require_current_role(
+                self._session,
+                context,
+                Role.ADMIN,
+                Role.OPERATOR,
+                serialize_workspace=True,
+            )
+            now = await self._durable_now()
+            await self._require_confirmation_key_history()
+            await self._require_idempotency_key_history()
+            existing_record = await self._find_idempotency_record(context, raw_key)
+        except BaseException:
+            await admission_lock.rollback()
+            raise
         if existing_record is not None:
+            await admission_lock.rollback()
             return await self._replay_existing_run(
                 context=context,
                 existing_record=existing_record,
                 canonical_request=canonical_request,
                 claims=claims,
                 nonce_digest=nonce_digest,
-                lock_run=False,
-                lock_record=False,
-                lock_workspace=False,
             )
+        await admission_lock.commit()
         used_nonce = await self._session.scalar(
             select(ConfirmationNonce)
             .where(ConfirmationNonce.nonce_digest == nonce_digest)
@@ -977,9 +981,6 @@ class ExecutionService:
         canonical_request: bytes,
         claims: _ConfirmationClaims,
         nonce_digest: str,
-        lock_run: bool,
-        lock_record: bool,
-        lock_workspace: bool,
     ) -> Run:
         key = self._key_by_version(self._idempotency_keys, existing_record.key_version)
         if key is None or not hmac.compare_digest(
@@ -991,27 +992,23 @@ class ExecutionService:
             Run.id == existing_record.resource_id,
             Run.workspace_id == context.workspace_id,
         )
-        if lock_run:
-            run_statement = run_statement.with_for_update()
-        run = await self._session.scalar(run_statement)
+        run = await self._session.scalar(run_statement.with_for_update())
         if run is None:
             raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
-        if lock_record:
-            locked_record = await self._session.scalar(
-                select(IdempotencyRecord)
-                .where(IdempotencyRecord.id == existing_record.id)
-                .with_for_update()
-            )
-            if locked_record is None:
-                raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
-        if lock_workspace:
-            await require_current_role(
-                self._session,
-                context,
-                Role.ADMIN,
-                Role.OPERATOR,
-                serialize_workspace=True,
-            )
+        locked_record = await self._session.scalar(
+            select(IdempotencyRecord)
+            .where(IdempotencyRecord.id == existing_record.id)
+            .with_for_update()
+        )
+        if locked_record is None:
+            raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_CONFLICT)
+        await require_current_role(
+            self._session,
+            context,
+            Role.ADMIN,
+            Role.OPERATOR,
+            serialize_workspace=True,
+        )
         if (
             run.capability_id != claims.capability_id
             or run.capability_version_id != claims.capability_version_id
