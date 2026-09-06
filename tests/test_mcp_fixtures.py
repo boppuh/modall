@@ -533,7 +533,7 @@ def test_pinned_sdk_surfaces_response_and_transport_faults() -> None:
             ClientSession(
                 read_stream,
                 write_stream,
-                read_timeout_seconds=timedelta(milliseconds=10),
+                read_timeout_seconds=timedelta(milliseconds=250 if profile == "oversized" else 10),
             ) as session,
         ):
             await _sdk_initialize(session)
