@@ -746,6 +746,8 @@ def test_limited_transport_revalidates_before_every_request() -> None:
         (b'{"jsonrpc":"2.0","id":true,"result":{}}', 200, False, False),
         (b'{"jsonrpc":', 200, True, False),
         (b"", 200, True, False),
+        (b'{"jsonrpc":', 202, False, False),
+        (b"", 206, False, False),
         (b'{"jsonrpc":', 502, False, False),
         (b"", 503, False, False),
     ),

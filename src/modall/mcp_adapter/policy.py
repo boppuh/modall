@@ -285,7 +285,7 @@ class LimitedByteStream(httpx.AsyncByteStream):
         if self._buffer_json_document:
             body = bytes(self._structured_buffer)
             response = _jsonrpc_response(body, self._expected_response_id)
-            malformed_success = response is None and 200 <= self._status_code < 300
+            malformed_success = response is None and self._status_code == 200
             if malformed_success or (response is not None and response[0]):
                 self._mark_complete_once()
                 if response is not None and response[1]:
