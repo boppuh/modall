@@ -61,7 +61,7 @@ _SENSITIVE_HOST_LABEL_MARKER = re.compile(
     r"(?:^|.*-)(?:api[-_]?key|"
     r"(?:(?:access|refresh|session|auth|bearer)[-_]?)?token|credential|"
     r"private[-_]?key|secret|password)"
-    r"[-_](?P<value>[A-Za-z0-9_~+=\-]{8,})\Z",
+    r"[-_](?P<value>[A-Za-z0-9_~+=]{8,})\Z",
     re.IGNORECASE,
 )
 _URL_CANDIDATE = re.compile(r"https?://[^\s<>\[\]{}\"']+", re.IGNORECASE)
@@ -188,16 +188,38 @@ def contains_sensitive_url_path(path: str) -> bool:
         and _looks_like_marker_suffix(match.group("value"))
         for segment in path.split("/")
     )
-    return segment_match or any(
-        _looks_like_marker_suffix(match.group("value"))
-        for match in _SENSITIVE_PATH_MARKER.finditer(path)
+    internal_segment_match = any(
+        (match := _SENSITIVE_HOST_LABEL_MARKER.fullmatch(segment)) is not None
+        and _looks_like_marker_suffix(match.group("value"))
+        for segment in path.split("/")
+    )
+    return (
+        segment_match
+        or internal_segment_match
+        or any(
+            _looks_like_marker_suffix(match.group("value"))
+            for match in _SENSITIVE_PATH_MARKER.finditer(path)
+        )
     )
 
 
 def contains_sensitive_url(value: str) -> bool:
     """Detect credential-shaped host or path content in embedded HTTP URLs."""
 
-    for match in _URL_CANDIDATE.finditer(value):
+    candidates = [value]
+    decoded = value
+    for _ in range(3):
+        try:
+            next_decoded = unquote(decoded, errors="strict")
+        except UnicodeError:
+            break
+        if next_decoded == decoded:
+            break
+        candidates.append(next_decoded)
+        decoded = next_decoded
+    for match in (
+        match for candidate in candidates for match in _URL_CANDIDATE.finditer(candidate)
+    ):
         candidate = match.group().rstrip(".,;:!?)]")
         try:
             decoded_candidate = decode_safe_url_path(candidate)
@@ -268,6 +290,8 @@ def contains_sensitive_schema(value: object) -> bool:
     stack = [(value, False)]
     visited: set[tuple[int, bool]] = set()
     anchors = _index_schema_anchors(value)
+    if anchors is None:
+        return True
     reference_cache: dict[str, object | None] = {}
     literal_keys = {"const", "default", "enum", "example", "examples"}
     annotation_keys = {"$comment", "description", "title"}
@@ -317,6 +341,15 @@ def contains_sensitive_schema(value: object) -> bool:
                             )
                         )
                     continue
+                if key in {"patternProperties", "dependentSchemas"} and isinstance(child, dict):
+                    stack.extend(
+                        (
+                            schema,
+                            sensitive_property or _is_sensitive_field(property_pattern),
+                        )
+                        for property_pattern, schema in child.items()
+                    )
+                    continue
                 if key in schema_map_keys and isinstance(child, dict):
                     stack.extend((schema, sensitive_property) for schema in child.values())
                     continue
@@ -358,7 +391,7 @@ def contains_sensitive_schema(value: object) -> bool:
     return False
 
 
-def _index_schema_anchors(root: object) -> dict[str, object]:
+def _index_schema_anchors(root: object) -> dict[str, object] | None:
     anchors: dict[str, object] = {}
     candidates = [root]
     visited: set[int] = set()
@@ -387,7 +420,9 @@ def _index_schema_anchors(root: object) -> dict[str, object]:
             for keyword in ("$anchor", "$dynamicAnchor"):
                 anchor = current.get(keyword)
                 if isinstance(anchor, str):
-                    anchors.setdefault(anchor, current)
+                    if anchor in anchors:
+                        return None
+                    anchors[anchor] = current
             properties = current.get("properties")
             if isinstance(properties, dict):
                 candidates.extend(properties.values())

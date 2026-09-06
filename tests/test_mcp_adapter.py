@@ -113,6 +113,18 @@ def test_schema_anchor_screen_ignores_anchors_in_instance_examples() -> None:
             "properties": {"password": {"$ref": "#target"}},
         }
     )
+    assert contains_sensitive_schema(
+        {
+            "$defs": {
+                "unsafe": {"$anchor": "dup", "default": "AbCdEfGhIjKlMnOpQrStUvWx"},
+                "safe": {"$anchor": "dup", "default": "safe"},
+            },
+            "properties": {"token": {"$ref": "#dup"}},
+        }
+    )
+    assert contains_sensitive_schema(
+        {"patternProperties": {"^token$": {"default": "AbCdEfGhIjKlMnOpQrStUvWx"}}}
+    )
 
 
 @pytest.mark.parametrize(
@@ -462,6 +474,7 @@ def test_url_secret_screen_handles_embedded_and_multiple_markers() -> None:
     assert contains_sensitive_url("https://cdn.example/path?token%3DAbCdEfGhIjKlMnOpQrStUvWx")
     assert contains_sensitive_url("https://cdn.example/path/token%3DAbCdEfGhIjKlMnOpQrStUvWx")
     assert contains_sensitive_url("https://bad_host.example/token-AbCdEfGhIjKlMnOpQrStUvWx")
+    assert contains_sensitive_url("https%3A%2F%2Fcdn.example%2Ftoken-AbCdEfGhIjKlMnOpQrStUvWx")
     assert _contains_sensitive_tool(
         {
             "name": "safe-tool",
@@ -816,6 +829,36 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
 
         async with httpx.AsyncClient(
             transport=LimitedTransport(httpx.MockTransport(accepted_prefixed_body), 100)
+        ) as client:
+            request = client.build_request("POST", "https://example.test")
+            with pytest.raises(EndpointPolicyError, match="response body"):
+                await client.send(request, stream=True)
+
+        async def accepted_member_fragment(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                202,
+                headers={"Content-Type": "application/json"},
+                content=b'"token":{"value":"AbCdEfGhIjKlMnOpQrStUvWx"}',
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(accepted_member_fragment), 100)
+        ) as client:
+            request = client.build_request("POST", "https://example.test")
+            with pytest.raises(EndpointPolicyError, match="response body"):
+                await client.send(request, stream=True)
+
+        async def accepted_invalid_utf8_body(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                202,
+                headers={"Content-Type": "application/json"},
+                content=b'\xff{"token":{"value":"AbCdEfGhIjKlMnOpQrStUvWx"}}',
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=LimitedTransport(httpx.MockTransport(accepted_invalid_utf8_body), 100)
         ) as client:
             request = client.build_request("POST", "https://example.test")
             with pytest.raises(EndpointPolicyError, match="response body"):

@@ -427,6 +427,15 @@ def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, obje
 
 def _contains_sensitive_json_text(value: str) -> bool:
     decoder = json.JSONDecoder(object_pairs_hook=_reject_duplicate_members)
+    try:
+        member = json.loads(f"{{{value}}}", object_pairs_hook=_reject_duplicate_members)
+    except _DuplicateJsonMember:
+        return True
+    except (json.JSONDecodeError, RecursionError):
+        pass
+    else:
+        if contains_sensitive_json(member):
+            return True
     index = 0
     while True:
         while index < len(value) and value[index].isspace():
@@ -451,10 +460,7 @@ def _contains_sensitive_json_text(value: str) -> bool:
 
 
 def _contains_sensitive_json_document(value: bytes) -> bool:
-    try:
-        return _contains_sensitive_json_text(value.decode("utf-8"))
-    except UnicodeDecodeError:
-        return False
+    return _contains_sensitive_json_text(value.decode("utf-8", errors="ignore"))
 
 
 def _contains_sensitive_sse_event(event: bytes) -> bool:
