@@ -32,6 +32,19 @@ make compose-up
 The API readiness endpoint is at `http://localhost:8000/health/ready`; the web shell is at
 `http://localhost:5173`. Stop the stack with `make compose-down`.
 
+The operator UI asks for the bootstrapped workspace UUID. Local mode uses the configured local
+identity; OIDC environments also accept an access token for the current browser session. Tokens
+remain in memory and are never written to browser storage. The UI covers Registry search/import,
+manual connection and lifecycle controls, immutable capability review, one-time run confirmation,
+polling, cancellation, and the durable event timeline.
+
+Run the desktop and mobile reference journey, including the automated WCAG scan, with:
+
+```sh
+npx playwright install chromium
+npm run e2e --workspace @modall/web
+```
+
 Compose applies Alembic migrations before starting the API. For a separately managed database,
 run `make migrate` with `MODALL_DATABASE_URL` configured.
 
