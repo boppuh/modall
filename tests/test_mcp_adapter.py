@@ -9,9 +9,14 @@ import httpcore
 import httpx
 import pytest
 
+from modall.execution import validation as schema_validation
+from modall.execution.types import ExecutionLimits
 from modall.mcp_adapter.client import (
     CredentialError,
     DiscoveryError,
+    InvocationError,
+    InvocationFailureCode,
+    InvocationIndeterminate,
     McpClientAdapter,
     ProtocolMismatch,
     _contains_decoded_credential,
@@ -38,6 +43,7 @@ from modall.security.metadata import (
     contains_sensitive_url,
     validate_capability_scalars,
 )
+from modall.worker.main import _invocation_transport_limits
 from tests.support.mcp_fixture_server import (
     COMMON_KEY_FIXTURE_TOKEN,
     ESCAPED_FIXTURE_TOKEN,
@@ -60,6 +66,8 @@ def adapter_for(
     max_pages: int = 16,
     max_tools: int = 512,
     limits: TransportLimits | None = None,
+    schema_validation_timeout_seconds: float = 2.0,
+    schema_validation_memory_bytes: int = 256 * 1024 * 1024,
 ) -> tuple[McpClientAdapter, str]:
     fixture_app = app or create_mcp_fixture_app()
     return (
@@ -71,6 +79,8 @@ def adapter_for(
             limits=limits,
             max_pages=max_pages,
             max_tools=max_tools,
+            schema_validation_timeout_seconds=schema_validation_timeout_seconds,
+            schema_validation_memory_bytes=schema_validation_memory_bytes,
             transport=httpx.ASGITransport(app=fixture_app),  # type: ignore[arg-type]
         ),
         f"https://fixture/mcp/case-{profile}",
@@ -242,6 +252,273 @@ def test_adapter_discovers_bounded_domain_types_and_drift() -> None:
         credential_property, endpoint = adapter_for("credential-property-schema")
         credential_property_result = await credential_property.discover(endpoint)
         assert credential_property_result.tools[0].schema_supported is True
+
+    asyncio.run(scenario())
+
+
+def test_adapter_invokes_once_between_fences_and_normalizes_safe_results() -> None:
+    async def scenario() -> None:
+        client, endpoint = adapter_for("default")
+        boundaries: list[str] = []
+
+        async def session_fence() -> None:
+            boundaries.append("session")
+
+        async def dispatch_fence() -> None:
+            boundaries.append("dispatch")
+
+        result = await client.invoke(
+            endpoint,
+            tool_name="echo",
+            arguments={"message": "hello"},
+            output_schema={
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            },
+            before_session=session_fence,
+            before_dispatch=dispatch_fence,
+        )
+        assert boundaries == ["session", "dispatch"]
+        assert result.payload["structuredContent"] == {"message": "hello"}
+        assert result.byte_count > 0
+        assert len(result.canonical_digest) == 64
+
+        authenticated, authenticated_endpoint = adapter_for("authenticated")
+        authenticated_result = await authenticated.invoke(
+            authenticated_endpoint,
+            tool_name="echo",
+            arguments={"message": "authenticated"},
+            output_schema=None,
+            bearer_token=FIXTURE_TOKEN.encode(),
+            before_session=session_fence,
+            before_dispatch=dispatch_fence,
+        )
+        assert authenticated_result.payload["structuredContent"] == {"message": "authenticated"}
+        for invalid_credential in (b"short", b"non-ascii-\xff"):
+            invalid_client, invalid_endpoint = adapter_for("authenticated")
+            with pytest.raises(InvocationError) as invalid:
+                await invalid_client.invoke(
+                    invalid_endpoint,
+                    tool_name="echo",
+                    arguments={"message": "never sent"},
+                    output_schema=None,
+                    bearer_token=invalid_credential,
+                    before_session=session_fence,
+                    before_dispatch=dispatch_fence,
+                )
+            assert invalid.value.code == InvocationFailureCode.PREPARATION_FAILED
+
+        for tool, expected in (
+            ("unsupported-content", InvocationFailureCode.UNSUPPORTED_RESULT_CONTENT),
+            ("invalid-output", InvocationFailureCode.INVALID_UPSTREAM_OUTPUT),
+            ("fail", InvocationFailureCode.TOOL_CALL_FAILED),
+            ("rpc-error", InvocationFailureCode.TOOL_CALL_FAILED),
+        ):
+            rejected, rejected_endpoint = adapter_for("default")
+            with pytest.raises(InvocationError) as failure:
+                await rejected.invoke(
+                    rejected_endpoint,
+                    tool_name=tool,
+                    arguments={},
+                    output_schema=(
+                        {
+                            "type": "object",
+                            "properties": {"message": {"type": "string"}},
+                            "required": ["message"],
+                        }
+                        if tool == "invalid-output"
+                        else None
+                    ),
+                    before_session=session_fence,
+                    before_dispatch=dispatch_fence,
+                )
+            assert failure.value.code == expected
+            assert failure.value.dispatched is True
+
+        timed, timed_endpoint = adapter_for(
+            "timeout-on-call", limits=TransportLimits(read_seconds=0.02, total_seconds=0.2)
+        )
+        with pytest.raises(InvocationIndeterminate):
+            await timed.invoke(
+                timed_endpoint,
+                tool_name="status",
+                arguments={},
+                output_schema=None,
+                before_session=session_fence,
+                before_dispatch=dispatch_fence,
+            )
+
+        sensitive_incomplete, sensitive_incomplete_endpoint = adapter_for(
+            "sensitive-incomplete-call"
+        )
+        with pytest.raises(InvocationIndeterminate) as incomplete:
+            await sensitive_incomplete.invoke(
+                sensitive_incomplete_endpoint,
+                tool_name="status",
+                arguments={},
+                output_schema=None,
+                before_session=session_fence,
+                before_dispatch=dispatch_fence,
+            )
+        assert incomplete.value.dispatched is True
+
+        for profile in ("sensitive-complete-call", "sensitive-complete-sse-call"):
+            sensitive_complete, sensitive_complete_endpoint = adapter_for(profile)
+            with pytest.raises(InvocationError) as complete:
+                await sensitive_complete.invoke(
+                    sensitive_complete_endpoint,
+                    tool_name="status",
+                    arguments={},
+                    output_schema=None,
+                    before_session=session_fence,
+                    before_dispatch=dispatch_fence,
+                )
+            assert type(complete.value) is InvocationError
+            assert complete.value.code == InvocationFailureCode.SENSITIVE_RESULT
+
+        teardown, teardown_endpoint = adapter_for(
+            "teardown-timeout", limits=TransportLimits(read_seconds=0.2, total_seconds=0.05)
+        )
+        teardown_result = await teardown.invoke(
+            teardown_endpoint,
+            tool_name="status",
+            arguments={},
+            output_schema=None,
+            before_session=session_fence,
+            before_dispatch=dispatch_fence,
+        )
+        assert teardown_result.payload["content"] == [{"type": "text", "text": "fixture healthy"}]
+
+        initializing, initializing_endpoint = adapter_for("protocol-mismatch")
+        with pytest.raises(InvocationError) as initialization_failure:
+            await initializing.invoke(
+                initializing_endpoint,
+                tool_name="status",
+                arguments={},
+                output_schema=None,
+                before_session=session_fence,
+                before_dispatch=dispatch_fence,
+            )
+        assert (
+            initialization_failure.value.code == InvocationFailureCode.SESSION_INITIALIZATION_FAILED
+        )
+
+        for profile in ("invalid-call-result", "malformed"):
+            malformed, malformed_endpoint = adapter_for(profile)
+            with pytest.raises(InvocationError) as malformed_failure:
+                await malformed.invoke(
+                    malformed_endpoint,
+                    tool_name="status",
+                    arguments={},
+                    output_schema=None,
+                    before_session=session_fence,
+                    before_dispatch=dispatch_fence,
+                )
+            assert type(malformed_failure.value) is InvocationError
+            assert malformed_failure.value.code == InvocationFailureCode.INVALID_UPSTREAM_OUTPUT
+
+        rejected, rejected_endpoint = adapter_for("client-error-call")
+        with pytest.raises(InvocationError) as client_rejection:
+            await rejected.invoke(
+                rejected_endpoint,
+                tool_name="status",
+                arguments={},
+                output_schema=None,
+                before_session=session_fence,
+                before_dispatch=dispatch_fence,
+            )
+        assert client_rejection.value.code == InvocationFailureCode.TOOL_CALL_FAILED
+
+        escaped, escaped_endpoint = adapter_for(
+            "escaped-large-call",
+            limits=_invocation_transport_limits(ExecutionLimits()),
+        )
+        escaped_result = await escaped.invoke(
+            escaped_endpoint,
+            tool_name="status",
+            arguments={},
+            output_schema=None,
+            before_session=session_fence,
+            before_dispatch=dispatch_fence,
+        )
+        assert escaped_result.payload["content"] == [
+            {"type": "text", "text": "é" * 4_000} for _ in range(16)
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_invocation_uses_configured_output_validation_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[float, int]] = []
+
+    async def validate(
+        arguments: object,
+        schema: object,
+        *,
+        timeout_seconds: float,
+        memory_limit_bytes: int,
+    ) -> schema_validation.SchemaValidationResult:
+        del arguments, schema
+        observed.append((timeout_seconds, memory_limit_bytes))
+        return schema_validation.SchemaValidationResult.VALID
+
+    monkeypatch.setattr(schema_validation, "validate_schema_arguments", validate)
+
+    async def scenario() -> None:
+        client, endpoint = adapter_for(
+            "default",
+            schema_validation_timeout_seconds=0.25,
+            schema_validation_memory_bytes=64 * 1024 * 1024,
+        )
+
+        async def fence() -> None:
+            return None
+
+        await client.invoke(
+            endpoint,
+            tool_name="echo",
+            arguments={"message": "bounded"},
+            output_schema={"type": "object"},
+            before_session=fence,
+            before_dispatch=fence,
+        )
+
+    asyncio.run(scenario())
+    assert observed == [(0.25, 64 * 1024 * 1024)]
+
+
+def test_post_response_validation_timeout_is_a_definitive_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def validate(*args: object, **kwargs: object) -> schema_validation.SchemaValidationResult:
+        del args, kwargs
+        await asyncio.sleep(1.1)
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(schema_validation, "validate_schema_arguments", validate)
+
+    async def scenario() -> None:
+        client, endpoint = adapter_for(
+            "default", limits=TransportLimits(read_seconds=1.0, total_seconds=1.0)
+        )
+
+        async def fence() -> None:
+            return None
+
+        with pytest.raises(InvocationError) as failure:
+            await client.invoke(
+                endpoint,
+                tool_name="echo",
+                arguments={"message": "bounded"},
+                output_schema={"type": "object"},
+                before_session=fence,
+                before_dispatch=fence,
+            )
+        assert type(failure.value) is InvocationError
+        assert failure.value.code == InvocationFailureCode.INVALID_UPSTREAM_OUTPUT
 
     asyncio.run(scenario())
 
@@ -469,6 +746,71 @@ def test_limited_transport_revalidates_before_every_request() -> None:
     asyncio.run(scenario())
     assert validations == 2
     assert contacts == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "status_code", "completed", "failed"),
+    (
+        (b'{"jsonrpc":"2.0","id":1,"result":{}}', 200, True, False),
+        (b'{"jsonrpc":"2.0","id":1,"error":{"code":-1}}', 200, True, True),
+        (b'{"jsonrpc":"2.0","id":2,"result":{}}', 200, False, False),
+        (b'{"jsonrpc":"2.0","id":2,"error":{"code":-1}}', 200, False, False),
+        (b'{"jsonrpc":"2.0","id":true,"result":{}}', 200, False, False),
+        (b'{"jsonrpc":', 200, True, False),
+        (b"", 200, True, False),
+        (b'{"jsonrpc":', 202, False, False),
+        (b"", 206, False, False),
+        (b"", 401, True, True),
+        (b"not-json", 403, True, True),
+        (b'{"jsonrpc":"2.0","id":2,"result":{}}', 404, True, True),
+        (b'{"jsonrpc":', 502, False, False),
+        (b"", 503, False, False),
+    ),
+)
+def test_tool_call_response_completion_requires_an_exact_response_id(
+    body: bytes, status_code: int, completed: bool, failed: bool
+) -> None:
+    async def scenario() -> None:
+        async def respond(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                status_code,
+                headers={"Content-Type": "application/json"},
+                content=body,
+                request=request,
+            )
+
+        transport = LimitedTransport(httpx.MockTransport(respond), 1024)
+        async with httpx.AsyncClient(transport=transport) as client:
+            await client.post(
+                "https://example.test",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
+            )
+        assert transport.tool_call_response_completed is completed
+        assert transport.tool_call_failure_completed is failed
+
+    asyncio.run(scenario())
+
+
+def test_tool_call_client_error_is_final_even_when_mislabeled_as_sse() -> None:
+    async def scenario() -> None:
+        async def reject(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                401,
+                headers={"Content-Type": "text/event-stream"},
+                content=b"not-an-event",
+                request=request,
+            )
+
+        transport = LimitedTransport(httpx.MockTransport(reject), 1024)
+        async with httpx.AsyncClient(transport=transport) as client:
+            await client.post(
+                "https://example.test",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
+            )
+        assert transport.tool_call_response_completed
+        assert transport.tool_call_failure_completed
+
+    asyncio.run(scenario())
 
 
 def test_decoded_credential_screen_handles_percent_encoded_metadata() -> None:
@@ -962,10 +1304,33 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
                 request=request,
             )
 
-        async with httpx.AsyncClient(
-            transport=LimitedTransport(httpx.MockTransport(sse), 100)
-        ) as client:
-            assert (await client.get("https://example.test")).content.endswith(b"\r\r")
+        response_less_transport = LimitedTransport(httpx.MockTransport(sse), 100)
+        async with httpx.AsyncClient(transport=response_less_transport) as client:
+            response = await client.post(
+                "https://example.test",
+                json={"jsonrpc": "2.0", "id": 7, "method": "tools/call"},
+            )
+            assert response.content.endswith(b"\r\r")
+            assert response_less_transport.tool_call_response_completed is False
+
+        async def json_notification(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                content=(
+                    b'{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}'
+                ),
+                request=request,
+            )
+
+        notification_transport = LimitedTransport(httpx.MockTransport(json_notification), 256)
+        async with httpx.AsyncClient(transport=notification_transport) as client:
+            response = await client.post(
+                "https://example.test",
+                json={"jsonrpc": "2.0", "id": 7, "method": "tools/call"},
+            )
+            assert response.json()["method"] == "notifications/progress"
+            assert notification_transport.tool_call_response_completed is False
 
         async def sensitive_sse(request: httpx.Request) -> httpx.Response:
             return httpx.Response(

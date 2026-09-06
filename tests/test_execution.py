@@ -1,9 +1,12 @@
 import asyncio
+import hashlib
+import json
 import resource
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID
 
 import jwt
@@ -13,12 +16,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from modall.audit.types import AuditAction
 from modall.execution import validation as schema_validation
+from modall.execution.runner import InvocationRunner
 from modall.execution.service import ExecutionService
 from modall.execution.types import (
+    AcceptedToolResult,
     ExecutionError,
     ExecutionFailureCode,
     ExecutionLimits,
     HmacKeyVersion,
+    JobLease,
     RunFailureCode,
     RunStatus,
     SystemExecutionAuthority,
@@ -26,6 +32,13 @@ from modall.execution.types import (
 from modall.identity.repository import AuthorizationDenied, AuthorizationService
 from modall.identity.service import IdentityService
 from modall.identity.types import Permission, Principal, Role, WorkspaceContext
+from modall.mcp_adapter.client import (
+    InvocationError,
+    InvocationFailureCode,
+    InvocationIndeterminate,
+    InvocationResult,
+    McpClientAdapter,
+)
 from modall.persistence.database import create_engine, create_session_factory, transaction
 from modall.persistence.models import (
     AuditEvent,
@@ -40,10 +53,13 @@ from modall.persistence.models import (
     Run,
     RunAttempt,
     RunEvent,
+    RunResult,
+    SecretBinding,
     SystemExecutionState,
     WorkspaceMembership,
 )
 from modall.registry.service import CapabilityService, ConnectionService
+from modall.secrets.provider import FixtureSecretProvider
 
 CONFIRMATION_KEYS = (HmacKeyVersion("confirm-v1", b"c" * 32),)
 IDEMPOTENCY_KEYS = (HmacKeyVersion("idem-v1", b"i" * 32),)
@@ -95,12 +111,13 @@ async def create_executable_target(
     context: WorkspaceContext,
     *,
     input_schema: dict[str, object] | None = None,
+    secret_binding_id: UUID | None = None,
 ) -> CapabilityVersion:
     connection = await ConnectionService(session).create(
         context=context,
         name="Execution fixture",
         endpoint_url="https://mcp.example/tools",
-        secret_binding_id=None,
+        secret_binding_id=secret_binding_id,
         policy_version="v1",
     )
     connection_version_id = connection.pending_version_id
@@ -686,7 +703,11 @@ def test_claim_terminalizes_work_with_stale_pinned_authority() -> None:
 def test_restore_quarantine_fences_old_jobs_and_retention_erases_content() -> None:
     async def scenario() -> None:
         current = datetime(2026, 9, 6, tzinfo=UTC)
-        limits = ExecutionLimits(argument_retention_days=1, run_retention_days=2)
+        limits = ExecutionLimits(
+            argument_retention_days=1,
+            result_retention_days=1,
+            run_retention_days=2,
+        )
         async with database() as factory:
             user_id, workspace_id = await bootstrap(factory, subject="restore")
             async with transaction(factory) as session:
@@ -1057,6 +1078,327 @@ def test_heartbeat_and_worker_boundary_validation() -> None:
     asyncio.run(scenario())
 
 
+def test_success_persists_only_canonical_result_and_expires_it_absolutely() -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="result")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=now)
+                token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "result"},
+                )
+                run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "result"},
+                    confirmation_token=token.confirmation_token,
+                    idempotency_key="result",
+                )
+                lease = await execution.claim_job(
+                    worker_id="worker", lease_duration=timedelta(seconds=30)
+                )
+                assert lease is not None
+                await execution.fence_session(lease)
+                await execution.fence_dispatch(lease)
+                payload: dict[str, object] = {
+                    "content": [{"type": "text", "text": "safe"}],
+                    "structuredContent": {"message": "safe"},
+                }
+                canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+                completed = await execution.complete_invocation_success(
+                    lease,
+                    result=AcceptedToolResult(
+                        payload=payload,
+                        canonical_digest=hashlib.sha256(canonical).hexdigest(),
+                        byte_count=len(canonical),
+                    ),
+                )
+                assert completed.status == RunStatus.SUCCEEDED.value
+                stored = await session.get(RunResult, run.id)
+                assert stored is not None
+                assert stored.payload == payload
+                assert stored.expires_at.replace(tzinfo=UTC) == now + timedelta(days=14)
+
+            async with transaction(factory) as session:
+                assert (
+                    await service(session, now=now + timedelta(days=15)).expire_retained_results()
+                    == 1
+                )
+                assert await session.get(RunResult, run.id) is None
+
+    asyncio.run(scenario())
+
+
+def test_late_definitive_result_terminalizes_without_storing_content() -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="late-result")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=now)
+                token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "late"},
+                )
+                run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "late"},
+                    confirmation_token=token.confirmation_token,
+                    idempotency_key="late-result",
+                    deadline=now + timedelta(seconds=5),
+                )
+                lease = await execution.claim_job(
+                    worker_id="worker", lease_duration=timedelta(seconds=30)
+                )
+                assert lease is not None
+                await execution.fence_session(lease)
+                await execution.fence_dispatch(lease)
+
+            payload: dict[str, object] = {"content": [{"type": "text", "text": "late"}]}
+            canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            async with transaction(factory) as session:
+                completed = await service(
+                    session, now=now + timedelta(seconds=6)
+                ).complete_invocation_success(
+                    lease,
+                    result=AcceptedToolResult(
+                        payload=payload,
+                        canonical_digest=hashlib.sha256(canonical).hexdigest(),
+                        byte_count=len(canonical),
+                    ),
+                )
+                assert completed.status == RunStatus.INDETERMINATE.value
+                assert await session.get(RunResult, run.id) is None
+
+    asyncio.run(scenario())
+
+
+def test_invocation_runner_commits_both_fences_and_one_safe_result() -> None:
+    class FakeAdapter:
+        calls = 0
+
+        async def invoke(
+            self,
+            endpoint: str,
+            *,
+            tool_name: str,
+            arguments: dict[str, object],
+            output_schema: dict[str, object] | None,
+            bearer_token: bytes | bytearray | None = None,
+            before_session: Callable[[], Awaitable[None]],
+            before_dispatch: Callable[[], Awaitable[None]],
+        ) -> InvocationResult:
+            del endpoint, tool_name, arguments, output_schema, bearer_token
+            await before_session()
+            await before_dispatch()
+            self.calls += 1
+            payload: dict[str, object] = {"content": [{"type": "text", "text": "done"}]}
+            canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            return InvocationResult(
+                payload=payload,
+                canonical_digest=hashlib.sha256(canonical).hexdigest(),
+                byte_count=len(canonical),
+            )
+
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        adapter = FakeAdapter()
+        heartbeat_calls = 0
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="runner")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                secret = SecretBinding(
+                    workspace_id=workspace_id,
+                    provider="fixture",
+                    external_reference="runner-secret",
+                    version="v1",
+                    created_by_user_id=user_id,
+                )
+                session.add(secret)
+                await session.flush()
+                version = await create_executable_target(
+                    session, context, secret_binding_id=secret.id
+                )
+                execution = service(session, now=now)
+                token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "runner"},
+                )
+                run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "runner"},
+                    confirmation_token=token.confirmation_token,
+                    idempotency_key="runner",
+                )
+
+            def execution_service_factory(session: AsyncSession) -> ExecutionService:
+                class RecordingExecutionService(ExecutionService):
+                    async def heartbeat(
+                        self, lease: JobLease, *, lease_duration: timedelta
+                    ) -> JobLease:
+                        nonlocal heartbeat_calls
+                        heartbeat_calls += 1
+                        return await super().heartbeat(lease, lease_duration=lease_duration)
+
+                return RecordingExecutionService(
+                    session,
+                    confirmation_keys=CONFIRMATION_KEYS,
+                    idempotency_keys=IDEMPOTENCY_KEYS,
+                    now=lambda: now,
+                )
+
+            runner = InvocationRunner(
+                session_factory=factory,
+                execution_service_factory=execution_service_factory,
+                secret_provider=FixtureSecretProvider(
+                    {("runner-secret", "v1"): b"runner-credential-value-123456"}
+                ),
+                adapter_factory=lambda _: cast(McpClientAdapter, adapter),
+            )
+            assert await runner.claim_and_run(
+                worker_id="runner-worker", lease_duration=timedelta(seconds=30)
+            )
+            assert not await runner.claim_and_run(
+                worker_id="runner-worker", lease_duration=timedelta(seconds=30)
+            )
+            assert adapter.calls == 1
+            assert heartbeat_calls == 2
+            async with factory() as session:
+                stored_run = await session.get(Run, run.id)
+                assert stored_run is not None
+                assert stored_run.status == RunStatus.SUCCEEDED.value
+                assert await session.get(RunResult, run.id) is not None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_status", "expected_code"),
+    (
+        ("factory", RunStatus.FAILED, RunFailureCode.PREPARATION_FAILED),
+        ("preparation", RunStatus.FAILED, RunFailureCode.PREPARATION_FAILED),
+        ("session", RunStatus.FAILED, RunFailureCode.SESSION_INITIALIZATION_FAILED),
+        ("pre-sensitive", RunStatus.FAILED, RunFailureCode.SESSION_INITIALIZATION_FAILED),
+        ("invalid", RunStatus.FAILED, RunFailureCode.INVALID_TOOL_RESULT),
+        ("unsupported", RunStatus.FAILED, RunFailureCode.UNSUPPORTED_TOOL_RESULT),
+        ("sensitive", RunStatus.FAILED, RunFailureCode.SENSITIVE_TOOL_RESULT),
+        ("tool", RunStatus.FAILED, RunFailureCode.TOOL_CALL_FAILED),
+        ("persistence", RunStatus.FAILED, RunFailureCode.INVALID_TOOL_RESULT),
+        ("indeterminate", RunStatus.INDETERMINATE, RunFailureCode.UPSTREAM_OUTCOME_UNKNOWN),
+    ),
+)
+def test_invocation_runner_maps_only_safe_failures(
+    mode: str, expected_status: RunStatus, expected_code: RunFailureCode
+) -> None:
+    class FailingAdapter:
+        async def invoke(
+            self,
+            endpoint: str,
+            *,
+            tool_name: str,
+            arguments: dict[str, object],
+            output_schema: dict[str, object] | None,
+            bearer_token: bytes | bytearray | None = None,
+            before_session: Callable[[], Awaitable[None]],
+            before_dispatch: Callable[[], Awaitable[None]],
+        ) -> InvocationResult:
+            del endpoint, tool_name, arguments, output_schema, bearer_token
+            if mode == "preparation":
+                raise InvocationError(InvocationFailureCode.PREPARATION_FAILED)
+            await before_session()
+            if mode == "session":
+                raise InvocationError(InvocationFailureCode.SESSION_INITIALIZATION_FAILED)
+            if mode == "pre-sensitive":
+                raise InvocationError(InvocationFailureCode.SENSITIVE_RESULT)
+            await before_dispatch()
+            if mode == "indeterminate":
+                raise InvocationIndeterminate(
+                    InvocationFailureCode.TOOL_CALL_FAILED, dispatched=True
+                )
+            if mode == "unsupported":
+                raise InvocationError(
+                    InvocationFailureCode.UNSUPPORTED_RESULT_CONTENT, dispatched=True
+                )
+            if mode == "sensitive":
+                raise InvocationError(InvocationFailureCode.SENSITIVE_RESULT, dispatched=True)
+            if mode == "tool":
+                raise InvocationError(InvocationFailureCode.TOOL_CALL_FAILED, dispatched=True)
+            if mode == "persistence":
+                payload: dict[str, object] = {"content": [{"type": "text", "text": "long"}]}
+                canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+                return InvocationResult(
+                    payload=payload,
+                    canonical_digest=hashlib.sha256(canonical).hexdigest(),
+                    byte_count=len(canonical),
+                )
+            raise InvocationError(InvocationFailureCode.INVALID_UPSTREAM_OUTPUT, dispatched=True)
+
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject=f"runner-{mode}")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=now)
+                token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": mode},
+                )
+                run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": mode},
+                    confirmation_token=token.confirmation_token,
+                    idempotency_key=f"runner-{mode}",
+                )
+            async with transaction(factory) as session:
+                lease = await service(session, now=now).claim_job(
+                    worker_id="runner-worker", lease_duration=timedelta(seconds=30)
+                )
+                assert lease is not None
+
+            def adapter_factory(_: str) -> McpClientAdapter:
+                if mode == "factory":
+                    raise KeyError("unavailable policy")
+                return cast(McpClientAdapter, FailingAdapter())
+
+            runner = InvocationRunner(
+                session_factory=factory,
+                execution_service_factory=lambda session: service(
+                    session,
+                    now=now,
+                    limits=(
+                        ExecutionLimits(max_result_bytes=10) if mode == "persistence" else None
+                    ),
+                ),
+                secret_provider=FixtureSecretProvider({}),
+                adapter_factory=adapter_factory,
+            )
+            assert await runner.run(lease) == expected_status
+            async with factory() as session:
+                stored = await session.get(Run, run.id)
+                assert stored is not None
+                assert stored.status == expected_status.value
+                assert stored.safe_error_code == expected_code.value
+                assert await session.get(RunResult, run.id) is None
+
+    asyncio.run(scenario())
+
+
 def test_worker_rechecks_its_qualified_protocol_at_claim_and_each_fence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1314,6 +1656,12 @@ def test_confirmation_limits_expiry_and_key_configuration_fail_closed(
                 ExecutionLimits(schema_validation_memory_bytes=32 * 1024 * 1024)
             with pytest.raises(ValueError, match="invalid execution limits"):
                 ExecutionLimits(schema_validation_memory_bytes=512 * 1024 * 1024)
+            with pytest.raises(ValueError, match="invalid execution limits"):
+                ExecutionLimits(
+                    argument_retention_days=1,
+                    result_retention_days=14,
+                    run_retention_days=1,
+                )
             with pytest.raises(ValueError, match="run event history is empty"):
                 ExecutionService.replay_projection([])
             with pytest.raises(ValueError, match="invalid cleanup batch"):

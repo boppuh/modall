@@ -37,7 +37,16 @@ SUPPORTED_PROFILES = {
     "malformed-secret",
     "oversized",
     "timeout",
+    "timeout-on-call",
+    "teardown-timeout",
     "disconnect",
+    "disconnect-on-call",
+    "invalid-call-result",
+    "client-error-call",
+    "escaped-large-call",
+    "sensitive-incomplete-call",
+    "sensitive-complete-call",
+    "sensitive-complete-sse-call",
     "headers",
     "sdk",
     "redirect",
@@ -239,6 +248,14 @@ def create_mcp_fixture_app() -> FastAPI:
     drift_generations: dict[str, int] = {}
     sessions: dict[str, tuple[str, str, bool, str]] = {}
 
+    @app.delete("/mcp/{profile}")
+    async def terminate(profile: str) -> Response:
+        """Exercise bounded client-session teardown without exposing payloads."""
+
+        if profile.removeprefix("case-") == "teardown-timeout":
+            await asyncio.sleep(0.1)
+        return Response(status_code=204)
+
     @app.post("/mcp/{profile}")
     async def mcp(
         profile: str,
@@ -329,7 +346,7 @@ def create_mcp_fixture_app() -> FastAPI:
             method == "tools/call"
         ):
             return RedirectResponse("https://redirect.invalid/mcp", status_code=307)
-        if profile == "timeout":
+        if profile == "timeout" or (profile == "timeout-on-call" and method == "tools/call"):
             await asyncio.sleep(0.05)
         if profile in {"malformed", "malformed-secret"}:
             body = (
@@ -352,7 +369,7 @@ def create_mcp_fixture_app() -> FastAPI:
                     yield body[offset : offset + 16_384]
 
             return StreamingResponse(oversized_body(), media_type="application/json")
-        if profile == "disconnect":
+        if profile == "disconnect" or (profile == "disconnect-on-call" and method == "tools/call"):
 
             async def abort_body() -> Any:
                 yield b'{"jsonrpc":"2.0","id":'
@@ -386,9 +403,75 @@ def create_mcp_fixture_app() -> FastAPI:
                 return Response(unicode_body, media_type="application/json")
             return JSONResponse(response_payload)
         if method == "tools/call":
+            if profile == "client-error-call":
+                return Response("authentication rejected", status_code=401)
+            if profile == "escaped-large-call":
+                return Response(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": {
+                                "content": [
+                                    {"type": "text", "text": "é" * 4_000} for _ in range(16)
+                                ],
+                                "isError": False,
+                            },
+                        }
+                    ),
+                    media_type="application/json",
+                )
+            if profile == "sensitive-complete-sse-call":
+
+                async def sensitive_result_event() -> Any:
+                    yield (
+                        b'data: {"jsonrpc":"2.0","id":'
+                        + json.dumps(request_id).encode()
+                        + b',"result":{"content":[{"type":"text",'
+                        b'"text":"sk_live_abcdefghijkl"}],"isError":false}}\n\n'
+                    )
+
+                return StreamingResponse(sensitive_result_event(), media_type="text/event-stream")
+            if profile == "sensitive-complete-call":
+                return JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {
+                            "content": [{"type": "text", "text": "sk_live_abcdefghijkl"}],
+                            "isError": False,
+                        },
+                    }
+                )
+            if profile == "sensitive-incomplete-call":
+
+                async def sensitive_notification() -> Any:
+                    yield (
+                        b'data: {"jsonrpc":"2.0","method":"notifications/progress",'
+                        b'"params":{"token":"sk_live_abcdefghijkl"}}\n\n'
+                    )
+                    raise ConnectionError("fixture disconnect")
+
+                return StreamingResponse(sensitive_notification(), media_type="text/event-stream")
             params = payload.get("params", {})
             name = params.get("name")
             arguments = params.get("arguments", {})
+            if profile == "invalid-call-result":
+                return JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {"content": "not-a-content-list", "isError": False},
+                    }
+                )
+            if name == "rpc-error":
+                return JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {"code": -32601, "message": "fixture method unavailable"},
+                    }
+                )
             if name == "echo":
                 message = arguments.get("message", "")
                 return JSONResponse(

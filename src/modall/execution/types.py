@@ -74,7 +74,18 @@ class RunFailureCode(StrEnum):
     SESSION_INITIALIZATION_FAILED = "session_initialization_failed"
     TOOL_CALL_FAILED = "tool_call_failed"
     INVALID_TOOL_RESULT = "invalid_tool_result"
+    UNSUPPORTED_TOOL_RESULT = "unsupported_tool_result"
+    SENSITIVE_TOOL_RESULT = "sensitive_tool_result"
     UPSTREAM_OUTCOME_UNKNOWN = "upstream_outcome_unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedToolResult:
+    """Bounded, screened result content safe for durable storage."""
+
+    payload: dict[str, object]
+    canonical_digest: str
+    byte_count: int
 
 
 class ExecutionError(Exception):
@@ -94,9 +105,11 @@ class HmacKeyVersion:
 @dataclass(frozen=True, slots=True)
 class ExecutionLimits:
     max_argument_bytes: int = 65_536
+    max_result_bytes: int = 262_144
     confirmation_ttl_seconds: int = 120
     max_run_seconds: int = 300
     argument_retention_days: int = 14
+    result_retention_days: int = 14
     run_retention_days: int = 90
     max_idempotency_key_characters: int = 256
     max_historical_hmac_keys: int = 8
@@ -107,10 +120,13 @@ class ExecutionLimits:
     def __post_init__(self) -> None:
         if (
             self.max_argument_bytes <= 0
+            or self.max_result_bytes <= 0
             or not 1 <= self.confirmation_ttl_seconds <= 300
             or self.max_run_seconds <= 0
             or not 1 <= self.argument_retention_days <= 14
+            or not 1 <= self.result_retention_days <= 14
             or self.run_retention_days < self.argument_retention_days
+            or self.run_retention_days < self.result_retention_days
             or self.max_idempotency_key_characters <= 0
             or not 1 <= self.max_historical_hmac_keys <= 16
             or not 0 < self.schema_validation_timeout_seconds <= 5

@@ -52,19 +52,8 @@ class SecretProvider(Protocol):
 def validate_secret_reference(reference: SecretReference) -> None:
     """Validate metadata before it is persisted as a usable binding."""
 
-    if reference.provider == "mounted_file":
+    if reference.provider in {"fixture", "mounted_file"}:
         MountedFileSecretProvider.filename_for(reference.external_reference, reference.version)
-        return
-    if reference.provider == "fixture":
-        if (
-            not reference.external_reference.strip()
-            or len(reference.external_reference) > 256
-            or "\x00" in reference.external_reference
-            or not reference.version.strip()
-            or len(reference.version) > 128
-            or "\x00" in reference.version
-        ):
-            raise SecretProviderError("invalid secret reference")
         return
     raise SecretProviderError("unsupported secret provider")
 
@@ -72,8 +61,16 @@ def validate_secret_reference(reference: SecretReference) -> None:
 class FixtureSecretProvider:
     """In-memory provider restricted to tests and local fixtures."""
 
-    def __init__(self, values: dict[tuple[str, str], bytes]) -> None:
+    def __init__(
+        self,
+        values: dict[tuple[str, str], bytes],
+        *,
+        mounted_root: Path | None = None,
+    ) -> None:
         self._values = values
+        self._mounted = (
+            MountedFileSecretProvider(mounted_root) if mounted_root is not None else None
+        )
 
     def retrieve(self, reference: SecretReference) -> SecretLease:
         if reference.provider != "fixture":
@@ -81,7 +78,15 @@ class FixtureSecretProvider:
         try:
             value = self._values[(reference.external_reference, reference.version)]
         except KeyError:
-            raise SecretProviderError("secret reference not found") from None
+            if self._mounted is None:
+                raise SecretProviderError("secret reference not found") from None
+            return self._mounted.retrieve(
+                SecretReference(
+                    provider="mounted_file",
+                    external_reference=reference.external_reference,
+                    version=reference.version,
+                )
+            )
         return SecretLease(value)
 
 
@@ -169,4 +174,4 @@ def build_secret_provider(
         return MountedFileSecretProvider(settings.secret_mount_root)
     if settings.environment not in {"local", "test"}:
         raise ValueError("fixture secrets are restricted to local and test environments")
-    return FixtureSecretProvider(fixture_values or {})
+    return FixtureSecretProvider(fixture_values or {}, mounted_root=settings.fixture_secret_root)

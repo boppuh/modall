@@ -19,6 +19,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 
 from modall.audit.types import AuditAction, ResourceType
 from modall.execution.types import (
+    AcceptedToolResult,
     ExecutionError,
     ExecutionFailureCode,
     ExecutionLimits,
@@ -47,6 +48,7 @@ from modall.persistence.models import (
     Run,
     RunAttempt,
     RunEvent,
+    RunResult,
     ServerConnection,
     SystemExecutionState,
     Workspace,
@@ -619,6 +621,50 @@ class ExecutionService:
         await self._session.flush()
         return run
 
+    async def complete_invocation_success(
+        self, lease: JobLease, *, result: AcceptedToolResult
+    ) -> Run:
+        """Atomically persist accepted content with successful completion."""
+
+        try:
+            validate_bounded_json(result.payload)
+            canonical = json.dumps(
+                result.payload,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if (
+                not canonical
+                or len(canonical) > self._limits.max_result_bytes
+                or len(canonical) != result.byte_count
+                or _sha256(canonical) != result.canonical_digest
+                or contains_sensitive_json(result.payload)
+            ):
+                raise ValueError
+        except Exception as exc:
+            raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS) from exc
+        run = await self.complete_lease(lease, status=RunStatus.SUCCEEDED)
+        if run.status != RunStatus.SUCCEEDED.value:
+            return run
+        captured_at = (
+            _utc(run.terminal_at) if run.terminal_at is not None else await self._durable_now()
+        )
+        self._session.add(
+            RunResult(
+                run_id=run.id,
+                workspace_id=run.workspace_id,
+                payload=result.payload,
+                canonical_digest=result.canonical_digest,
+                byte_count=result.byte_count,
+                captured_at=captured_at,
+                expires_at=captured_at + timedelta(days=self._limits.result_retention_days),
+            )
+        )
+        await self._session.flush()
+        return run
+
     async def cancel_run(
         self,
         *,
@@ -809,6 +855,25 @@ class ExecutionService:
         if run_ids:
             await self._session.execute(delete(Run).where(Run.id.in_(run_ids)))
         return len(run_ids)
+
+    async def expire_retained_results(self, *, batch_size: int = 500) -> int:
+        if batch_size <= 0 or batch_size > 1000:
+            raise ValueError("invalid cleanup batch")
+        now = await self._durable_now()
+        result_ids = list(
+            (
+                await self._session.scalars(
+                    select(RunResult.run_id)
+                    .where(RunResult.expires_at <= now)
+                    .order_by(RunResult.expires_at, RunResult.run_id)
+                    .limit(batch_size)
+                    .with_for_update(skip_locked=True)
+                )
+            ).all()
+        )
+        if result_ids:
+            await self._session.execute(delete(RunResult).where(RunResult.run_id.in_(result_ids)))
+        return len(result_ids)
 
     @staticmethod
     def replay_projection(events: Sequence[RunEvent]) -> RunStatus:
@@ -1614,6 +1679,8 @@ class ExecutionService:
                 RunStatus.DISPATCH_FENCED: {
                     RunFailureCode.TOOL_CALL_FAILED,
                     RunFailureCode.INVALID_TOOL_RESULT,
+                    RunFailureCode.UNSUPPORTED_TOOL_RESULT,
+                    RunFailureCode.SENSITIVE_TOOL_RESULT,
                 },
             }
             return safe_error_code in allowed_codes.get(source, set())

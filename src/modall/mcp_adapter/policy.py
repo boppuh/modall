@@ -234,17 +234,27 @@ class LimitedByteStream(httpx.AsyncByteStream):
         budget: "RawByteBudget",
         forbidden_values: tuple[bytes, ...],
         mark_sensitive_response: Callable[[], None],
+        mark_complete: Callable[[], None],
+        mark_tool_failure: Callable[[], None],
+        expected_response_id: object,
         media_type: str,
+        status_code: int,
     ) -> None:
         self._stream = stream
         self._budget = budget
         self._mark_sensitive_response = mark_sensitive_response
+        self._mark_complete = mark_complete
+        self._mark_tool_failure = mark_tool_failure
+        self._expected_response_id = expected_response_id
+        self._status_code = status_code
+        self._response_marked = False
+        self._pending_sensitive_response = False
         self._forbidden_matcher = _IncrementalByteMatcher(forbidden_values)
         self._decoded_forbidden_matcher = _IncrementalByteMatcher(forbidden_values)
         self._escape_decoder = _IncrementalJsonEscapeDecoder()
         self._generic_tail = b""
         self._structured_buffer = bytearray()
-        self._buffer_json_document = media_type != "text/event-stream"
+        self._buffer_json_document = media_type != "text/event-stream" or status_code != 200
         self._sse_scan_from = 0
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
@@ -252,31 +262,42 @@ class LimitedByteStream(httpx.AsyncByteStream):
             self._budget.consume(len(chunk))
             decoded_chunk = self._escape_decoder.feed(chunk)
             generic_window = self._generic_tail + decoded_chunk
+            self._generic_tail = generic_window[-256:]
+            self._structured_buffer.extend(chunk)
+            if not self._buffer_json_document:
+                self._screen_completed_sse_events()
             if (
                 self._forbidden_matcher.feed(chunk)
                 or self._decoded_forbidden_matcher.feed(decoded_chunk)
                 or contains_obvious_secret(generic_window.decode("utf-8", errors="ignore"))
             ):
-                self._reject_sensitive_body()
-            self._generic_tail = generic_window[-256:]
-            self._structured_buffer.extend(chunk)
+                self._mark_sensitive_response()
+                self._pending_sensitive_response = True
             if self._buffer_json_document:
                 continue
-            self._screen_completed_sse_events()
             yield chunk
         decoded_tail = self._escape_decoder.finish()
         if self._decoded_forbidden_matcher.feed(decoded_tail) or contains_obvious_secret(
             (self._generic_tail + decoded_tail).decode("utf-8", errors="ignore")
         ):
-            self._reject_sensitive_body()
+            self._mark_sensitive_response()
+            self._pending_sensitive_response = True
         if self._buffer_json_document:
             body = bytes(self._structured_buffer)
-            if _contains_sensitive_json_document(body):
+            response = _jsonrpc_response(body, self._expected_response_id)
+            malformed_success = response is None and self._status_code == 200
+            client_rejection = 400 <= self._status_code < 500
+            if client_rejection or malformed_success or (response is not None and response[0]):
+                self._mark_complete_once()
+                if client_rejection or (response is not None and response[1]):
+                    self._mark_tool_failure()
+            if self._pending_sensitive_response or _contains_sensitive_json_document(body):
                 self._reject_sensitive_body()
             if body:
                 yield body
-        elif self._structured_buffer and _contains_sensitive_sse_event(
-            bytes(self._structured_buffer)
+        elif self._pending_sensitive_response or (
+            self._structured_buffer
+            and _contains_sensitive_sse_event(bytes(self._structured_buffer))
         ):
             self._reject_sensitive_body()
 
@@ -288,7 +309,12 @@ class LimitedByteStream(httpx.AsyncByteStream):
             event = bytes(self._structured_buffer[consumed : match.start()])
             consumed = match.end()
             self._sse_scan_from = consumed
-            if _contains_sensitive_sse_event(event):
+            is_response, is_error = _sse_jsonrpc_response(event, self._expected_response_id)
+            if is_response:
+                self._mark_complete_once()
+                if is_error:
+                    self._mark_tool_failure()
+            if self._pending_sensitive_response or _contains_sensitive_sse_event(event):
                 self._reject_sensitive_body()
         if consumed:
             del self._structured_buffer[:consumed]
@@ -297,6 +323,11 @@ class LimitedByteStream(httpx.AsyncByteStream):
     def _reject_sensitive_body(self) -> None:
         self._mark_sensitive_response()
         raise EndpointPolicyError("sensitive upstream response body")
+
+    def _mark_complete_once(self) -> None:
+        if not self._response_marked:
+            self._response_marked = True
+            self._mark_complete()
 
     async def aclose(self) -> None:
         buffered = bytes(self._structured_buffer)
@@ -525,11 +556,21 @@ class LimitedTransport(httpx.AsyncBaseTransport):
             value.encode("utf-8") for value in forbidden_response_values
         )
         self._sensitive_response_detected = False
+        self._tool_call_response_completed = False
+        self._tool_call_failure_completed = False
         self._before_request = before_request
 
     @property
     def sensitive_response_detected(self) -> bool:
         return self._sensitive_response_detected
+
+    @property
+    def tool_call_response_completed(self) -> bool:
+        return self._tool_call_response_completed
+
+    @property
+    def tool_call_failure_completed(self) -> bool:
+        return self._tool_call_failure_completed
 
     def _mark_sensitive_response(self) -> None:
         self._sensitive_response_detected = True
@@ -537,7 +578,9 @@ class LimitedTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if self._before_request is not None:
             await self._before_request()
+        method, request_id = _request_envelope(request)
         response = await self._inner.handle_async_request(request)
+        is_tool_call = method == "tools/call"
         content_encoding = response.headers.get("content-encoding", "identity").lower()
         if content_encoding != "identity":
             await response.aclose()
@@ -586,7 +629,11 @@ class LimitedTransport(httpx.AsyncBaseTransport):
                 self._budget,
                 self._forbidden_response_bytes,
                 self._mark_sensitive_response,
+                self._mark_tool_call_response_complete if is_tool_call else _noop,
+                self._mark_tool_call_failure if is_tool_call else _noop,
+                request_id,
                 media_type,
+                response.status_code,
             ),
             extensions=response.extensions,
             request=request,
@@ -599,5 +646,51 @@ class LimitedTransport(httpx.AsyncBaseTransport):
                 raise
         return screened_response
 
+    def _mark_tool_call_response_complete(self) -> None:
+        self._tool_call_response_completed = True
+
+    def _mark_tool_call_failure(self) -> None:
+        self._tool_call_failure_completed = True
+
     async def aclose(self) -> None:
         await self._inner.aclose()
+
+
+def _request_envelope(request: httpx.Request) -> tuple[str | None, object]:
+    try:
+        payload = json.loads(request.content)
+    except (json.JSONDecodeError, UnicodeError, httpx.RequestNotRead):
+        return None, None
+    method = payload.get("method") if isinstance(payload, dict) else None
+    request_id = payload.get("id") if isinstance(payload, dict) else None
+    return (method if isinstance(method, str) else None), request_id
+
+
+def _noop() -> None:
+    return None
+
+
+def _jsonrpc_response(value: bytes, expected_id: object) -> tuple[bool, bool] | None:
+    """Classify one complete document, preserving malformed-body certainty."""
+
+    try:
+        payload = json.loads(value)
+    except (json.JSONDecodeError, UnicodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("jsonrpc") != "2.0"
+        or "id" not in payload
+        or ("result" not in payload and "error" not in payload)
+    ):
+        return False, False
+    matching = type(payload["id"]) is type(expected_id) and payload["id"] == expected_id
+    return matching, matching and isinstance(payload.get("error"), dict)
+
+
+def _sse_jsonrpc_response(event: bytes, expected_id: object) -> tuple[bool, bool]:
+    text = event.decode("utf-8", errors="ignore")
+    data = "\n".join(
+        line.partition(":")[2].lstrip() for line in text.splitlines() if line.startswith("data:")
+    )
+    return _jsonrpc_response(data.encode(), expected_id) or (False, False)

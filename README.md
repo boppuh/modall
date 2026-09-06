@@ -36,6 +36,10 @@ Compose applies Alembic migrations before starting the API. For a separately man
 run `make migrate` with `MODALL_DATABASE_URL` configured.
 
 Local/test processes use the explicit `local` authentication mode and fixture secret provider.
+Local fixture credentials are shared by the API and worker through
+`MODALL_FIXTURE_SECRET_ROOT`. Store each credential beneath that directory using the same
+base64url filename mapping described below; `.modall/` is ignored by Git and mounted read-only by
+Compose. Create `.modall/fixture-secrets` before starting Compose and never commit its contents.
 Staging and production settings fail validation unless OIDC (`MODALL_OIDC_ISSUER`,
 `MODALL_OIDC_AUDIENCE`, and `MODALL_OIDC_JWKS_URL`) and the `mounted_file` secret provider are
 configured. Mounted secrets are read only from `MODALL_SECRET_MOUNT_ROOT`. The immutable filename
@@ -44,6 +48,12 @@ encoding of the version (for example, `api-token`/`v2` maps to `YXBpLXRva2Vu.djI
 stores only the opaque reference and version. Bindings whose encoded filename exceeds the portable
 255-byte component limit are rejected before persistence.
 
-The API and worker are intentionally thin in this foundation PR. Persistence, identity,
-registry, discovery, execution, and operator workflows land in the independently reviewed
-slices listed in the implementation plan.
+The worker loads confirmation and idempotency HMAC key versions from the same provider using the
+fixed references `system-confirmation-hmac` and `system-idempotency-hmac`. Configure active-first
+version lists with `MODALL_CONFIRMATION_HMAC_KEY_VERSIONS` and
+`MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS`; deployed mounted-file environments must project the
+corresponding encoded files before the worker starts.
+
+The API remains intentionally thin while the independently reviewed control-plane and operator
+workflow slices land. The worker already claims durable invocation jobs and performs bounded
+maintenance.

@@ -710,6 +710,7 @@ class Run(Base):
             "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
             "'content_retention_deadline', 'preparation_failed', "
             "'session_initialization_failed', 'tool_call_failed', 'invalid_tool_result', "
+            "'unsupported_tool_result', 'sensitive_tool_result', "
             "'upstream_outcome_unknown')",
             name="ck_run_safe_error_code",
         ),
@@ -792,6 +793,28 @@ class Run(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
     terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RunResult(Base):
+    __tablename__ = "run_results"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "run_id"],
+            ["runs.workspace_id", "runs.id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("byte_count > 0", name="ck_run_result_byte_count"),
+        CheckConstraint("length(canonical_digest) = 64", name="ck_run_result_digest"),
+        Index("ix_run_results_expiry", "expires_at", "run_id"),
+    )
+
+    run_id: Mapped[UUID] = mapped_column(primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    canonical_digest: Mapped[str] = mapped_column(String(64))
+    byte_count: Mapped[int] = mapped_column(Integer)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class Job(Base):
@@ -881,6 +904,7 @@ class RunAttempt(Base):
             "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
             "'content_retention_deadline', 'preparation_failed', "
             "'session_initialization_failed', 'tool_call_failed', 'invalid_tool_result', "
+            "'unsupported_tool_result', 'sensitive_tool_result', "
             "'upstream_outcome_unknown')",
             name="ck_run_attempt_safe_error_code",
         ),
@@ -948,6 +972,7 @@ class RunEvent(Base):
             "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
             "'content_retention_deadline', 'preparation_failed', "
             "'session_initialization_failed', 'tool_call_failed', 'invalid_tool_result', "
+            "'unsupported_tool_result', 'sensitive_tool_result', "
             "'upstream_outcome_unknown')",
             name="ck_run_event_safe_error_code",
         ),
@@ -1113,6 +1138,7 @@ for immutable_model in (
     DiscoverySnapshotCapability,
     RegistrySearchCache,
     RunEvent,
+    RunResult,
     ConfirmationNonce,
     IdempotencyRecord,
 ):

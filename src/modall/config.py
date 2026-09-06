@@ -1,11 +1,14 @@
 """Process configuration shared by the API and worker."""
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, HttpUrl, PostgresDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_KEY_VERSION = re.compile(r"[A-Za-z0-9._-]{1,32}\Z")
 
 
 class Settings(BaseSettings):
@@ -25,6 +28,14 @@ class Settings(BaseSettings):
     worker_maintenance_timeout_seconds: Annotated[
         float, Field(gt=0, le=60, allow_inf_nan=False)
     ] = 5.0
+    worker_maintenance_interval_seconds: Annotated[
+        float, Field(gt=0, le=3600, allow_inf_nan=False)
+    ] = 60.0
+    worker_lease_duration_seconds: Annotated[float, Field(ge=15, le=300, allow_inf_nan=False)] = (
+        30.0
+    )
+    confirmation_hmac_key_versions: tuple[str, ...] = ("v1",)
+    idempotency_hmac_key_versions: tuple[str, ...] = ("v1",)
     auth_mode: Literal["local", "oidc"] = "local"
     # Preserve the issuer byte-for-byte for OIDC's exact identifier comparison.
     oidc_issuer: str | None = None
@@ -33,6 +44,7 @@ class Settings(BaseSettings):
     local_subject: str = "local-developer"
     secret_provider: Literal["fixture", "mounted_file"] = "fixture"
     secret_mount_root: Path = Path("/run/secrets")
+    fixture_secret_root: Path | None = None
 
     @model_validator(mode="after")
     def validate_security_modes(self) -> "Settings":
@@ -48,6 +60,10 @@ class Settings(BaseSettings):
             raise ValueError("deployed environments require OIDC authentication")
         if deployed and self.secret_provider != "mounted_file":
             raise ValueError("deployed environments require the mounted-file secret provider")
+        if deployed and self.fixture_secret_root is not None:
+            raise ValueError("deployed environments cannot configure fixture secrets")
+        if self.secret_provider != "fixture" and self.fixture_secret_root is not None:
+            raise ValueError("fixture secret root requires the fixture provider")
         if self.auth_mode == "oidc" and not all(
             (self.oidc_issuer, self.oidc_audience, self.oidc_jwks_url)
         ):
@@ -67,6 +83,16 @@ class Settings(BaseSettings):
             raise ValueError("OIDC issuer or JWKS URL is not conforming")
         if not self.local_subject.strip() or len(self.local_subject) > 512:
             raise ValueError("local subject must contain between 1 and 512 characters")
+        for versions in (
+            self.confirmation_hmac_key_versions,
+            self.idempotency_hmac_key_versions,
+        ):
+            if (
+                not 1 <= len(versions) <= 8
+                or len(set(versions)) != len(versions)
+                or any(_KEY_VERSION.fullmatch(version) is None for version in versions)
+            ):
+                raise ValueError("invalid HMAC key versions")
         return self
 
 
