@@ -694,7 +694,6 @@ class OfficialRegistryService:
             normalized_results
         ):
             raise OfficialRegistryError(OfficialRegistryFailureCode.RESPONSE_LIMIT)
-        fetched_at = self._utc_now()
         if not workspace_locked:
             await require_current_role(
                 self._session,
@@ -703,6 +702,7 @@ class OfficialRegistryService:
                 Role.OPERATOR,
                 serialize_workspace=True,
             )
+        fetched_at = self._utc_now()
         await _purge_expired_workspace_cache(
             self._session,
             workspace_id=context.workspace_id,
@@ -786,6 +786,26 @@ class OfficialRegistryService:
         cache_id: UUID,
         provenance_digest: str,
         correlation_id: UUID | None = None,
+    ) -> RegistryEntryVersion:
+        try:
+            async with asyncio.timeout(self._limits.total_timeout_seconds):
+                return await self._import_cached_authorized(
+                    context=context,
+                    cache_id=cache_id,
+                    provenance_digest=provenance_digest,
+                    correlation_id=correlation_id,
+                )
+        except TimeoutError:
+            pass
+        raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT)
+
+    async def _import_cached_authorized(
+        self,
+        *,
+        context: WorkspaceContext,
+        cache_id: UUID,
+        provenance_digest: str,
+        correlation_id: UUID | None,
     ) -> RegistryEntryVersion:
         await require_current_role(
             self._session,
@@ -963,10 +983,15 @@ async def _screen_query(
 
 
 def _require_picklable_scanner(scanner: Callable[[object], bool]) -> None:
+    picklable = False
     try:
         ForkingPickler.dumps(scanner)
     except Exception:
-        raise ValueError("official Registry scanners must be importable and picklable") from None
+        pass
+    else:
+        picklable = True
+    if not picklable:
+        raise ValueError("official Registry scanners must be importable and picklable")
 
 
 async def _flush_registry_payload(session: AsyncSession) -> bool:
@@ -1040,19 +1065,8 @@ async def _run_scanner(
         if receiver is not None:
             with suppress(Exception):
                 receiver.close()
-        if process is not None and process.pid is not None:
-            if process.is_alive():
-                with suppress(Exception):
-                    process.terminate()
-                with suppress(Exception):
-                    process.join(timeout=0.25)
-            if process.is_alive():
-                with suppress(Exception):
-                    process.kill()
-                with suppress(Exception):
-                    process.join()
-            with suppress(Exception):
-                process.close()
+        if process is not None:
+            await _close_scanner_process(process)
         if permit_acquired:
             _release_scanner_process_permit()
     if failure_code is not None:
@@ -1060,6 +1074,24 @@ async def _run_scanner(
     if not scan_completed:
         raise OfficialRegistryError(OfficialRegistryFailureCode.SCANNER_FAILED)
     return scan_result
+
+
+async def _close_scanner_process(process: SpawnProcess) -> None:
+    if process.pid is None:
+        return
+    if process.is_alive():
+        with suppress(Exception):
+            process.terminate()
+        with suppress(Exception):
+            await asyncio.to_thread(process.join, 0.25)
+    if process.is_alive():
+        with suppress(Exception):
+            process.kill()
+        with suppress(Exception):
+            await asyncio.to_thread(process.join, 0.25)
+    if not process.is_alive():
+        with suppress(Exception):
+            process.close()
 
 
 async def purge_expired_registry_cache(

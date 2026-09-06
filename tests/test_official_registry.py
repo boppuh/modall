@@ -17,7 +17,11 @@ from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from modall.audit.types import AuditAction
-from modall.identity.repository import AuthorizationDenied, AuthorizationService
+from modall.identity.repository import (
+    AuthorizationDenied,
+    AuthorizationService,
+    require_current_role,
+)
 from modall.identity.service import IdentityService
 from modall.identity.types import Permission, Principal, Role, WorkspaceContext
 from modall.persistence.database import create_engine, create_session_factory, transaction
@@ -28,6 +32,7 @@ from modall.persistence.models import (
     RegistryEntryVersion,
     RegistrySearchCache,
     ServerConnection,
+    WorkspaceMembership,
 )
 from modall.registry import official as official_registry
 from modall.registry.official import (
@@ -68,6 +73,14 @@ def scanner_hangs(value: object) -> bool:
     del value
     while True:
         time.sleep(1)
+
+
+class ScannerWithSensitivePickleFailure:
+    def __call__(self, value: object) -> bool:
+        return bool(value)
+
+    def __reduce__(self) -> str | tuple[object, ...]:
+        raise RuntimeError("scanner-config-secret")
 
 
 class ReusableTrackingTransport(httpx.AsyncBaseTransport):
@@ -517,6 +530,10 @@ def test_adapter_rejects_non_picklable_scanners_at_construction() -> None:
         OfficialRegistryAdapter(query_scanner=scanner)
     with pytest.raises(ValueError, match="importable and picklable"):
         OfficialRegistryAdapter(metadata_scanner=scanner)
+    with pytest.raises(ValueError, match="importable and picklable") as raised:
+        OfficialRegistryAdapter(query_scanner=ScannerWithSensitivePickleFailure())
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
 
 
 def test_global_cache_cleanup_deletes_bounded_batches() -> None:
@@ -997,6 +1014,43 @@ def test_service_deadline_is_detached_from_scanned_metadata() -> None:
     asyncio.run(scenario())
 
 
+def test_import_workspace_lock_wait_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        async def stalled_role_check(
+            session: AsyncSession,
+            context: WorkspaceContext,
+            *roles: Role,
+            serialize_workspace: bool = False,
+        ) -> WorkspaceMembership:
+            del session, context, roles, serialize_workspace
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="bounded-import-lock")
+            monkeypatch.setattr(official_registry, "require_current_role", stalled_role_check)
+            async with transaction(factory) as session:
+                context = WorkspaceContext(workspace_id, user_id, Role.OPERATOR)
+                with pytest.raises(OfficialRegistryError) as raised:
+                    await OfficialRegistryService(
+                        session,
+                        OfficialRegistryAdapter(
+                            limits=OfficialRegistryLimits(total_timeout_seconds=0.01)
+                        ),
+                    ).import_cached(
+                        context=context,
+                        cache_id=UUID(int=1),
+                        provenance_digest="0" * 64,
+                    )
+        assert raised.value.code == OfficialRegistryFailureCode.TIMEOUT
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+    asyncio.run(scenario())
+
+
 def test_service_screens_each_search_only_once() -> None:
     class CountingAdapter(OfficialRegistryAdapter):
         def __init__(self, *, transport: httpx.AsyncBaseTransport) -> None:
@@ -1044,6 +1098,53 @@ def test_repeated_hanging_scanners_are_killed_without_leaking_workers() -> None:
                     await adapter.screen_query("weather")
                 assert raised.value.code == OfficialRegistryFailureCode.SCANNER_FAILED
             assert {child.pid for child in multiprocessing.active_children()} == existing_children
+
+    asyncio.run(scenario())
+
+
+def test_scanner_process_join_does_not_block_the_event_loop() -> None:
+    class SlowJoinProcess:
+        pid = 1
+
+        def __init__(self) -> None:
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            return None
+
+        def join(self, timeout: float) -> None:
+            time.sleep(timeout)
+
+        def kill(self) -> None:
+            self.killed = True
+            self.alive = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    async def scenario() -> None:
+        process = SlowJoinProcess()
+        ticks = 0
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while not cleanup.done():
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        cleanup = asyncio.create_task(
+            official_registry._close_scanner_process(process)  # type: ignore[arg-type]
+        )
+        await ticker()
+        await cleanup
+        assert process.killed is True
+        assert process.closed is True
+        assert ticks >= 20
 
     asyncio.run(scenario())
 
@@ -1600,6 +1701,55 @@ def test_cache_quota_excludes_rows_above_a_stricter_rolling_item_policy() -> Non
                 assert replacement.cache_id != original.cache_id
                 assert await session.get(RegistrySearchCache, original.cache_id) is None
             assert calls == 3
+
+    asyncio.run(scenario())
+
+
+def test_cache_freshness_starts_after_workspace_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        current = datetime(2026, 9, 6, tzinfo=UTC)
+        initial = current
+        original_role_check = require_current_role
+
+        async def delayed_role_check(
+            session: AsyncSession,
+            context: WorkspaceContext,
+            *roles: Role,
+            serialize_workspace: bool = False,
+        ) -> WorkspaceMembership:
+            nonlocal current
+            membership = await original_role_check(
+                session, context, *roles, serialize_workspace=serialize_workspace
+            )
+            if serialize_workspace:
+                current += timedelta(seconds=2)
+            return membership
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={"servers": [], "metadata": {"count": 0}},
+                request=request,
+            )
+
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="post-lock-freshness")
+            monkeypatch.setattr(official_registry, "require_current_role", delayed_role_check)
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                result = await OfficialRegistryService(
+                    session,
+                    OfficialRegistryAdapter(
+                        transport=httpx.MockTransport(handler),
+                        limits=OfficialRegistryLimits(cache_ttl=timedelta(seconds=1)),
+                    ),
+                    now=lambda: current,
+                ).search(context=context, query="weather")
+                assert result.fetched_at == initial + timedelta(seconds=2)
+                assert result.expires_at > current
 
     asyncio.run(scenario())
 
