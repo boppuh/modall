@@ -8,6 +8,7 @@ export type Connection = Schemas["ConnectionResponse"];
 export type ConnectionDetail = Schemas["ConnectionDetailResponse"];
 export type ConnectionVersion = Schemas["ConnectionVersionResponse"];
 export type Capability = Schemas["CapabilityResponse"];
+export type CapabilityStatus = "pending_review" | "enabled" | "disabled" | "unavailable";
 export type CapabilityDetail = Schemas["CapabilityDetailResponse"];
 export type CapabilityVersion = Schemas["CapabilityVersionResponse"];
 export type RegistryEntry = Schemas["RegistryEntryResponse"];
@@ -81,7 +82,7 @@ export interface ControlPlane {
   searchRegistry(query: string): Promise<RegistrySearch>;
   importRegistry(cacheId: string, provenanceDigest: string, idempotencyKey: string): Promise<RegistryEntry>;
   listRegistryEntries(): Promise<RegistryEntry[]>;
-  listCapabilities(): Promise<Capability[]>;
+  listCapabilities(status?: CapabilityStatus): Promise<Capability[]>;
   getCapability(id: string): Promise<CapabilityDetail>;
   capabilityAction(versionId: string, action: "enable" | "disable", idempotencyKey: string): Promise<Capability>;
   listRuns(): Promise<Run[]>;
@@ -175,8 +176,8 @@ class GeneratedControlPlane implements ControlPlane {
     return collectPages((cursor) => unwrap(this.client.GET("/v1/registry/entries", { params: { query: { limit: 100, cursor } } })));
   }
 
-  async listCapabilities(): Promise<Capability[]> {
-    return collectPages((cursor) => unwrap(this.client.GET("/v1/capabilities", { params: { query: { limit: 100, cursor } } })));
+  async listCapabilities(status?: CapabilityStatus): Promise<Capability[]> {
+    return collectPages((cursor) => unwrap(this.client.GET("/v1/capabilities", { params: { query: { limit: 100, cursor, status } } })));
   }
 
   getCapability(id: string): Promise<CapabilityDetail> {

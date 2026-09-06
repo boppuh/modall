@@ -149,6 +149,11 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Registry overview" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Open review queue" }));
     expect(await screen.findByRole("heading", { name: "Capabilities" })).toBeTruthy();
+    expect(window.location.search).toBe("?status=pending_review");
+    await waitFor(() => expect(api.listCapabilities).toHaveBeenCalledWith("pending_review"));
+    fireEvent.change(screen.getByLabelText("Capability status"), { target: { value: "all" } });
+    await waitFor(() => expect(window.location.search).toBe(""));
+    await waitFor(() => expect(api.listCapabilities).toHaveBeenCalledWith(undefined));
     fireEvent.click(screen.getByRole("button", { name: "Modall overview" }));
     expect(await screen.findByRole("heading", { name: "Registry overview" })).toBeTruthy();
 
@@ -227,6 +232,36 @@ describe("App", () => {
     await waitFor(() => expect(api.cancelRun).toHaveBeenCalledWith(runId, expect.any(String)));
   });
 
+  it("preserves a run key across ambiguous submission recovery", async () => {
+    const createRun = vi.fn<ControlPlane["createRun"]>().mockRejectedValue(new Error("response lost"));
+    const api = fakeApi({ createRun });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
+    await screen.findByRole("option", { name: /tools\/search/ });
+    fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
+    fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
+    let confirm = await screen.findByRole("button", { name: "Confirm and run" });
+    await waitFor(() => expect(confirm).toHaveProperty("disabled", false));
+    fireEvent.click(confirm);
+    await waitFor(() => expect(createRun).toHaveBeenCalledTimes(1));
+    const originalKey = createRun.mock.calls[0]?.[2] ?? "";
+
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
+    confirm = await screen.findByRole("button", { name: "Confirm and run" });
+    await waitFor(() => expect(confirm).toHaveProperty("disabled", false));
+    fireEvent.click(confirm);
+    await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2));
+    expect(createRun.mock.calls[1]?.[2]).toBe(originalKey);
+  });
+
+  it("warns operators not to retry an indeterminate run", async () => {
+    const indeterminate = { ...run, status: "indeterminate" as const, safe_error_code: "upstream_outcome_unknown", terminal_at: timestamp };
+    window.history.replaceState({}, "", `/runs/${runId}`);
+    renderApp(fakeApi({ listRuns: vi.fn().mockResolvedValue([indeterminate]), getRun: vi.fn().mockResolvedValue(indeterminate) }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Do not retry this invocation");
+  });
+
   it("expires stale confirmations and fetches a terminal run's final event", async () => {
     const terminalRun = { ...run, status: "succeeded" as const, terminal_at: timestamp };
     const listRunEvents = vi.fn().mockResolvedValue([{ id: connectionId, sequence: 1, event_type: "completed", status: "succeeded", safe_error_code: null, occurred_at: timestamp }]);
@@ -279,6 +314,7 @@ describe("App", () => {
     window.history.pushState({}, "", `/capabilities/${capabilityId}`);
     window.dispatchEvent(new PopStateEvent("popstate"));
     expect(await screen.findByText("Search public records")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement?.id).toBe("main-content"));
   });
 
   it("makes viewer sessions read-only", async () => {

@@ -4,6 +4,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import {
   ApiFailure,
   createControlPlane,
+  type CapabilityStatus,
   type ControlPlane,
   type RegistrySearch,
   type RunPreflight,
@@ -18,6 +19,7 @@ import {
 
 type View = "overview" | "registry" | "capabilities" | "runs" | "audit";
 type Role = "admin" | "operator" | "viewer";
+type CapabilityFilter = CapabilityStatus | "all";
 type ApiFactory = (session: WorkspaceSession) => ControlPlane;
 type QueryScope = readonly ["workspace", string, string];
 
@@ -70,6 +72,18 @@ function routePath(view: View, selectedId: string | null = null): string {
   if (view === "overview") return "/";
   if (view === "registry") return selectedId ? `/connections/${selectedId}` : "/registry";
   return selectedId ? `/${view}/${selectedId}` : `/${view}`;
+}
+
+function capabilityFilterFromLocation(): CapabilityFilter {
+  const status = new URLSearchParams(window.location.search).get("status");
+  return ["pending_review", "enabled", "disabled", "unavailable"].includes(status ?? "")
+    ? status as CapabilityStatus
+    : "all";
+}
+
+function capabilityPath(filter: CapabilityFilter, selectedId: string | null = null): string {
+  const path = routePath("capabilities", selectedId);
+  return filter === "all" ? path : `${path}?status=${encodeURIComponent(filter)}`;
 }
 
 function failureMessage(error: unknown): string {
@@ -230,7 +244,7 @@ function EmptyState({ title, copy }: { title: string; copy: string }) {
   );
 }
 
-function Overview({ api, open, scope }: { api: ControlPlane; open: (view: View) => void; scope: QueryScope }) {
+function Overview({ api, open, scope }: { api: ControlPlane; open: (view: View, capabilityFilter?: CapabilityFilter) => void; scope: QueryScope }) {
   const query = useQuery({ queryKey: queryKey(scope, "overview"), queryFn: () => api.overview() });
   if (query.isPending) return <LoadingState label="Loading workspace overview" />;
   if (query.isError) return <QueryFailure error={query.error} retry={() => void query.refetch()} />;
@@ -299,7 +313,7 @@ function Overview({ api, open, scope }: { api: ControlPlane; open: (view: View) 
           </strong>
           <h2>Capabilities need a decision</h2>
           <p>Inspect immutable schema and metadata before enabling a version.</p>
-          <button className="secondary-action" type="button" onClick={() => open("capabilities")}>
+          <button className="secondary-action" type="button" onClick={() => open("capabilities", "pending_review")}>
             Open review queue
           </button>
         </aside>
@@ -326,7 +340,7 @@ function Registry({ api, scope, role, selectedId, select }: { api: ControlPlane;
     queryKey: queryKey(scope, "connection", selectedId),
     queryFn: () => api.getConnection(selectedId as string),
     enabled: selectedId !== null,
-    refetchInterval: selectedId ? 2000 : false,
+    refetchInterval: (query) => selectedId && query.state.status !== "error" ? 2000 : false,
   });
   const [searchResult, setSearchResult] = useState<RegistrySearch | null>(null);
   const [lastSearchQuery, setLastSearchQuery] = useState("");
@@ -536,11 +550,11 @@ function Registry({ api, scope, role, selectedId, select }: { api: ControlPlane;
   );
 }
 
-function Capabilities({ api, scope, role, selectedId, select }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; select: (id: string | null) => void }) {
+function Capabilities({ api, scope, role, selectedId, filter, select, setFilter }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; filter: CapabilityFilter; select: (id: string | null) => void; setFilter: (filter: CapabilityFilter) => void }) {
   const queryClient = useQueryClient();
   const mutationKeys = useRef(new Map<string, string>());
   const keyFor = (operation: string) => mutationKeys.current.get(operation) ?? (() => { const key = mutationId(); mutationKeys.current.set(operation, key); return key; })();
-  const capabilities = useQuery({ queryKey: queryKey(scope, "capabilities"), queryFn: () => api.listCapabilities() });
+  const capabilities = useQuery({ queryKey: queryKey(scope, "capabilities", filter), queryFn: () => api.listCapabilities(filter === "all" ? undefined : filter) });
   const connections = useQuery({ queryKey: queryKey(scope, "connections"), queryFn: () => api.listConnections() });
   const detail = useQuery({
     queryKey: queryKey(scope, "capability", selectedId),
@@ -563,6 +577,9 @@ function Capabilities({ api, scope, role, selectedId, select }: { api: ControlPl
       <section className="split-detail capability-layout">
         <div className="section-block">
           <div className="section-heading"><div><span className="index">Review queue / 01</span><h2>Discovered tools</h2></div></div>
+          <form className="inline-form" onSubmit={(event) => event.preventDefault()}>
+            <label>Status<select aria-label="Capability status" value={filter} onChange={(event) => setFilter(event.target.value as CapabilityFilter)}><option value="pending_review">Pending review</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option><option value="unavailable">Unavailable</option><option value="all">All statuses</option></select></label>
+          </form>
           {capabilities.isPending ? <LoadingState label="Loading capabilities" /> : capabilities.isError ? (
             <QueryFailure error={capabilities.error} retry={() => void capabilities.refetch()} />
           ) : capabilities.data.length === 0 ? (
@@ -703,8 +720,9 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
   const confirmedEndpoint = confirmationConnection.data?.versions.find((version) => version.id === preflight?.connection_version_id)?.endpoint_url;
   const confirmationExpired = preflight ? Date.parse(preflight.expires_at) <= confirmationClock : false;
 
-  function invalidatePreparedRun() {
-    setPreflight(null); setPendingArguments(null); prepare.reset(); invoke.reset(); runKey.current = mutationId();
+  function invalidatePreparedRun(resetRunKey = false) {
+    setPreflight(null); setPendingArguments(null); prepare.reset(); invoke.reset();
+    if (resetRunKey) runKey.current = mutationId();
   }
 
   function submitPreflight(event: FormEvent<HTMLFormElement>) {
@@ -732,8 +750,8 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
         <div className="section-block playground">
           <div className="section-heading"><div><span className="index">Playground / 01</span><h2>Prepare a run</h2></div></div>
           <form className="stacked-form" onSubmit={submitPreflight} noValidate>
-            <label>Enabled capability<select name="capability" required value={selectedVersionId} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(); setSelectedVersionId(event.target.value); }}><option value="" disabled>Select a capability</option>{enabledCapabilities.map((item) => <option key={item.id} value={item.enabled_version_id ?? ""}>{item.tool_identity} — {connectionNames.get(item.connection_id) ?? shortId(item.connection_id)}</option>)}</select></label>
-            <label>Arguments<textarea value={argumentsText} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(); setArgumentsText(event.target.value); }} rows={8} spellCheck={false} aria-invalid={Boolean(argumentsError)} /></label>
+            <label>Enabled capability<select name="capability" required value={selectedVersionId} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(true); setSelectedVersionId(event.target.value); }}><option value="" disabled>Select a capability</option>{enabledCapabilities.map((item) => <option key={item.id} value={item.enabled_version_id ?? ""}>{item.tool_identity} — {connectionNames.get(item.connection_id) ?? shortId(item.connection_id)}</option>)}</select></label>
+            <label>Arguments<textarea value={argumentsText} disabled={prepare.isPending || Boolean(preflight)} onChange={(event) => { invalidatePreparedRun(true); setArgumentsText(event.target.value); }} rows={8} spellCheck={false} aria-invalid={Boolean(argumentsError)} /></label>
             <p className="incident-note">Only public, synthetic, or explicitly non-confidential data.</p>
             {argumentsError && <p className="field-error" role="alert">{argumentsError}</p>}
             {prepare.isError && <p className="field-error" role="alert">{failureMessage(prepare.error)}</p>}
@@ -760,7 +778,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
           {confirmationExpired && <p className="field-error" role="alert">This confirmation expired. Go back and run preflight again.</p>}
           <details open><summary>Exact prepared arguments</summary><pre>{JSON.stringify(pendingArguments, null, 2)}</pre></details>
           {invoke.isError && <p className="field-error" role="alert">{failureMessage(invoke.error)}{invoke.error instanceof ApiFailure && ["invalid_confirmation", "confirmation_expired", "confirmation_replayed"].includes(invoke.error.code) ? " Run preflight again." : " Retry to safely reuse this request."}</p>}
-          <div className="action-strip"><button type="button" onClick={invalidatePreparedRun}>Back</button><button className="primary-action" type="button" disabled={invoke.isPending || !confirmedEndpoint || confirmationExpired} onClick={() => invoke.mutate({ prepared: preflight, args: pendingArguments })}>{invoke.isPending ? "Submitting…" : confirmationExpired ? "Confirmation expired" : "Confirm and run"}</button></div>
+          <div className="action-strip"><button type="button" onClick={() => invalidatePreparedRun()}>Back</button><button className="primary-action" type="button" disabled={invoke.isPending || !confirmedEndpoint || confirmationExpired} onClick={() => invoke.mutate({ prepared: preflight, args: pendingArguments })}>{invoke.isPending ? "Submitting…" : confirmationExpired ? "Confirmation expired" : "Confirm and run"}</button></div>
         </section>
       )}
       {invoke.isError && !preflight && <p className="field-error" role="alert">{failureMessage(invoke.error)} Run preflight again.</p>}
@@ -776,6 +794,9 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
             <details><summary>Retained arguments</summary><pre>{JSON.stringify(runDetail.data.arguments, null, 2)}</pre></details>
             {runDetail.data.result && <details open><summary>Validated result</summary><pre>{JSON.stringify(runDetail.data.result, null, 2)}</pre></details>}
             {runDetail.data.safe_error_code && <p className="incident-note">Run ended with {runDetail.data.safe_error_code}.</p>}
+            {runDetail.data.status === "indeterminate" && <p className="field-error" role="alert">Do not retry this invocation. The upstream tool may have completed it; reconcile the side effect before taking further action.</p>}
+            {runDetail.data.status === "failed" && ["worker_lost_before_dispatch", "preparation_failed", "session_initialization_failed"].includes(runDetail.data.safe_error_code ?? "") && <p className="incident-note">No tool call was dispatched. Correct the reported condition before starting a new run.</p>}
+            {runDetail.data.status === "failed" && !["worker_lost_before_dispatch", "preparation_failed", "session_initialization_failed"].includes(runDetail.data.safe_error_code ?? "") && <p className="incident-note">Review the upstream outcome before starting another run; this failure is not classified as pre-dispatch.</p>}
           </>
         )}
       </section>
@@ -809,8 +830,12 @@ function WorkspaceApp({ session, api, onLogout }: { session: WorkspaceSession; a
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
-  function navigate(view: View, selectedId: string | null = null) {
-    window.history.pushState({}, "", routePath(view, selectedId));
+  useEffect(() => {
+    const timer = window.setTimeout(() => document.getElementById("main-content")?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [route]);
+  function navigate(view: View, selectedId: string | null = null, capabilityFilter: CapabilityFilter = "all") {
+    window.history.pushState({}, "", view === "capabilities" ? capabilityPath(capabilityFilter, selectedId) : routePath(view, selectedId));
     setRoute({ view, selectedId });
   }
   if (access.isPending) return <main className="auth-layout" id="main-content"><LoadingState label="Checking workspace access" /></main>;
@@ -826,9 +851,9 @@ function WorkspaceApp({ session, api, onLogout }: { session: WorkspaceSession; a
         <div className="workspace-menu"><div><span>{session.workspaceLabel} · {role}</span><code>{shortId(session.workspaceId)}</code></div><button className="text-action" type="button" onClick={onLogout}>Log out</button></div>
       </header>
       <main id="main-content" tabIndex={-1}>
-        {view === "overview" && <Overview api={api} open={(next) => navigate(next)} scope={scope} />}
+        {view === "overview" && <Overview api={api} open={(next, filter) => navigate(next, null, filter)} scope={scope} />}
         {view === "registry" && <Registry api={api} scope={scope} role={role} selectedId={route.selectedId} select={(id) => navigate("registry", id)} />}
-        {view === "capabilities" && <Capabilities api={api} scope={scope} role={role} selectedId={route.selectedId} select={(id) => navigate("capabilities", id)} />}
+        {view === "capabilities" && <Capabilities api={api} scope={scope} role={role} selectedId={route.selectedId} filter={capabilityFilterFromLocation()} select={(id) => navigate("capabilities", id, capabilityFilterFromLocation())} setFilter={(filter) => navigate("capabilities", null, filter)} />}
         {view === "runs" && <Runs api={api} scope={scope} role={role} selectedId={route.selectedId} select={(id) => navigate("runs", id)} />}
         {view === "audit" && canOperate(role) && <Audit api={api} scope={scope} />}
       </main>
