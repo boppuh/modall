@@ -133,6 +133,7 @@ describe("App", () => {
     const api = fakeApi();
     renderApp(api);
     expect(await screen.findByText("Internal developer tools")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement?.id).toBe("main-content"));
     expect(screen.getAllByText("01").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: /Active connections/ }));
@@ -206,11 +207,30 @@ describe("App", () => {
     await waitFor(() => expect(api.capabilityAction).toHaveBeenCalledWith(versionId, "enable", expect.any(String)));
   });
 
+  it("prefers a pending version over an older retained capability version", async () => {
+    const pendingVersionId = "66666666-6666-4666-8666-666666666666";
+    const disabled = { ...capability, status: "disabled" as const, pending_version_id: pendingVersionId, enabled_version_id: versionId };
+    const api = fakeApi({
+      listCapabilities: vi.fn().mockResolvedValue([disabled]),
+      getCapability: vi.fn().mockResolvedValue({ ...disabled, versions: [
+        { id: pendingVersionId, capability_id: capabilityId, sequence: 2, display_name: "New search", description: null, input_schema: {}, output_schema: null, metadata_digest: "d".repeat(64), schema_supported: true, created_at: timestamp },
+        { id: versionId, capability_id: capabilityId, sequence: 1, display_name: "Old search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp },
+      ], versions_truncated: false }),
+    });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
+    expect(await screen.findByRole("button", { name: "Historical version" })).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByRole("button", { name: "Enable exact version" }));
+    await waitFor(() => expect(api.capabilityAction).toHaveBeenCalledWith(pendingVersionId, "enable", expect.any(String)));
+  });
+
   it("preflights, confirms, follows, and cancels a run", async () => {
     const api = fakeApi();
     renderApp(api);
     fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
     expect(await screen.findByRole("heading", { name: "Runs" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /tools\/search.*Internal developer tools.*55555555/ })).toBeTruthy();
 
     await screen.findByRole("option", { name: /tools\/search/ });
     fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });

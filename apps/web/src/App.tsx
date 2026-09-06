@@ -604,9 +604,10 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter 
               {action.isError && <p className="field-error" role="alert">{failureMessage(action.error)}</p>}
               {detail.data.versions.map((version, index) => {
                 const retained = detail.data.enabled_version_id === version.id;
+                const pending = detail.data.pending_version_id === version.id;
                 const enabled = detail.data.status === "enabled" && retained;
-                const reenable = detail.data.status === "disabled" && retained;
-                const actionable = enabled || reenable || detail.data.pending_version_id === version.id;
+                const reenable = detail.data.status === "disabled" && detail.data.pending_version_id === null && retained;
+                const actionable = enabled || reenable || pending;
                 const verb = enabled ? "disable" : "enable";
                 return (
                 <article className="schema-version" key={version.id}>
@@ -642,7 +643,11 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
   const finalEventFetchRun = useRef<string | null>(null);
   const runsKey = useMemo(() => queryKey(scope, "runs"), [scope]);
   const eventsKey = useMemo(() => queryKey(scope, "run-events", selectedId), [scope, selectedId]);
-  const runs = useQuery({ queryKey: runsKey, queryFn: () => api.listRuns() });
+  const runs = useQuery({
+    queryKey: runsKey,
+    queryFn: () => api.listRuns(),
+    refetchInterval: (query) => query.state.status !== "error" && query.state.data?.some((item) => !terminal(item.status)) ? 3000 : false,
+  });
   const capabilities = useQuery({ queryKey: queryKey(scope, "capabilities"), queryFn: () => api.listCapabilities() });
   const connections = useQuery({ queryKey: queryKey(scope, "connections"), queryFn: () => api.listConnections() });
   const [argumentsText, setArgumentsText] = useState("{\n  \"query\": \"status\"\n}");
@@ -710,6 +715,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
   });
   const enabledCapabilities = (capabilities.data ?? []).filter((item) => item.status === "enabled" && item.enabled_version_id);
   const connectionNames = new Map((connections.data ?? []).map((item) => [item.id, item.name]));
+  const capabilityNames = new Map((capabilities.data ?? []).map((item) => [item.id, item.tool_identity]));
   const orderedRuns = [...(runs.data ?? [])].sort((left, right) => right.created_at.localeCompare(left.created_at));
   const selectedCapability = enabledCapabilities.find((item) => item.enabled_version_id === selectedVersionId);
   const confirmationConnection = useQuery({
@@ -764,7 +770,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
         <div className="section-block run-inventory">
           <div className="section-heading"><div><span className="index">Ledger / 02</span><h2>Recent runs</h2></div></div>
           {runs.isPending ? <LoadingState label="Loading runs" /> : runs.isError ? <QueryFailure error={runs.error} retry={() => void runs.refetch()} /> : runs.data.length === 0 ? <EmptyState title="No runs retained" copy="Completed and in-flight work will appear here." /> : (
-            <ul className="select-list">{orderedRuns.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{shortId(run.id)}</strong><small>{formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
+            <ul className="select-list">{orderedRuns.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{capabilityNames.get(run.capability_id) ?? shortId(run.capability_id)}</strong><small>{connectionNames.get(run.connection_id) ?? shortId(run.connection_id)} · {shortId(run.id)} · {formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
           )}
         </div>
       </section>
@@ -786,7 +792,7 @@ function Runs({ api, scope, role, selectedId, select }: { api: ControlPlane; sco
         {selectedId === null ? <EmptyState title="Select a run" copy="Inspect lineage, safe output, and status events." /> : runDetail.isPending || events.isPending ? <LoadingState label="Loading run timeline" /> : runDetail.isError ? <QueryFailure error={runDetail.error} retry={() => void runDetail.refetch()} /> : events.isError ? <QueryFailure error={events.error} retry={() => void events.refetch()} /> : (
           <>
             <div className="detail-title"><div><span className="index">Run {shortId(runDetail.data.id)}</span><h2>Execution timeline</h2></div><StatusMark value={runDetail.data.status} /></div>
-            <dl className="detail-facts"><div><dt>Capability</dt><dd>{shortId(runDetail.data.capability_version_id)}</dd></div><div><dt>Connection version</dt><dd>{shortId(runDetail.data.connection_version_id)}</dd></div><div><dt>Deadline</dt><dd>{formatTime(runDetail.data.deadline)}</dd></div><div><dt>Updated</dt><dd>{formatTime(runDetail.data.updated_at)}</dd></div></dl>
+            <dl className="detail-facts"><div><dt>Capability</dt><dd>{capabilityNames.get(runDetail.data.capability_id) ?? shortId(runDetail.data.capability_id)} · {shortId(runDetail.data.capability_version_id)}</dd></div><div><dt>Source connection</dt><dd>{connectionNames.get(runDetail.data.connection_id) ?? shortId(runDetail.data.connection_id)}</dd></div><div><dt>Connection version</dt><dd>{shortId(runDetail.data.connection_version_id)}</dd></div><div><dt>Deadline</dt><dd>{formatTime(runDetail.data.deadline)}</dd></div><div><dt>Updated</dt><dd>{formatTime(runDetail.data.updated_at)}</dd></div></dl>
             {runDetail.data.cancellation_requested && !terminal(runDetail.data.status) && <p className="incident-note">Cancellation requested; waiting for the worker to reach a safe boundary.</p>}
             {canOperate(role) && !terminal(runDetail.data.status) && !runDetail.data.cancellation_requested && <button className="danger-action" disabled={cancel.isPending} type="button" onClick={() => { const key = cancelKeys.current.get(runDetail.data.id) ?? mutationId(); cancelKeys.current.set(runDetail.data.id, key); cancel.mutate({ id: runDetail.data.id, key }); }}>Request cancellation</button>}
             {cancel.isError && <p className="field-error" role="alert">{failureMessage(cancel.error)}</p>}
@@ -833,13 +839,13 @@ function WorkspaceApp({ session, api, onLogout }: { session: WorkspaceSession; a
   useEffect(() => {
     const timer = window.setTimeout(() => document.getElementById("main-content")?.focus(), 0);
     return () => window.clearTimeout(timer);
-  }, [route]);
+  }, [access.status, route]);
   function navigate(view: View, selectedId: string | null = null, capabilityFilter: CapabilityFilter = "all") {
     window.history.pushState({}, "", view === "capabilities" ? capabilityPath(capabilityFilter, selectedId) : routePath(view, selectedId));
     setRoute({ view, selectedId });
   }
-  if (access.isPending) return <main className="auth-layout" id="main-content"><LoadingState label="Checking workspace access" /></main>;
-  if (access.isError) return <main className="auth-layout" id="main-content"><QueryFailure error={access.error} retry={() => void access.refetch()} /><button className="text-action" type="button" onClick={onLogout}>Log out</button></main>;
+  if (access.isPending) return <main className="auth-layout" id="main-content" tabIndex={-1}><LoadingState label="Checking workspace access" /></main>;
+  if (access.isError) return <main className="auth-layout" id="main-content" tabIndex={-1}><QueryFailure error={access.error} retry={() => void access.refetch()} /><button className="text-action" type="button" onClick={onLogout}>Log out</button></main>;
   const role = access.data.role;
   const view: View = role === "viewer" && route.view === "audit" ? "overview" : route.view;
   return (
