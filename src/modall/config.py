@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     database_url: PostgresDsn = PostgresDsn("postgresql://modall:modall@localhost:5432/modall")
     worker_poll_interval_seconds: Annotated[float, Field(gt=0, le=60, allow_inf_nan=False)] = 1.0
+    worker_maintenance_timeout_seconds: Annotated[
+        float, Field(gt=0, le=60, allow_inf_nan=False)
+    ] = 5.0
     auth_mode: Literal["local", "oidc"] = "local"
     # Preserve the issuer byte-for-byte for OIDC's exact identifier comparison.
     oidc_issuer: str | None = None

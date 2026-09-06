@@ -13,6 +13,7 @@ def test_settings_use_safe_local_defaults(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.environment == "local"
     assert settings.log_level == "INFO"
     assert settings.worker_poll_interval_seconds == 1.0
+    assert settings.worker_maintenance_timeout_seconds == 5.0
     assert str(settings.database_url) == "postgresql://modall:modall@localhost:5432/modall"
 
 
@@ -20,6 +21,8 @@ def test_settings_use_safe_local_defaults(monkeypatch: pytest.MonkeyPatch) -> No
 def test_settings_reject_unsafe_poll_intervals(interval: float) -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, worker_poll_interval_seconds=interval)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, worker_maintenance_timeout_seconds=interval)
 
 
 @pytest.mark.parametrize(

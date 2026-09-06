@@ -1,8 +1,9 @@
 """Async SQLAlchemy engine and transaction boundaries."""
 
 import asyncio
+import logging
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from sqlalchemy import text
@@ -12,6 +13,20 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+
+_AFTER_ROLLBACK_CALLBACKS = "modall_after_rollback_callbacks"
+_AFTER_ROLLBACK_TIMEOUT_SECONDS = 2.5
+
+
+def register_after_rollback(
+    session: AsyncSession, callback: Callable[[AsyncSession], Awaitable[None]]
+) -> None:
+    """Register durable cleanup that runs only after this transaction rolls back."""
+
+    callbacks = session.info.get(_AFTER_ROLLBACK_CALLBACKS)
+    if not isinstance(callbacks, list):
+        raise RuntimeError("session is not managed by the Modall transaction boundary")
+    callbacks.append(callback)
 
 
 def create_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
@@ -61,5 +76,26 @@ async def transaction(
 ) -> AsyncIterator[AsyncSession]:
     """Commit all domain and audit writes together, or roll everything back."""
 
-    async with session_factory() as session, session.begin():
-        yield session
+    async with session_factory() as session:
+        callbacks: list[Callable[[AsyncSession], Awaitable[None]]] = []
+        session.info[_AFTER_ROLLBACK_CALLBACKS] = callbacks
+        try:
+            async with session.begin():
+                yield session
+        except BaseException:
+            try:
+                async with asyncio.timeout(_AFTER_ROLLBACK_TIMEOUT_SECONDS):
+                    for callback in callbacks:
+                        try:
+                            async with (
+                                session_factory() as cleanup_session,
+                                cleanup_session.begin(),
+                            ):
+                                await callback(cleanup_session)
+                        except Exception:
+                            logging.getLogger("modall.persistence").warning(
+                                "after_rollback_cleanup_failed"
+                            )
+            except TimeoutError:
+                logging.getLogger("modall.persistence").warning("after_rollback_cleanup_failed")
+            raise

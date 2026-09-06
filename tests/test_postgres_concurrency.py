@@ -2,6 +2,7 @@ import asyncio
 import os
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import DBAPIError
@@ -20,16 +21,200 @@ from modall.persistence.models import (
     CapabilityStatusEvent,
     McpToolBinding,
     RegistryEntry,
+    RegistrySearchCache,
     ServerConnectionVersion,
     User,
     WorkspaceMembership,
 )
+from modall.registry.official import OfficialRegistryAdapter, OfficialRegistryService
 from modall.registry.service import CapabilityService, ConnectionService
 
 pytestmark = pytest.mark.skipif(
     "MODALL_DATABASE_URL" not in os.environ,
     reason="requires the migrated PostgreSQL integration database",
 )
+
+
+def scanner_allows(value: object) -> bool:
+    del value
+    return False
+
+
+def test_concurrent_registry_search_misses_share_one_cache_row() -> None:
+    async def scenario() -> None:
+        engine = create_engine(async_database_url(os.environ["MODALL_DATABASE_URL"]))
+        factory = create_session_factory(engine)
+        suffix = str(uuid4())
+        request_count = 0
+        both_requested = asyncio.Event()
+        request_lock = asyncio.Lock()
+        try:
+            async with transaction(factory) as session:
+                identity = IdentityService(session)
+                operator = await identity.resolve_user(
+                    Principal("issuer", f"registry-search-{suffix}", None)
+                )
+                workspace = await identity.create_workspace(
+                    owner=operator, name=f"Registry search {suffix}"
+                )
+                user_id, workspace_id = operator.id, workspace.id
+
+            async def handler(request: httpx.Request) -> httpx.Response:
+                nonlocal request_count
+                async with request_lock:
+                    request_count += 1
+                    if request_count == 2:
+                        both_requested.set()
+                await both_requested.wait()
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "application/json"},
+                    json={"servers": [], "metadata": {"count": 0}},
+                    request=request,
+                )
+
+            async def search() -> tuple[UUID, bool]:
+                async with transaction(factory) as session:
+                    context = await AuthorizationService(session).authorize(
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                        permission=Permission.SEARCH_REGISTRY,
+                    )
+                    result = await OfficialRegistryService(
+                        session,
+                        OfficialRegistryAdapter(transport=httpx.MockTransport(handler)),
+                    ).search(context=context, query="shared-query")
+                    return result.cache_id, result.from_cache
+
+            results = await asyncio.gather(search(), search())
+            assert len({result[0] for result in results}) == 1
+            assert sorted(result[1] for result in results) == [False, True]
+            assert request_count == 2
+            async with factory() as session:
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(RegistrySearchCache)
+                        .where(RegistrySearchCache.workspace_id == workspace_id)
+                    )
+                    == 1
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_rejected_cache_reads_share_one_replacement() -> None:
+    class BarrierAdapter(OfficialRegistryAdapter):
+        def __init__(self, *, transport: httpx.AsyncBaseTransport) -> None:
+            super().__init__(transport=transport)
+            self._initial_reads = 0
+            self._both_initial_reads = asyncio.Event()
+            self._read_lock = asyncio.Lock()
+
+        async def parse_cached_items(self, values: object):  # type: ignore[no-untyped-def]
+            async with self._read_lock:
+                self._initial_reads += 1
+                if self._initial_reads == 2:
+                    self._both_initial_reads.set()
+                wait_for_peer = self._initial_reads <= 2
+            if wait_for_peer:
+                await self._both_initial_reads.wait()
+            return await super().parse_cached_items(values)
+
+    async def scenario() -> None:
+        engine = create_engine(async_database_url(os.environ["MODALL_DATABASE_URL"]))
+        factory = create_session_factory(engine)
+        suffix = str(uuid4())
+        request_count = 0
+        unsafe_payload = {
+            "servers": [
+                {
+                    "server": {
+                        "name": "com.example/unsafe",
+                        "version": "1.0.0",
+                        "description": "token%2525253DAbCdEfGhIjKlMnOpQrStUvWx",
+                    }
+                }
+            ],
+            "metadata": {"count": 1},
+        }
+
+        async def seed_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json=unsafe_payload,
+                request=request,
+            )
+
+        async def strict_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={"servers": [], "metadata": {"count": 0}},
+                request=request,
+            )
+
+        try:
+            async with transaction(factory) as session:
+                identity = IdentityService(session)
+                operator = await identity.resolve_user(
+                    Principal("issuer", f"registry-rejection-{suffix}", None)
+                )
+                workspace = await identity.create_workspace(
+                    owner=operator, name=f"Registry rejection {suffix}"
+                )
+                context = await AuthorizationService(session).authorize(
+                    user_id=operator.id,
+                    workspace_id=workspace.id,
+                    permission=Permission.SEARCH_REGISTRY,
+                )
+                seeded = await OfficialRegistryService(
+                    session,
+                    OfficialRegistryAdapter(
+                        transport=httpx.MockTransport(seed_handler),
+                        query_scanner=scanner_allows,
+                        metadata_scanner=scanner_allows,
+                    ),
+                ).search(context=context, query="shared-rejected-query")
+                user_id, workspace_id = operator.id, workspace.id
+                assert seeded.from_cache is False
+
+            adapter = BarrierAdapter(transport=httpx.MockTransport(strict_handler))
+
+            async def search() -> tuple[UUID, bool]:
+                async with transaction(factory) as session:
+                    context = await AuthorizationService(session).authorize(
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                        permission=Permission.SEARCH_REGISTRY,
+                    )
+                    result = await OfficialRegistryService(session, adapter).search(
+                        context=context, query="shared-rejected-query"
+                    )
+                    return result.cache_id, result.from_cache
+
+            results = await asyncio.gather(search(), search())
+            assert len({result[0] for result in results}) == 1
+            assert sorted(result[1] for result in results) == [False, True]
+            assert request_count == 1
+            async with factory() as session:
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(RegistrySearchCache)
+                        .where(RegistrySearchCache.workspace_id == workspace_id)
+                    )
+                    == 1
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 def test_concurrent_first_login_resolves_one_user() -> None:

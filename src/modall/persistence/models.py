@@ -101,12 +101,12 @@ class AuditEvent(Base):
             "action IN ('workspace.created', 'membership.changed', 'secret_binding.created', "
             "'connection.created', 'connection.version_appended', 'connection.verified', "
             "'connection.disabled', 'connection.enabled', 'capability.version_recorded', "
-            "'capability.enabled', 'capability.disabled')",
+            "'capability.enabled', 'capability.disabled', 'registry_entry.imported')",
             name="ck_audit_action",
         ),
         CheckConstraint(
             "resource_type IN ('workspace', 'membership', 'secret_binding', 'server_connection', "
-            "'capability')",
+            "'capability', 'registry_entry')",
             name="ck_audit_resource_type",
         ),
         Index("ix_audit_workspace_time_id", "workspace_id", "occurred_at", "id"),
@@ -196,7 +196,41 @@ class RegistryEntryVersion(Base):
     name: Mapped[str] = mapped_column(String(256))
     description: Mapped[str | None] = mapped_column(String(2048))
     provenance_digest: Mapped[str] = mapped_column(String(64))
+    source_version: Mapped[str | None] = mapped_column(String(128))
+    source_uri: Mapped[str | None] = mapped_column(String(2048))
+    normalized_metadata: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    imported_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
     created_at: Mapped[CreatedAt]
+
+
+class RegistrySearchCache(Base):
+    __tablename__ = "registry_search_cache"
+    __table_args__ = (
+        CheckConstraint("provider = 'official'", name="ck_registry_search_cache_provider"),
+        CheckConstraint("result_count >= 0", name="ck_registry_search_cache_result_count"),
+        CheckConstraint("byte_count >= 0", name="ck_registry_search_cache_byte_count"),
+        Index(
+            "ix_registry_search_cache_lookup",
+            "workspace_id",
+            "provider",
+            "query_digest",
+            "expires_at",
+        ),
+        Index("ix_registry_search_cache_expiry", "expires_at"),
+    )
+
+    id: Mapped[UuidPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    provider: Mapped[str] = mapped_column(String(32))
+    query_digest: Mapped[str] = mapped_column(String(64))
+    response_digest: Mapped[str] = mapped_column(String(64))
+    normalized_results: Mapped[list[dict[str, object]]] = mapped_column(JSON)
+    result_count: Mapped[int] = mapped_column(Integer)
+    byte_count: Mapped[int] = mapped_column(Integer)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class ServerConnection(Base):
@@ -685,6 +719,7 @@ for immutable_model in (
     DiscoveryPayload,
     DiscoverySnapshot,
     DiscoverySnapshotCapability,
+    RegistrySearchCache,
 ):
     event.listen(immutable_model, "before_update", _reject_immutable_update)
 

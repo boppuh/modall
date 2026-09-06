@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import subprocess
 import sys
@@ -6,13 +7,17 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from modall.persistence import database
 from modall.persistence.database import (
     DatabaseProbe,
     alembic_database_url,
     async_database_url,
     create_engine,
+    create_session_factory,
+    register_after_rollback,
+    transaction,
 )
 from modall.persistence.migration_config import load_migration_database_url
 
@@ -140,3 +145,34 @@ def test_database_probe_rejects_invalid_timeout() -> None:
                 DatabaseProbe(engine, timeout_seconds=timeout)
     finally:
         asyncio.run(engine.dispose())
+
+
+def test_after_rollback_cleanup_is_bounded_and_preserves_original_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> None:
+        engine = create_engine("sqlite+aiosqlite:///:memory:")
+        factory = create_session_factory(engine)
+        cleanups_started = 0
+
+        async def hanging_cleanup(session: AsyncSession) -> None:
+            nonlocal cleanups_started
+            del session
+            cleanups_started += 1
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(database, "_AFTER_ROLLBACK_TIMEOUT_SECONDS", 0.01)
+        try:
+            with pytest.raises(RuntimeError, match="original failure"):
+                async with transaction(factory) as session:
+                    register_after_rollback(session, hanging_cleanup)
+                    register_after_rollback(session, hanging_cleanup)
+                    raise RuntimeError("original failure")
+            assert cleanups_started == 1
+        finally:
+            await engine.dispose()
+
+    with caplog.at_level(logging.WARNING, logger="modall.persistence"):
+        asyncio.run(scenario())
+    assert "after_rollback_cleanup_failed" in caplog.text
+    assert "original failure" not in caplog.text

@@ -5,10 +5,17 @@ shell exists now so packaging, deployment, and observability conventions are
 validated before domain work depends on them.
 """
 
+import asyncio
 import logging
-import time
 
 from modall.config import Settings, get_settings
+from modall.persistence.database import (
+    async_database_url,
+    create_engine,
+    create_session_factory,
+    transaction,
+)
+from modall.registry.official import purge_expired_registry_cache
 
 
 def configure_logging(settings: Settings) -> None:
@@ -26,6 +33,26 @@ def run_once(settings: Settings) -> None:
     logging.getLogger("modall.worker").debug("worker_poll environment=%s", settings.environment)
 
 
+async def run_worker(settings: Settings) -> None:
+    """Poll durable maintenance work with one reusable database pool."""
+
+    logger = logging.getLogger("modall.worker")
+    engine = create_engine(async_database_url(str(settings.database_url)))
+    session_factory = create_session_factory(engine)
+    try:
+        while True:
+            run_once(settings)
+            try:
+                async with asyncio.timeout(settings.worker_maintenance_timeout_seconds):
+                    async with transaction(session_factory) as session:
+                        await purge_expired_registry_cache(session)
+            except Exception:
+                logger.warning("registry_cache_cleanup_failed")
+            await asyncio.sleep(settings.worker_poll_interval_seconds)
+    finally:
+        await engine.dispose()
+
+
 def run() -> None:
     """Run the worker shell until the process receives a termination signal."""
 
@@ -33,9 +60,7 @@ def run() -> None:
     configure_logging(settings)
     logger = logging.getLogger("modall.worker")
     logger.info("worker_started environment=%s", settings.environment)
-    while True:
-        run_once(settings)
-        time.sleep(settings.worker_poll_interval_seconds)
+    asyncio.run(run_worker(settings))
 
 
 if __name__ == "__main__":
