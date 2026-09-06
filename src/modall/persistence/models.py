@@ -103,7 +103,7 @@ class AuditEvent(Base):
             "'connection.created', 'connection.version_appended', 'connection.verified', "
             "'connection.disabled', 'connection.enabled', 'capability.version_recorded', "
             "'capability.enabled', 'capability.disabled', 'registry_entry.imported', "
-            "'run.created', 'run.cancelled')",
+            "'run.created', 'run.cancellation_requested', 'run.cancelled')",
             name="ck_audit_action",
         ),
         CheckConstraint(
@@ -697,6 +697,13 @@ class Run(Base):
         CheckConstraint("connection_control_epoch >= 0", name="ck_run_connection_epoch"),
         CheckConstraint("capability_status_epoch >= 0", name="ck_run_capability_epoch"),
         CheckConstraint("length(argument_digest) = 64", name="ck_run_argument_digest"),
+        CheckConstraint(
+            "safe_error_code IS NULL OR safe_error_code IN "
+            "('worker_lost_before_dispatch', 'worker_lost_after_dispatch', "
+            "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
+            "'content_retention_deadline', 'tool_call_failed', 'invalid_tool_result')",
+            name="ck_run_safe_error_code",
+        ),
         ForeignKeyConstraint(
             ["workspace_id", "capability_id"],
             ["capabilities.workspace_id", "capabilities.id"],
@@ -806,6 +813,13 @@ class RunAttempt(Base):
             "= (terminal_at IS NOT NULL)",
             name="ck_run_attempt_terminal_time",
         ),
+        CheckConstraint(
+            "safe_error_code IS NULL OR safe_error_code IN "
+            "('worker_lost_before_dispatch', 'worker_lost_after_dispatch', "
+            "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
+            "'content_retention_deadline', 'tool_call_failed', 'invalid_tool_result')",
+            name="ck_run_attempt_safe_error_code",
+        ),
         ForeignKeyConstraint(
             ["workspace_id", "run_id"],
             ["runs.workspace_id", "runs.id"],
@@ -843,6 +857,13 @@ class RunEvent(Base):
         UniqueConstraint("workspace_id", "id"),
         UniqueConstraint("run_id", "sequence"),
         CheckConstraint("sequence > 0", name="ck_run_event_sequence"),
+        CheckConstraint(
+            "safe_error_code IS NULL OR safe_error_code IN "
+            "('worker_lost_before_dispatch', 'worker_lost_after_dispatch', "
+            "'deadline_exceeded', 'cancelled_before_dispatch', 'restore_reconciliation', "
+            "'content_retention_deadline', 'tool_call_failed', 'invalid_tool_result')",
+            name="ck_run_event_safe_error_code",
+        ),
         ForeignKeyConstraint(
             ["workspace_id", "run_id"],
             ["runs.workspace_id", "runs.id"],

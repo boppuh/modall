@@ -4,16 +4,19 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import jwt
 import pytest
 from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from modall.audit.types import AuditAction
 from modall.execution.service import ExecutionService
 from modall.execution.types import (
     ExecutionError,
     ExecutionFailureCode,
     ExecutionLimits,
     HmacKeyVersion,
+    RunFailureCode,
     RunStatus,
 )
 from modall.identity.repository import AuthorizationService
@@ -21,6 +24,7 @@ from modall.identity.service import IdentityService
 from modall.identity.types import Permission, Principal, WorkspaceContext
 from modall.persistence.database import create_engine, create_session_factory, transaction
 from modall.persistence.models import (
+    AuditEvent,
     Base,
     CapabilityVersion,
     ConfirmationNonce,
@@ -233,6 +237,30 @@ def test_preflight_creates_exact_lineage_and_idempotent_replays() -> None:
                     ).all()
                 )
                 assert ExecutionService.replay_projection(events) == RunStatus.QUEUED
+
+    asyncio.run(scenario())
+
+
+def test_preflight_returns_the_exact_expiry_encoded_in_confirmation() -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, 12, 0, 0, 987654, tzinfo=UTC)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="token-expiry")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                preflight = await service(session, now=now).preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "expiry"},
+                )
+                claims = jwt.decode(
+                    preflight.confirmation_token,
+                    options={"verify_signature": False},
+                    algorithms=["HS256"],
+                )
+                assert preflight.expires_at == datetime.fromtimestamp(claims["exp"], UTC)
+                assert preflight.expires_at.microsecond == 0
 
     asyncio.run(scenario())
 
@@ -566,6 +594,15 @@ def test_cancellation_terminalizes_unfenced_work_and_is_idempotent() -> None:
                 requested = await execution.cancel_run(context=context, run_id=dispatched.id)
                 assert requested.status == RunStatus.DISPATCH_FENCED.value
                 assert requested.cancellation_requested is True
+                audit_actions = set(
+                    (
+                        await session.scalars(
+                            select(AuditEvent.action).where(AuditEvent.resource_id == dispatched.id)
+                        )
+                    ).all()
+                )
+                assert AuditAction.RUN_CANCELLATION_REQUESTED.value in audit_actions
+                assert AuditAction.RUN_CANCELLED.value not in audit_actions
                 assert lease.run_id == dispatched.id
                 with pytest.raises(ExecutionError) as abandoned:
                     await service(session, now=now + timedelta(seconds=11)).claim_job(
@@ -626,10 +663,44 @@ def test_heartbeat_and_worker_boundary_validation() -> None:
                 with pytest.raises(ExecutionError) as invalid:
                     await execution.complete_lease(renewed, status=RunStatus.PREPARING)
                 assert invalid.value.code == ExecutionFailureCode.INVALID_TRANSITION
+                with pytest.raises(ExecutionError) as arbitrary_code:
+                    await execution.complete_lease(
+                        renewed,
+                        status=RunStatus.FAILED,
+                        safe_error_code="upstream secret",  # type: ignore[arg-type]
+                    )
+                assert arbitrary_code.value.code == ExecutionFailureCode.INVALID_TRANSITION
                 failed = await execution.complete_lease(
-                    renewed, status=RunStatus.FAILED, safe_error_code="safe_failure"
+                    renewed,
+                    status=RunStatus.FAILED,
+                    safe_error_code=RunFailureCode.TOOL_CALL_FAILED,
                 )
-                assert failed.safe_error_code == "safe_failure"
+                assert failed.safe_error_code == RunFailureCode.TOOL_CALL_FAILED.value
+
+                overdue_token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "overdue completion"},
+                )
+                overdue_run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "overdue completion"},
+                    confirmation_token=overdue_token.confirmation_token,
+                    idempotency_key="overdue-completion-key",
+                    deadline=now + timedelta(seconds=1),
+                )
+                overdue_lease = await execution.claim_job(
+                    worker_id="deadline-worker", lease_duration=timedelta(seconds=10)
+                )
+                with pytest.raises(ExecutionError) as overdue:
+                    await service(session, now=now + timedelta(seconds=2)).complete_lease(
+                        overdue_lease,
+                        status=RunStatus.SUCCEEDED,
+                    )
+                assert overdue.value.code == ExecutionFailureCode.LEASE_LOST
+                assert overdue_run.status == RunStatus.TIMED_OUT.value
+                assert overdue_run.safe_error_code == RunFailureCode.DEADLINE_EXCEEDED.value
 
                 deadline_token = await execution.preflight(
                     context=context,

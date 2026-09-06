@@ -57,6 +57,19 @@ class ExecutionFailureCode(StrEnum):
     PERSISTENCE_FAILURE = "persistence_failure"
 
 
+class RunFailureCode(StrEnum):
+    """Payload-free terminal codes that workers may persist in the execution ledger."""
+
+    WORKER_LOST_BEFORE_DISPATCH = "worker_lost_before_dispatch"
+    WORKER_LOST_AFTER_DISPATCH = "worker_lost_after_dispatch"
+    DEADLINE_EXCEEDED = "deadline_exceeded"
+    CANCELLED_BEFORE_DISPATCH = "cancelled_before_dispatch"
+    RESTORE_RECONCILIATION = "restore_reconciliation"
+    CONTENT_RETENTION_DEADLINE = "content_retention_deadline"
+    TOOL_CALL_FAILED = "tool_call_failed"
+    INVALID_TOOL_RESULT = "invalid_tool_result"
+
+
 class ExecutionError(Exception):
     """A stable execution failure that carries no submitted content."""
 

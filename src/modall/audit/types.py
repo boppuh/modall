@@ -17,6 +17,7 @@ class AuditAction(StrEnum):
     CAPABILITY_DISABLED = "capability.disabled"
     REGISTRY_ENTRY_IMPORTED = "registry_entry.imported"
     RUN_CREATED = "run.created"
+    RUN_CANCELLATION_REQUESTED = "run.cancellation_requested"
     RUN_CANCELLED = "run.cancelled"
 
 

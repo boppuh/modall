@@ -16,6 +16,11 @@ RUN_STATES = (
     "'failed', 'cancelled', 'timed_out', 'indeterminate'"
 )
 TERMINAL_JOB_STATES = "'succeeded', 'failed', 'cancelled', 'timed_out', 'indeterminate'"
+RUN_FAILURE_CODES = (
+    "'worker_lost_before_dispatch', 'worker_lost_after_dispatch', 'deadline_exceeded', "
+    "'cancelled_before_dispatch', 'restore_reconciliation', 'content_retention_deadline', "
+    "'tool_call_failed', 'invalid_tool_result'"
+)
 
 
 def upgrade() -> None:
@@ -28,7 +33,7 @@ def upgrade() -> None:
         "'connection.created', 'connection.version_appended', 'connection.verified', "
         "'connection.disabled', 'connection.enabled', 'capability.version_recorded', "
         "'capability.enabled', 'capability.disabled', 'registry_entry.imported', "
-        "'run.created', 'run.cancelled')",
+        "'run.created', 'run.cancellation_requested', 'run.cancelled')",
     )
     op.create_check_constraint(
         "ck_audit_resource_type",
@@ -84,6 +89,10 @@ def upgrade() -> None:
         sa.CheckConstraint("connection_control_epoch >= 0", name="ck_run_connection_epoch"),
         sa.CheckConstraint("capability_status_epoch >= 0", name="ck_run_capability_epoch"),
         sa.CheckConstraint("length(argument_digest) = 64", name="ck_run_argument_digest"),
+        sa.CheckConstraint(
+            f"safe_error_code IS NULL OR safe_error_code IN ({RUN_FAILURE_CODES})",
+            name="ck_run_safe_error_code",
+        ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["actor_user_id"], ["users.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(
@@ -176,6 +185,10 @@ def upgrade() -> None:
             "= (terminal_at IS NOT NULL)",
             name="ck_run_attempt_terminal_time",
         ),
+        sa.CheckConstraint(
+            f"safe_error_code IS NULL OR safe_error_code IN ({RUN_FAILURE_CODES})",
+            name="ck_run_attempt_safe_error_code",
+        ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
             ["workspace_id", "run_id"], ["runs.workspace_id", "runs.id"], ondelete="CASCADE"
@@ -207,6 +220,10 @@ def upgrade() -> None:
         sa.Column("safe_error_code", sa.String(64)),
         sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("sequence > 0", name="ck_run_event_sequence"),
+        sa.CheckConstraint(
+            f"safe_error_code IS NULL OR safe_error_code IN ({RUN_FAILURE_CODES})",
+            name="ck_run_event_safe_error_code",
+        ),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
             ["workspace_id", "run_id"], ["runs.workspace_id", "runs.id"], ondelete="CASCADE"
@@ -310,7 +327,8 @@ def downgrade() -> None:
     op.drop_table("system_execution_state")
 
     op.execute(
-        "DELETE FROM audit_events WHERE action IN ('run.created', 'run.cancelled') "
+        "DELETE FROM audit_events WHERE action IN "
+        "('run.created', 'run.cancellation_requested', 'run.cancelled') "
         "OR resource_type = 'run'"
     )
     op.drop_constraint("ck_audit_action", "audit_events", type_="check")

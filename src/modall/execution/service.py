@@ -24,6 +24,7 @@ from modall.execution.types import (
     JobLease,
     JobStatus,
     RunEventType,
+    RunFailureCode,
     RunPreflight,
     RunStatus,
 )
@@ -123,7 +124,10 @@ class ExecutionService:
         )
         del normalized
         now = self._utc_now()
-        expires_at = now + timedelta(seconds=self._limits.confirmation_ttl_seconds)
+        expires_at = datetime.fromtimestamp(
+            int((now + timedelta(seconds=self._limits.confirmation_ttl_seconds)).timestamp()),
+            UTC,
+        )
         nonce = uuid4().hex
         active = self._confirmation_keys[0]
         claims = {
@@ -377,13 +381,13 @@ class ExecutionService:
             previous = await self._active_attempt(run.id)
             if previous is not None:
                 previous.status = RunStatus.FAILED.value
-                previous.safe_error_code = "worker_lost_before_dispatch"
+                previous.safe_error_code = RunFailureCode.WORKER_LOST_BEFORE_DISPATCH.value
                 previous.terminal_at = now
                 await self._append_next_event(
                     run,
                     RunEventType.LEASE_LOST,
                     RunStatus.PREPARING,
-                    safe_error_code="worker_lost_before_dispatch",
+                    safe_error_code=RunFailureCode.WORKER_LOST_BEFORE_DISPATCH.value,
                     now=now,
                 )
                 await self._session.flush()
@@ -456,9 +460,11 @@ class ExecutionService:
         lease: JobLease,
         *,
         status: RunStatus,
-        safe_error_code: str | None = None,
+        safe_error_code: RunFailureCode | None = None,
     ) -> Run:
         if status not in _TERMINAL_RUN_STATUSES:
+            raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
+        if safe_error_code is not None and not isinstance(safe_error_code, RunFailureCode):
             raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
         now = self._utc_now()
         state = await self._execution_state(lock="shared")
@@ -474,15 +480,30 @@ class ExecutionService:
             raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
         if RunStatus(run.status) in _TERMINAL_RUN_STATUSES:
             raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
+        if _utc(job.deadline) <= now:
+            deadline_status = (
+                RunStatus.INDETERMINATE
+                if run.status == RunStatus.DISPATCH_FENCED.value
+                else RunStatus.TIMED_OUT
+            )
+            await self._terminalize_run(
+                run,
+                deadline_status,
+                now,
+                RunFailureCode.DEADLINE_EXCEEDED,
+            )
+            await self._session.flush()
+            raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
         attempt = await self._active_attempt(run.id)
         if attempt is None or attempt.lease_epoch != lease.lease_epoch:
             raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
         run.status = status.value
-        run.safe_error_code = safe_error_code
+        persisted_error_code = safe_error_code.value if safe_error_code is not None else None
+        run.safe_error_code = persisted_error_code
         run.updated_at = now
         run.terminal_at = now
         attempt.status = status.value
-        attempt.safe_error_code = safe_error_code
+        attempt.safe_error_code = persisted_error_code
         attempt.terminal_at = now
         job.status = JobStatus(status.value).value
         job.lease_owner = None
@@ -492,7 +513,7 @@ class ExecutionService:
             run,
             RunEventType.TERMINAL,
             status,
-            safe_error_code=safe_error_code,
+            safe_error_code=persisted_error_code,
             now=now,
         )
         await self._session.flush()
@@ -523,7 +544,7 @@ class ExecutionService:
                 run,
                 RunStatus.CANCELLED,
                 now,
-                "cancelled_before_dispatch",
+                RunFailureCode.CANCELLED_BEFORE_DISPATCH,
                 event_type=RunEventType.CANCEL_REQUESTED,
             )
         else:
@@ -533,7 +554,11 @@ class ExecutionService:
             AuditEvent.succeeded(
                 workspace_id=context.workspace_id,
                 actor_user_id=context.actor_user_id,
-                action=AuditAction.RUN_CANCELLED,
+                action=(
+                    AuditAction.RUN_CANCELLED
+                    if run.status == RunStatus.CANCELLED.value
+                    else AuditAction.RUN_CANCELLATION_REQUESTED
+                ),
                 resource_type=ResourceType.RUN,
                 resource_id=run.id,
                 correlation_id=correlation_id or uuid4(),
@@ -567,7 +592,7 @@ class ExecutionService:
                 run,
                 terminal,
                 now,
-                "restore_reconciliation",
+                RunFailureCode.RESTORE_RECONCILIATION,
                 event_type=RunEventType.RESTORE_RECONCILED,
             )
         await self._session.flush()
@@ -608,7 +633,7 @@ class ExecutionService:
                     run,
                     terminal,
                     now,
-                    "content_retention_deadline",
+                    RunFailureCode.CONTENT_RETENTION_DEADLINE,
                     event_type=RunEventType.CONTENT_EXPIRED,
                 )
             else:
@@ -1003,7 +1028,7 @@ class ExecutionService:
                 if run.status == RunStatus.DISPATCH_FENCED.value
                 else RunStatus.TIMED_OUT
             )
-            await self._terminalize_run(run, status, now, "deadline_exceeded")
+            await self._terminalize_run(run, status, now, RunFailureCode.DEADLINE_EXCEEDED)
 
     async def _terminalize_abandoned_dispatches(self, now: datetime) -> None:
         runs = list(
@@ -1029,7 +1054,7 @@ class ExecutionService:
                     run,
                     RunStatus.INDETERMINATE,
                     now,
-                    "worker_lost_after_dispatch",
+                    RunFailureCode.WORKER_LOST_AFTER_DISPATCH,
                 )
         await self._session.flush()
 
@@ -1038,12 +1063,12 @@ class ExecutionService:
         run: Run,
         status: RunStatus,
         now: datetime,
-        safe_error_code: str,
+        safe_error_code: RunFailureCode,
         *,
         event_type: RunEventType = RunEventType.TERMINAL,
     ) -> None:
         run.status = status.value
-        run.safe_error_code = safe_error_code
+        run.safe_error_code = safe_error_code.value
         run.updated_at = now
         run.terminal_at = now
         job = await self._session.scalar(select(Job).where(Job.run_id == run.id).with_for_update())
@@ -1055,13 +1080,13 @@ class ExecutionService:
         attempt = await self._active_attempt(run.id)
         if attempt is not None:
             attempt.status = status.value
-            attempt.safe_error_code = safe_error_code
+            attempt.safe_error_code = safe_error_code.value
             attempt.terminal_at = now
         await self._append_next_event(
             run,
             event_type,
             status,
-            safe_error_code=safe_error_code,
+            safe_error_code=safe_error_code.value,
             now=now,
         )
 
