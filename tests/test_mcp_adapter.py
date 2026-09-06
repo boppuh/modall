@@ -1259,15 +1259,12 @@ def test_transport_enforces_declared_and_streamed_byte_limits() -> None:
                 200,
                 headers={"Content-Type": "application/json"},
                 content=(
-                    b'{"jsonrpc":"2.0","method":"notifications/progress",'
-                    b'"params":{"progress":1}}'
+                    b'{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}'
                 ),
                 request=request,
             )
 
-        notification_transport = LimitedTransport(
-            httpx.MockTransport(json_notification), 256
-        )
+        notification_transport = LimitedTransport(httpx.MockTransport(json_notification), 256)
         async with httpx.AsyncClient(transport=notification_transport) as client:
             response = await client.post(
                 "https://example.test",
