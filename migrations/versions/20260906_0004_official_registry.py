@@ -70,9 +70,15 @@ def upgrade() -> None:
         ["workspace_id", "provider", "query_digest", "expires_at"],
     )
     op.create_index("ix_registry_search_cache_expiry", "registry_search_cache", ["expires_at"])
+    op.execute(
+        "CREATE TRIGGER registry_search_cache_immutable "
+        "BEFORE UPDATE ON registry_search_cache FOR EACH ROW "
+        "EXECUTE FUNCTION modall_reject_immutable_update()"
+    )
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER IF EXISTS registry_search_cache_immutable ON registry_search_cache")
     op.drop_index("ix_registry_search_cache_expiry", table_name="registry_search_cache")
     op.drop_index("ix_registry_search_cache_lookup", table_name="registry_search_cache")
     op.drop_table("registry_search_cache")

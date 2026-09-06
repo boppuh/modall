@@ -248,6 +248,11 @@ class OfficialRegistryAdapter:
     def limits(self) -> OfficialRegistryLimits:
         return self._limits
 
+    async def screen_query(self, query: str) -> str:
+        """Apply the adapter's one query policy before cache access or send."""
+
+        return await _screen_query(query, self._limits, self._query_scanner)
+
     async def search(self, query: str) -> tuple[OfficialRegistryItem, ...]:
         items: list[OfficialRegistryItem] = []
         identities: set[tuple[str, str]] = set()
@@ -256,7 +261,7 @@ class OfficialRegistryAdapter:
         total_bytes = 0
         try:
             async with asyncio.timeout(self._limits.total_timeout_seconds):
-                query = await _screen_query(query, self._limits, self._query_scanner)
+                query = await self.screen_query(query)
                 for _ in range(self._limits.max_pages):
                     params: dict[str, str | int] = {
                         "search": query,
@@ -485,7 +490,6 @@ class OfficialRegistryService:
         adapter: OfficialRegistryAdapter,
         *,
         limits: OfficialRegistryLimits | None = None,
-        query_scanner: Callable[[object], bool] = _default_metadata_scanner,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._session = session
@@ -493,14 +497,13 @@ class OfficialRegistryService:
         if limits is not None and limits != adapter.limits:
             raise ValueError("service and adapter must use one official Registry limits policy")
         self._limits = adapter.limits
-        self._query_scanner = query_scanner
         self._now = now
 
     async def search(
         self, *, context: WorkspaceContext, query: str
     ) -> OfficialRegistrySearchResult:
         await require_current_role(self._session, context, Role.ADMIN, Role.OPERATOR)
-        normalized_query = await _screen_query(query, self._limits, self._query_scanner)
+        normalized_query = await self._adapter.screen_query(query)
         query_digest = hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
         now = self._utc_now()
         await _purge_expired_workspace_cache(

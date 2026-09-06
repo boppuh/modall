@@ -156,6 +156,22 @@ def test_search_cache_and_import_preserve_provenance_without_connection_trust() 
                     assert cached.from_cache is True
                     assert cached.cache_id == searched.cache_id
                     assert calls == 2
+
+                    def failed_cache_query_scanner(value: object) -> bool:
+                        del value
+                        raise TimeoutError
+
+                    strict_service = OfficialRegistryService(
+                        session,
+                        OfficialRegistryAdapter(client, query_scanner=failed_cache_query_scanner),
+                        now=lambda: clock,
+                    )
+                    with pytest.raises(OfficialRegistryError) as blocked_cache_hit:
+                        await strict_service.search(context=context, query="inference")
+                    assert (
+                        blocked_cache_hit.value.code == OfficialRegistryFailureCode.SCANNER_FAILED
+                    )
+                    assert calls == 2
                     item = searched.items[0]
                     imported = await service.import_cached(
                         context=context,
@@ -268,8 +284,7 @@ def test_scanner_failure_and_unsafe_metadata_write_no_cache() -> None:
                     context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
                     service = OfficialRegistryService(
                         session,
-                        OfficialRegistryAdapter(client),
-                        query_scanner=failed_scanner,
+                        OfficialRegistryAdapter(client, query_scanner=failed_scanner),
                     )
                     with pytest.raises(OfficialRegistryError) as failed:
                         await service.search(context=context, query="weather")
