@@ -361,6 +361,19 @@ def test_adapter_invokes_once_between_fences_and_normalizes_safe_results() -> No
             initialization_failure.value.code == InvocationFailureCode.SESSION_INITIALIZATION_FAILED
         )
 
+        malformed, malformed_endpoint = adapter_for("invalid-call-result")
+        with pytest.raises(InvocationError) as malformed_failure:
+            await malformed.invoke(
+                malformed_endpoint,
+                tool_name="status",
+                arguments={},
+                output_schema=None,
+                before_session=session_fence,
+                before_dispatch=dispatch_fence,
+            )
+        assert type(malformed_failure.value) is InvocationError
+        assert malformed_failure.value.code == InvocationFailureCode.INVALID_UPSTREAM_OUTPUT
+
     asyncio.run(scenario())
 
 

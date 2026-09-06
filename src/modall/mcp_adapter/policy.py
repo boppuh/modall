@@ -234,11 +234,13 @@ class LimitedByteStream(httpx.AsyncByteStream):
         budget: "RawByteBudget",
         forbidden_values: tuple[bytes, ...],
         mark_sensitive_response: Callable[[], None],
+        mark_complete: Callable[[], None],
         media_type: str,
     ) -> None:
         self._stream = stream
         self._budget = budget
         self._mark_sensitive_response = mark_sensitive_response
+        self._mark_complete = mark_complete
         self._forbidden_matcher = _IncrementalByteMatcher(forbidden_values)
         self._decoded_forbidden_matcher = _IncrementalByteMatcher(forbidden_values)
         self._escape_decoder = _IncrementalJsonEscapeDecoder()
@@ -279,6 +281,7 @@ class LimitedByteStream(httpx.AsyncByteStream):
             bytes(self._structured_buffer)
         ):
             self._reject_sensitive_body()
+        self._mark_complete()
 
     def _screen_completed_sse_events(self) -> None:
         consumed = 0
@@ -525,11 +528,16 @@ class LimitedTransport(httpx.AsyncBaseTransport):
             value.encode("utf-8") for value in forbidden_response_values
         )
         self._sensitive_response_detected = False
+        self._tool_call_response_completed = False
         self._before_request = before_request
 
     @property
     def sensitive_response_detected(self) -> bool:
         return self._sensitive_response_detected
+
+    @property
+    def tool_call_response_completed(self) -> bool:
+        return self._tool_call_response_completed
 
     def _mark_sensitive_response(self) -> None:
         self._sensitive_response_detected = True
@@ -538,6 +546,7 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         if self._before_request is not None:
             await self._before_request()
         response = await self._inner.handle_async_request(request)
+        is_tool_call = _request_method(request) == "tools/call"
         content_encoding = response.headers.get("content-encoding", "identity").lower()
         if content_encoding != "identity":
             await response.aclose()
@@ -586,6 +595,7 @@ class LimitedTransport(httpx.AsyncBaseTransport):
                 self._budget,
                 self._forbidden_response_bytes,
                 self._mark_sensitive_response,
+                self._mark_tool_call_response_complete if is_tool_call else _noop,
                 media_type,
             ),
             extensions=response.extensions,
@@ -599,5 +609,21 @@ class LimitedTransport(httpx.AsyncBaseTransport):
                 raise
         return screened_response
 
+    def _mark_tool_call_response_complete(self) -> None:
+        self._tool_call_response_completed = True
+
     async def aclose(self) -> None:
         await self._inner.aclose()
+
+
+def _request_method(request: httpx.Request) -> str | None:
+    try:
+        payload = json.loads(request.content)
+    except (json.JSONDecodeError, UnicodeError, httpx.RequestNotRead):
+        return None
+    method = payload.get("method") if isinstance(payload, dict) else None
+    return method if isinstance(method, str) else None
+
+
+def _noop() -> None:
+    return None

@@ -26,6 +26,7 @@ from modall.secrets.provider import SecretProvider, SecretReference, build_secre
 
 _CONFIRMATION_KEY_REFERENCE = "system-confirmation-hmac"
 _IDEMPOTENCY_KEY_REFERENCE = "system-idempotency-hmac"
+_INVOCATION_PROTOCOL_OVERHEAD_BYTES = 65_536
 
 
 def configure_logging(settings: Settings) -> None:
@@ -75,6 +76,12 @@ async def run_worker(settings: Settings) -> None:
                         await execution_service_factory(session).expire_retained_results()
             except Exception:
                 logger.warning("result_cleanup_failed")
+            try:
+                async with asyncio.timeout(settings.worker_maintenance_timeout_seconds):
+                    async with transaction(session_factory) as session:
+                        await execution_service_factory(session).expire_retained_content()
+            except Exception:
+                logger.warning("argument_cleanup_failed")
             await asyncio.sleep(settings.worker_poll_interval_seconds)
     finally:
         await engine.dispose()
@@ -132,7 +139,10 @@ def build_execution_runtime(
             raise KeyError("unknown endpoint policy version")
         return McpClientAdapter(
             endpoint_policy=EndpointPolicy(environment=settings.environment),
-            limits=TransportLimits(response_bytes=limits.max_result_bytes),
+            limits=TransportLimits(
+                response_bytes=limits.max_result_bytes + _INVOCATION_PROTOCOL_OVERHEAD_BYTES
+            ),
+            max_result_bytes=limits.max_result_bytes,
             schema_validation_timeout_seconds=limits.schema_validation_timeout_seconds,
             schema_validation_memory_bytes=limits.schema_validation_memory_bytes,
         )

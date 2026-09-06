@@ -166,22 +166,29 @@ class McpClientAdapter:
         limits: TransportLimits | None = None,
         max_pages: int = 16,
         max_tools: int = 512,
+        max_result_bytes: int | None = None,
         schema_validation_timeout_seconds: float = 2.0,
         schema_validation_memory_bytes: int = 256 * 1024 * 1024,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        resolved_limits = limits or TransportLimits()
+        resolved_max_result_bytes = (
+            resolved_limits.response_bytes if max_result_bytes is None else max_result_bytes
+        )
         if (
             max_pages < 1
             or max_tools < 1
+            or resolved_max_result_bytes < 1
             or not 0 < schema_validation_timeout_seconds <= 5
             or not math.isfinite(schema_validation_timeout_seconds)
             or not 64 * 1024 * 1024 <= schema_validation_memory_bytes <= 256 * 1024 * 1024
         ):
             raise ValueError("invalid adapter limits")
         self._endpoint_policy = endpoint_policy
-        self._limits = limits or TransportLimits()
+        self._limits = resolved_limits
         self._max_pages = max_pages
         self._max_tools = max_tools
+        self._max_result_bytes = resolved_max_result_bytes
         self._schema_validation_timeout_seconds = schema_validation_timeout_seconds
         self._schema_validation_memory_bytes = schema_validation_memory_bytes
         self._transport = transport
@@ -349,8 +356,22 @@ class McpClientAdapter:
                 raise InvocationError(
                     InvocationFailureCode.SENSITIVE_RESULT, dispatched=dispatched
                 ) from exc
+            nested_invocation_error = _find_exception(exc, InvocationError)
+            if nested_invocation_error is not None:
+                raise nested_invocation_error from exc
+            if (
+                dispatched
+                and transport is not None
+                and transport.tool_call_response_completed
+                and _find_exception(exc, McpError) is not None
+            ):
+                raise InvocationError(
+                    InvocationFailureCode.TOOL_CALL_FAILED, dispatched=True
+                ) from exc
             if dispatched:
-                if response_received:
+                if response_received or (
+                    transport is not None and transport.tool_call_response_completed
+                ):
                     raise InvocationError(
                         InvocationFailureCode.INVALID_UPSTREAM_OUTPUT,
                         dispatched=True,
@@ -401,12 +422,7 @@ class McpClientAdapter:
                     types.ClientNotification(types.InitializedNotification())
                 )
                 await before_dispatch()
-                try:
-                    received = await session.call_tool(tool_name, arguments=arguments)
-                except McpError as exc:
-                    raise InvocationError(
-                        InvocationFailureCode.TOOL_CALL_FAILED, dispatched=True
-                    ) from exc
+                received = await session.call_tool(tool_name, arguments=arguments)
         except Exception:
             if received is None:
                 raise
@@ -443,7 +459,7 @@ class McpClientAdapter:
             raise InvocationError(
                 InvocationFailureCode.INVALID_UPSTREAM_OUTPUT, dispatched=True
             ) from exc
-        if len(canonical) > self._limits.response_bytes:
+        if len(canonical) > self._max_result_bytes:
             raise InvocationError(InvocationFailureCode.INVALID_UPSTREAM_OUTPUT, dispatched=True)
         if contains_sensitive_json(payload) or (
             credential_text is not None and _contains_decoded_credential(payload, credential_text)

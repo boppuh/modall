@@ -28,7 +28,9 @@ class Settings(BaseSettings):
     worker_maintenance_timeout_seconds: Annotated[
         float, Field(gt=0, le=60, allow_inf_nan=False)
     ] = 5.0
-    worker_lease_duration_seconds: Annotated[float, Field(gt=0, le=300, allow_inf_nan=False)] = 30.0
+    worker_lease_duration_seconds: Annotated[float, Field(gt=10, le=300, allow_inf_nan=False)] = (
+        30.0
+    )
     confirmation_hmac_key_versions: tuple[str, ...] = ("v1",)
     idempotency_hmac_key_versions: tuple[str, ...] = ("v1",)
     auth_mode: Literal["local", "oidc"] = "local"

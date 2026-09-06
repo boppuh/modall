@@ -25,6 +25,12 @@ def test_settings_reject_unsafe_poll_intervals(interval: float) -> None:
         Settings(_env_file=None, worker_maintenance_timeout_seconds=interval)
 
 
+@pytest.mark.parametrize("lease_seconds", [0, 10, math.inf, math.nan, 300.1])
+def test_worker_lease_must_exceed_the_invocation_timeout(lease_seconds: float) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, worker_lease_duration_seconds=lease_seconds)
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

@@ -40,6 +40,7 @@ SUPPORTED_PROFILES = {
     "timeout-on-call",
     "disconnect",
     "disconnect-on-call",
+    "invalid-call-result",
     "headers",
     "sdk",
     "redirect",
@@ -391,6 +392,14 @@ def create_mcp_fixture_app() -> FastAPI:
             params = payload.get("params", {})
             name = params.get("name")
             arguments = params.get("arguments", {})
+            if profile == "invalid-call-result":
+                return JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {"content": "not-a-content-list", "isError": False},
+                    }
+                )
             if name == "rpc-error":
                 return JSONResponse(
                     {
