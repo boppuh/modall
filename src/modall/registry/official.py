@@ -151,6 +151,10 @@ class _DuplicateMember(ValueError):
     pass
 
 
+class _DecodeWorkExceeded(ValueError):
+    pass
+
+
 def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -162,6 +166,13 @@ def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, obje
 
 def _reject_nonfinite(_: str) -> object:
     raise ValueError("non-finite number")
+
+
+def _parse_finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite number")
+    return parsed
 
 
 def _canonical_json(value: object) -> bytes:
@@ -183,7 +194,7 @@ def _digest(value: object) -> str:
 
 def _decoded(value: str) -> str:
     decoded = value
-    while True:
+    for _ in range(8):
         try:
             next_value = unquote(decoded, errors="strict")
         except UnicodeError as exc:
@@ -191,6 +202,7 @@ def _decoded(value: str) -> str:
         if next_value == decoded:
             return decoded
         decoded = next_value
+    raise _DecodeWorkExceeded("percent decoding exceeded its work budget")
 
 
 def _decoded_metadata(value: object) -> object:
@@ -375,6 +387,7 @@ class OfficialRegistryAdapter:
                 body.decode("utf-8"),
                 object_pairs_hook=_reject_duplicate_members,
                 parse_constant=_reject_nonfinite,
+                parse_float=_parse_finite_float,
             )
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_RESPONSE) from exc
@@ -503,6 +516,15 @@ class OfficialRegistryService:
         self, *, context: WorkspaceContext, query: str
     ) -> OfficialRegistrySearchResult:
         await require_current_role(self._session, context, Role.ADMIN, Role.OPERATOR)
+        try:
+            async with asyncio.timeout(self._limits.total_timeout_seconds):
+                return await self._search_authorized(context=context, query=query)
+        except TimeoutError as exc:
+            raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT) from exc
+
+    async def _search_authorized(
+        self, *, context: WorkspaceContext, query: str
+    ) -> OfficialRegistrySearchResult:
         normalized_query = await self._adapter.screen_query(query)
         query_digest = hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
         now = self._utc_now()

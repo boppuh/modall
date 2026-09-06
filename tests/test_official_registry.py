@@ -221,6 +221,10 @@ def test_search_cache_and_import_preserve_provenance_without_connection_trust() 
             "token%2525253DAbCdEfGhIjKlMnOpQrStUvWx",
             OfficialRegistryFailureCode.UNSAFE_QUERY,
         ),
+        (
+            "token%" + ("25" * 30) + "3DAbCdEfGhIjKlMnOpQrStUvWx",
+            OfficialRegistryFailureCode.SCANNER_FAILED,
+        ),
         ("\x00weather", OfficialRegistryFailureCode.INVALID_QUERY),
         ("x" * 257, OfficialRegistryFailureCode.INVALID_QUERY),
     ],
@@ -476,6 +480,15 @@ def test_limit_configuration_rejects_nonpositive_and_overlong_cache_ttl() -> Non
                 200,
                 headers={"Content-Type": "application/json"},
                 content=b'{"servers":[],"metadata":{"count":NaN}}',
+                request=request,
+            ),
+            OfficialRegistryFailureCode.INVALID_RESPONSE,
+        ),
+        (
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                content=b'{"servers":[],"metadata":{"count":0,"weight":1e1000000}}',
                 request=request,
             ),
             OfficialRegistryFailureCode.INVALID_RESPONSE,
