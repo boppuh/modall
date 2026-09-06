@@ -72,4 +72,19 @@ def downgrade() -> None:
         ("run_events", "ck_run_event_safe_error_code"),
     ):
         op.drop_constraint(constraint, table, type_="check")
+    op.execute("DROP TRIGGER IF EXISTS run_events_immutable ON run_events")
+    for table in ("runs", "run_attempts", "run_events"):
+        op.execute(
+            f"UPDATE {table} SET safe_error_code = 'invalid_tool_result' "
+            "WHERE safe_error_code IN ('unsupported_tool_result', 'sensitive_tool_result')"
+        )
+    op.execute(
+        "CREATE TRIGGER run_events_immutable BEFORE UPDATE ON run_events "
+        "FOR EACH ROW EXECUTE FUNCTION modall_reject_immutable_update()"
+    )
+    for table, constraint in (
+        ("runs", "ck_run_safe_error_code"),
+        ("run_attempts", "ck_run_attempt_safe_error_code"),
+        ("run_events", "ck_run_event_safe_error_code"),
+    ):
         op.create_check_constraint(constraint, table, original_failure_codes)

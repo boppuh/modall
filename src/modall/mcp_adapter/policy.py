@@ -235,12 +235,17 @@ class LimitedByteStream(httpx.AsyncByteStream):
         forbidden_values: tuple[bytes, ...],
         mark_sensitive_response: Callable[[], None],
         mark_complete: Callable[[], None],
+        mark_jsonrpc_error: Callable[[], None],
+        expected_response_id: object,
         media_type: str,
     ) -> None:
         self._stream = stream
         self._budget = budget
         self._mark_sensitive_response = mark_sensitive_response
         self._mark_complete = mark_complete
+        self._mark_jsonrpc_error = mark_jsonrpc_error
+        self._expected_response_id = expected_response_id
+        self._response_marked = False
         self._forbidden_matcher = _IncrementalByteMatcher(forbidden_values)
         self._decoded_forbidden_matcher = _IncrementalByteMatcher(forbidden_values)
         self._escape_decoder = _IncrementalJsonEscapeDecoder()
@@ -281,7 +286,7 @@ class LimitedByteStream(httpx.AsyncByteStream):
             bytes(self._structured_buffer)
         ):
             self._reject_sensitive_body()
-        self._mark_complete()
+        self._mark_complete_once()
 
     def _screen_completed_sse_events(self) -> None:
         consumed = 0
@@ -293,6 +298,11 @@ class LimitedByteStream(httpx.AsyncByteStream):
             self._sse_scan_from = consumed
             if _contains_sensitive_sse_event(event):
                 self._reject_sensitive_body()
+            is_response, is_error = _sse_jsonrpc_response(event, self._expected_response_id)
+            if is_response:
+                self._mark_complete_once()
+                if is_error:
+                    self._mark_jsonrpc_error()
         if consumed:
             del self._structured_buffer[:consumed]
         self._sse_scan_from = max(0, len(self._structured_buffer) - 3)
@@ -300,6 +310,11 @@ class LimitedByteStream(httpx.AsyncByteStream):
     def _reject_sensitive_body(self) -> None:
         self._mark_sensitive_response()
         raise EndpointPolicyError("sensitive upstream response body")
+
+    def _mark_complete_once(self) -> None:
+        if not self._response_marked:
+            self._response_marked = True
+            self._mark_complete()
 
     async def aclose(self) -> None:
         buffered = bytes(self._structured_buffer)
@@ -529,6 +544,7 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         )
         self._sensitive_response_detected = False
         self._tool_call_response_completed = False
+        self._tool_call_jsonrpc_error_completed = False
         self._before_request = before_request
 
     @property
@@ -539,14 +555,19 @@ class LimitedTransport(httpx.AsyncBaseTransport):
     def tool_call_response_completed(self) -> bool:
         return self._tool_call_response_completed
 
+    @property
+    def tool_call_jsonrpc_error_completed(self) -> bool:
+        return self._tool_call_jsonrpc_error_completed
+
     def _mark_sensitive_response(self) -> None:
         self._sensitive_response_detected = True
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if self._before_request is not None:
             await self._before_request()
+        method, request_id = _request_envelope(request)
         response = await self._inner.handle_async_request(request)
-        is_tool_call = _request_method(request) == "tools/call"
+        is_tool_call = method == "tools/call"
         content_encoding = response.headers.get("content-encoding", "identity").lower()
         if content_encoding != "identity":
             await response.aclose()
@@ -596,6 +617,8 @@ class LimitedTransport(httpx.AsyncBaseTransport):
                 self._forbidden_response_bytes,
                 self._mark_sensitive_response,
                 self._mark_tool_call_response_complete if is_tool_call else _noop,
+                self._mark_tool_call_jsonrpc_error if is_tool_call else _noop,
+                request_id,
                 media_type,
             ),
             extensions=response.extensions,
@@ -604,6 +627,8 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         if media_type != "text/event-stream" or response.status_code != 200:
             try:
                 await screened_response.aread()
+                if is_tool_call and _is_jsonrpc_error(screened_response.content):
+                    self._tool_call_jsonrpc_error_completed = True
             except Exception:
                 await screened_response.aclose()
                 raise
@@ -612,18 +637,53 @@ class LimitedTransport(httpx.AsyncBaseTransport):
     def _mark_tool_call_response_complete(self) -> None:
         self._tool_call_response_completed = True
 
+    def _mark_tool_call_jsonrpc_error(self) -> None:
+        self._tool_call_jsonrpc_error_completed = True
+
     async def aclose(self) -> None:
         await self._inner.aclose()
 
 
-def _request_method(request: httpx.Request) -> str | None:
+def _request_envelope(request: httpx.Request) -> tuple[str | None, object]:
     try:
         payload = json.loads(request.content)
     except (json.JSONDecodeError, UnicodeError, httpx.RequestNotRead):
-        return None
+        return None, None
     method = payload.get("method") if isinstance(payload, dict) else None
-    return method if isinstance(method, str) else None
+    request_id = payload.get("id") if isinstance(payload, dict) else None
+    return (method if isinstance(method, str) else None), request_id
 
 
 def _noop() -> None:
     return None
+
+
+def _is_jsonrpc_error(value: bytes) -> bool:
+    try:
+        payload = json.loads(value)
+    except (json.JSONDecodeError, UnicodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("jsonrpc") == "2.0"
+        and "id" in payload
+        and isinstance(payload.get("error"), dict)
+    )
+
+
+def _sse_jsonrpc_response(event: bytes, expected_id: object) -> tuple[bool, bool]:
+    text = event.decode("utf-8", errors="ignore")
+    data = "\n".join(
+        line.partition(":")[2].lstrip() for line in text.splitlines() if line.startswith("data:")
+    )
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return False, False
+    is_response = (
+        isinstance(payload, dict)
+        and payload.get("jsonrpc") == "2.0"
+        and payload.get("id") == expected_id
+        and ("result" in payload or "error" in payload)
+    )
+    return is_response, is_response and isinstance(payload.get("error"), dict)
