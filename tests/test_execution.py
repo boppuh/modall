@@ -384,7 +384,7 @@ def test_idempotency_survives_key_rotation_and_detects_conflict() -> None:
                 with pytest.raises(ExecutionError) as incomplete_history:
                     await service(
                         session,
-                        now=now,
+                        now=now + timedelta(days=91),
                         idempotency_keys=(rotated,),
                     ).create_run(
                         context=context,
@@ -495,8 +495,12 @@ def test_job_leasing_reclaims_only_with_a_new_epoch_and_rejects_stale_heartbeat(
                         first, lease_duration=timedelta(seconds=10)
                     )
                 assert stale.value.code == ExecutionFailureCode.LEASE_LOST
-                completed = await service(session, now=current).complete_lease(
-                    second, status=RunStatus.SUCCEEDED
+                second_service = service(session, now=current)
+                await second_service.fence_session(second)
+                await second_service.fence_dispatch(second)
+                completed = await second_service.complete_lease(
+                    second,
+                    status=RunStatus.SUCCEEDED,
                 )
                 assert completed.status == RunStatus.SUCCEEDED.value
                 attempts = list(

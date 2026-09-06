@@ -198,7 +198,7 @@ class ExecutionService:
             argument_digest=argument_digest,
             deadline=requested_deadline,
         )
-        await self._require_retained_idempotency_keys(now)
+        await self._require_idempotency_key_history()
         existing_record = await self._find_idempotency_record(context, raw_key)
         nonce_digest = _sha256(claims.nonce.encode())
         used_nonce = await self._session.scalar(
@@ -376,6 +376,13 @@ class ExecutionService:
                 Job.execution_epoch == state.execution_epoch,
                 Job.available_at <= now,
                 Job.deadline > now,
+                Run.status.in_(
+                    [
+                        RunStatus.QUEUED.value,
+                        RunStatus.PREPARING.value,
+                        RunStatus.SESSION_FENCED.value,
+                    ]
+                ),
                 or_(
                     Job.status == JobStatus.QUEUED.value,
                     and_(
@@ -539,6 +546,11 @@ class ExecutionService:
         attempt = await self._active_attempt(run.id)
         if attempt is None or attempt.lease_epoch != lease.lease_epoch:
             raise ExecutionError(ExecutionFailureCode.LEASE_LOST)
+        if status == RunStatus.SUCCEEDED and (
+            run.status != RunStatus.DISPATCH_FENCED.value
+            or attempt.status != RunStatus.DISPATCH_FENCED.value
+        ):
+            raise ExecutionError(ExecutionFailureCode.INVALID_TRANSITION)
         run.status = status.value
         persisted_error_code = safe_error_code.value if safe_error_code is not None else None
         run.safe_error_code = persisted_error_code
@@ -904,12 +916,11 @@ class ExecutionService:
             ),
         )
 
-    async def _require_retained_idempotency_keys(self, now: datetime) -> None:
+    async def _require_idempotency_key_history(self) -> None:
         configured_versions = [key.version for key in self._idempotency_keys]
         missing_version = await self._session.scalar(
             select(IdempotencyRecord.key_version)
             .where(
-                IdempotencyRecord.expires_at > now,
                 IdempotencyRecord.key_version.not_in(configured_versions),
             )
             .limit(1)
