@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from modall.execution import validation as schema_validation
+from modall.execution.types import ExecutionLimits
 from modall.mcp_adapter.client import (
     CredentialError,
     DiscoveryError,
@@ -42,6 +43,7 @@ from modall.security.metadata import (
     contains_sensitive_url,
     validate_capability_scalars,
 )
+from modall.worker.main import _invocation_transport_limits
 from tests.support.mcp_fixture_server import (
     COMMON_KEY_FIXTURE_TOKEN,
     ESCAPED_FIXTURE_TOKEN,
@@ -415,6 +417,22 @@ def test_adapter_invokes_once_between_fences_and_normalizes_safe_results() -> No
                 )
             assert type(malformed_failure.value) is InvocationError
             assert malformed_failure.value.code == InvocationFailureCode.INVALID_UPSTREAM_OUTPUT
+
+        escaped, escaped_endpoint = adapter_for(
+            "escaped-large-call",
+            limits=_invocation_transport_limits(ExecutionLimits()),
+        )
+        escaped_result = await escaped.invoke(
+            escaped_endpoint,
+            tool_name="status",
+            arguments={},
+            output_schema=None,
+            before_session=session_fence,
+            before_dispatch=dispatch_fence,
+        )
+        assert escaped_result.payload["content"] == [
+            {"type": "text", "text": "é" * 4_000} for _ in range(16)
+        ]
 
     asyncio.run(scenario())
 

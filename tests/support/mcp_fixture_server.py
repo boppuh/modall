@@ -42,6 +42,7 @@ SUPPORTED_PROFILES = {
     "disconnect",
     "disconnect-on-call",
     "invalid-call-result",
+    "escaped-large-call",
     "sensitive-incomplete-call",
     "sensitive-complete-call",
     "sensitive-complete-sse-call",
@@ -401,6 +402,22 @@ def create_mcp_fixture_app() -> FastAPI:
                 return Response(unicode_body, media_type="application/json")
             return JSONResponse(response_payload)
         if method == "tools/call":
+            if profile == "escaped-large-call":
+                return Response(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": {
+                                "content": [
+                                    {"type": "text", "text": "é" * 4_000} for _ in range(16)
+                                ],
+                                "isError": False,
+                            },
+                        }
+                    ),
+                    media_type="application/json",
+                )
             if profile == "sensitive-complete-sse-call":
 
                 async def sensitive_result_event() -> Any:

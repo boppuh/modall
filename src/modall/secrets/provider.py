@@ -52,19 +52,8 @@ class SecretProvider(Protocol):
 def validate_secret_reference(reference: SecretReference) -> None:
     """Validate metadata before it is persisted as a usable binding."""
 
-    if reference.provider == "mounted_file":
+    if reference.provider in {"fixture", "mounted_file"}:
         MountedFileSecretProvider.filename_for(reference.external_reference, reference.version)
-        return
-    if reference.provider == "fixture":
-        if (
-            not reference.external_reference.strip()
-            or len(reference.external_reference) > 256
-            or "\x00" in reference.external_reference
-            or not reference.version.strip()
-            or len(reference.version) > 128
-            or "\x00" in reference.version
-        ):
-            raise SecretProviderError("invalid secret reference")
         return
     raise SecretProviderError("unsupported secret provider")
 

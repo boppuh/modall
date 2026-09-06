@@ -51,6 +51,8 @@ def test_fixture_provider_fails_without_reference_disclosure() -> None:
         reference("fixture", "", "v1"),
         reference("fixture", "token", ""),
         reference("fixture", "nul\x00name", "v1"),
+        reference("fixture", "contains space", "v1"),
+        reference("fixture", "r" * 129, "v1"),
         reference("unknown", "token", "v1"),
     ],
 )

@@ -28,6 +28,7 @@ from modall.secrets.provider import SecretProvider, SecretReference, build_secre
 _CONFIRMATION_KEY_REFERENCE = "system-confirmation-hmac"
 _IDEMPOTENCY_KEY_REFERENCE = "system-idempotency-hmac"
 _INVOCATION_PROTOCOL_OVERHEAD_BYTES = 65_536
+_MAX_JSON_ESCAPE_EXPANSION = 6
 
 
 def configure_logging(settings: Settings) -> None:
@@ -165,9 +166,7 @@ def build_execution_runtime(
             raise KeyError("unknown endpoint policy version")
         return McpClientAdapter(
             endpoint_policy=EndpointPolicy(environment=settings.environment),
-            limits=TransportLimits(
-                response_bytes=limits.max_result_bytes + _INVOCATION_PROTOCOL_OVERHEAD_BYTES
-            ),
+            limits=_invocation_transport_limits(limits),
             max_result_bytes=limits.max_result_bytes,
             schema_validation_timeout_seconds=limits.schema_validation_timeout_seconds,
             schema_validation_memory_bytes=limits.schema_validation_memory_bytes,
@@ -181,6 +180,17 @@ def build_execution_runtime(
             adapter_factory=adapter_factory,
         ),
         execution_service_factory,
+    )
+
+
+def _invocation_transport_limits(limits: ExecutionLimits) -> TransportLimits:
+    """Allow a bounded JSON-escaped result to normalize to the retention limit."""
+
+    return TransportLimits(
+        response_bytes=(
+            limits.max_result_bytes * _MAX_JSON_ESCAPE_EXPANSION
+            + _INVOCATION_PROTOCOL_OVERHEAD_BYTES
+        )
     )
 
 
