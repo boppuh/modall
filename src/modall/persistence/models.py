@@ -699,7 +699,11 @@ class Run(Base):
         ),
         CheckConstraint("connection_control_epoch >= 0", name="ck_run_connection_epoch"),
         CheckConstraint("capability_status_epoch >= 0", name="ck_run_capability_epoch"),
-        CheckConstraint("length(argument_digest) = 64", name="ck_run_argument_digest"),
+        CheckConstraint(
+            "(arguments IS NULL AND argument_digest IS NULL) OR "
+            "(arguments IS NOT NULL AND length(argument_digest) = 64)",
+            name="ck_run_argument_digest",
+        ),
         CheckConstraint(
             "safe_error_code IS NULL OR safe_error_code IN "
             "('worker_lost_before_dispatch', 'worker_lost_after_dispatch', "
@@ -778,7 +782,7 @@ class Run(Base):
     protocol_revision: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(24), active_history=True)
     arguments: Mapped[dict[str, object] | None] = mapped_column(JSON(none_as_null=True))
-    argument_digest: Mapped[str] = mapped_column(String(64))
+    argument_digest: Mapped[str | None] = mapped_column(String(64))
     arguments_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     cancellation_requested: Mapped[bool] = mapped_column(Boolean, default=False)

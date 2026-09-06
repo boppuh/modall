@@ -71,6 +71,12 @@ _TERMINAL_RUN_STATUSES = frozenset(
         RunStatus.INDETERMINATE,
     }
 )
+_ACTIVE_RUN_STATUS_VALUES = (
+    RunStatus.QUEUED.value,
+    RunStatus.PREPARING.value,
+    RunStatus.SESSION_FENCED.value,
+    RunStatus.DISPATCH_FENCED.value,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +315,7 @@ class ExecutionService:
                 available_at=now,
                 deadline=effective_deadline,
                 completed_at=None,
+                created_at=now,
             )
         )
         self._append_event(run, RunEventType.ADMITTED, RunStatus.QUEUED, now=now, sequence=1)
@@ -665,7 +672,7 @@ class ExecutionService:
             (
                 await self._session.scalars(
                     select(Run)
-                    .where(Run.status.not_in([status.value for status in _TERMINAL_RUN_STATUSES]))
+                    .where(Run.status.in_(_ACTIVE_RUN_STATUS_VALUES))
                     .order_by(Run.created_at, Run.id)
                     .limit(batch_size)
                     .with_for_update(skip_locked=True)
@@ -742,6 +749,7 @@ class ExecutionService:
                     now=now,
                 )
             run.arguments = None
+            run.argument_digest = None
             run.updated_at = now
         await self._session.flush()
         return len(runs)
@@ -1233,6 +1241,7 @@ class ExecutionService:
             or _utc(job.deadline) <= now
             or run.cancellation_requested
             or run.status != expected.value
+            or run.protocol_revision != QUALIFIED_PROTOCOL_REVISION
             or membership is None
             or membership.role not in {Role.ADMIN.value, Role.OPERATOR.value}
             or capability is None
@@ -1307,6 +1316,7 @@ class ExecutionService:
         )
         return bool(
             workspace_id is not None
+            and run.protocol_revision == QUALIFIED_PROTOCOL_REVISION
             and membership is not None
             and membership.role in {Role.ADMIN.value, Role.OPERATOR.value}
             and capability is not None

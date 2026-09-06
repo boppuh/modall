@@ -247,6 +247,9 @@ def test_preflight_creates_exact_lineage_and_idempotent_replays() -> None:
                 assert first.argument_digest == first_preflight.argument_digest
                 assert first.status == RunStatus.QUEUED.value
                 assert await session.scalar(select(func.count()).select_from(Job)) == 1
+                job = await session.scalar(select(Job).where(Job.run_id == first.id))
+                assert job is not None
+                assert job.created_at.replace(tzinfo=UTC) == now
                 assert (
                     await session.scalar(select(func.count()).select_from(IdempotencyRecord)) == 1
                 )
@@ -686,6 +689,7 @@ def test_restore_quarantine_fences_old_jobs_and_retention_erases_content() -> No
                 retained = await session.get(Run, run_id)
                 assert retained is not None
                 assert retained.arguments is None
+                assert retained.argument_digest is None
                 assert await execution.expire_retained_content() == 0
 
             current += timedelta(days=2)
@@ -789,6 +793,7 @@ def test_cancellation_terminalizes_unfenced_work_and_is_idempotent() -> None:
                 assert expired == 2
                 assert dispatched.status == RunStatus.INDETERMINATE.value
                 assert dispatched.arguments is None
+                assert dispatched.argument_digest is None
 
     asyncio.run(scenario())
 
@@ -914,6 +919,75 @@ def test_heartbeat_and_worker_boundary_validation() -> None:
                     is None
                 )
                 assert deadline_run.status == RunStatus.TIMED_OUT.value
+
+    asyncio.run(scenario())
+
+
+def test_worker_rechecks_its_qualified_protocol_at_claim_and_each_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="protocol-worker")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=now)
+
+                async def admit(key: str) -> Run:
+                    preflight = await execution.preflight(
+                        context=context,
+                        capability_version_id=version.id,
+                        arguments={"query": key},
+                    )
+                    return await execution.create_run(
+                        context=context,
+                        capability_version_id=version.id,
+                        arguments={"query": key},
+                        confirmation_token=preflight.confirmation_token,
+                        idempotency_key=key,
+                    )
+
+                stale_at_claim = await admit("stale-at-claim")
+                monkeypatch.setattr(
+                    "modall.execution.service.QUALIFIED_PROTOCOL_REVISION", "future-revision"
+                )
+                assert (
+                    await execution.claim_job(
+                        worker_id="worker", lease_duration=timedelta(seconds=30)
+                    )
+                    is None
+                )
+                assert stale_at_claim.status == RunStatus.FAILED.value
+
+                monkeypatch.setattr(
+                    "modall.execution.service.QUALIFIED_PROTOCOL_REVISION", "2025-06-18"
+                )
+                stale_at_session = await admit("stale-at-session")
+                session_lease = await execution.claim_job(
+                    worker_id="worker", lease_duration=timedelta(seconds=30)
+                )
+                assert session_lease is not None
+                monkeypatch.setattr(
+                    "modall.execution.service.QUALIFIED_PROTOCOL_REVISION", "future-revision"
+                )
+                with pytest.raises(ExecutionError) as session_fence:
+                    await execution.fence_session(session_lease)
+                assert session_fence.value.code == ExecutionFailureCode.LEASE_LOST
+                assert stale_at_session.status == RunStatus.PREPARING.value
+
+                monkeypatch.setattr(
+                    "modall.execution.service.QUALIFIED_PROTOCOL_REVISION", "2025-06-18"
+                )
+                await execution.fence_session(session_lease)
+                monkeypatch.setattr(
+                    "modall.execution.service.QUALIFIED_PROTOCOL_REVISION", "future-revision"
+                )
+                with pytest.raises(ExecutionError) as dispatch_fence:
+                    await execution.fence_dispatch(session_lease)
+                assert dispatch_fence.value.code == ExecutionFailureCode.LEASE_LOST
+                assert stale_at_session.status == RunStatus.SESSION_FENCED.value
 
     asyncio.run(scenario())
 

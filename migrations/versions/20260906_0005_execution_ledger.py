@@ -73,7 +73,7 @@ def upgrade() -> None:
         sa.Column("protocol_revision", sa.String(64), nullable=False),
         sa.Column("status", sa.String(24), nullable=False),
         sa.Column("arguments", sa.JSON()),
-        sa.Column("argument_digest", sa.String(64), nullable=False),
+        sa.Column("argument_digest", sa.String(64)),
         sa.Column("arguments_expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("deadline", sa.DateTime(timezone=True), nullable=False),
         sa.Column("cancellation_requested", sa.Boolean(), nullable=False),
@@ -89,7 +89,11 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("connection_control_epoch >= 0", name="ck_run_connection_epoch"),
         sa.CheckConstraint("capability_status_epoch >= 0", name="ck_run_capability_epoch"),
-        sa.CheckConstraint("length(argument_digest) = 64", name="ck_run_argument_digest"),
+        sa.CheckConstraint(
+            "(arguments IS NULL AND argument_digest IS NULL) OR "
+            "(arguments IS NOT NULL AND length(argument_digest) = 64)",
+            name="ck_run_argument_digest",
+        ),
         sa.CheckConstraint(
             f"safe_error_code IS NULL OR safe_error_code IN ({RUN_FAILURE_CODES})",
             name="ck_run_safe_error_code",
