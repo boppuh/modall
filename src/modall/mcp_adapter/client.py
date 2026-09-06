@@ -371,14 +371,20 @@ class McpClientAdapter:
                 dispatched
                 and transport is not None
                 and transport.tool_call_response_completed
+                and transport.tool_call_failure_completed
+            ):
+                raise InvocationError(
+                    InvocationFailureCode.TOOL_CALL_FAILED,
+                    dispatched=True,
+                ) from exc
+            if (
+                dispatched
+                and transport is not None
+                and transport.tool_call_response_completed
                 and _find_exception(exc, McpError) is not None
             ):
                 raise InvocationError(
-                    (
-                        InvocationFailureCode.TOOL_CALL_FAILED
-                        if transport.tool_call_jsonrpc_error_completed
-                        else InvocationFailureCode.INVALID_UPSTREAM_OUTPUT
-                    ),
+                    InvocationFailureCode.INVALID_UPSTREAM_OUTPUT,
                     dispatched=True,
                 ) from exc
             if dispatched:

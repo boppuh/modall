@@ -235,7 +235,7 @@ class LimitedByteStream(httpx.AsyncByteStream):
         forbidden_values: tuple[bytes, ...],
         mark_sensitive_response: Callable[[], None],
         mark_complete: Callable[[], None],
-        mark_jsonrpc_error: Callable[[], None],
+        mark_tool_failure: Callable[[], None],
         expected_response_id: object,
         media_type: str,
         status_code: int,
@@ -244,7 +244,7 @@ class LimitedByteStream(httpx.AsyncByteStream):
         self._budget = budget
         self._mark_sensitive_response = mark_sensitive_response
         self._mark_complete = mark_complete
-        self._mark_jsonrpc_error = mark_jsonrpc_error
+        self._mark_tool_failure = mark_tool_failure
         self._expected_response_id = expected_response_id
         self._status_code = status_code
         self._response_marked = False
@@ -254,7 +254,7 @@ class LimitedByteStream(httpx.AsyncByteStream):
         self._escape_decoder = _IncrementalJsonEscapeDecoder()
         self._generic_tail = b""
         self._structured_buffer = bytearray()
-        self._buffer_json_document = media_type != "text/event-stream"
+        self._buffer_json_document = media_type != "text/event-stream" or status_code != 200
         self._sse_scan_from = 0
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
@@ -286,10 +286,11 @@ class LimitedByteStream(httpx.AsyncByteStream):
             body = bytes(self._structured_buffer)
             response = _jsonrpc_response(body, self._expected_response_id)
             malformed_success = response is None and self._status_code == 200
-            if malformed_success or (response is not None and response[0]):
+            client_rejection = 400 <= self._status_code < 500
+            if client_rejection or malformed_success or (response is not None and response[0]):
                 self._mark_complete_once()
-                if response is not None and response[1]:
-                    self._mark_jsonrpc_error()
+                if client_rejection or (response is not None and response[1]):
+                    self._mark_tool_failure()
             if self._pending_sensitive_response or _contains_sensitive_json_document(body):
                 self._reject_sensitive_body()
             if body:
@@ -312,7 +313,7 @@ class LimitedByteStream(httpx.AsyncByteStream):
             if is_response:
                 self._mark_complete_once()
                 if is_error:
-                    self._mark_jsonrpc_error()
+                    self._mark_tool_failure()
             if self._pending_sensitive_response or _contains_sensitive_sse_event(event):
                 self._reject_sensitive_body()
         if consumed:
@@ -556,7 +557,7 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         )
         self._sensitive_response_detected = False
         self._tool_call_response_completed = False
-        self._tool_call_jsonrpc_error_completed = False
+        self._tool_call_failure_completed = False
         self._before_request = before_request
 
     @property
@@ -568,8 +569,8 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         return self._tool_call_response_completed
 
     @property
-    def tool_call_jsonrpc_error_completed(self) -> bool:
-        return self._tool_call_jsonrpc_error_completed
+    def tool_call_failure_completed(self) -> bool:
+        return self._tool_call_failure_completed
 
     def _mark_sensitive_response(self) -> None:
         self._sensitive_response_detected = True
@@ -629,7 +630,7 @@ class LimitedTransport(httpx.AsyncBaseTransport):
                 self._forbidden_response_bytes,
                 self._mark_sensitive_response,
                 self._mark_tool_call_response_complete if is_tool_call else _noop,
-                self._mark_tool_call_jsonrpc_error if is_tool_call else _noop,
+                self._mark_tool_call_failure if is_tool_call else _noop,
                 request_id,
                 media_type,
                 response.status_code,
@@ -648,8 +649,8 @@ class LimitedTransport(httpx.AsyncBaseTransport):
     def _mark_tool_call_response_complete(self) -> None:
         self._tool_call_response_completed = True
 
-    def _mark_tool_call_jsonrpc_error(self) -> None:
-        self._tool_call_jsonrpc_error_completed = True
+    def _mark_tool_call_failure(self) -> None:
+        self._tool_call_failure_completed = True
 
     async def aclose(self) -> None:
         await self._inner.aclose()

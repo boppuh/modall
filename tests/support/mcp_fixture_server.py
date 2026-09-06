@@ -42,6 +42,7 @@ SUPPORTED_PROFILES = {
     "disconnect",
     "disconnect-on-call",
     "invalid-call-result",
+    "client-error-call",
     "escaped-large-call",
     "sensitive-incomplete-call",
     "sensitive-complete-call",
@@ -402,6 +403,8 @@ def create_mcp_fixture_app() -> FastAPI:
                 return Response(unicode_body, media_type="application/json")
             return JSONResponse(response_payload)
         if method == "tools/call":
+            if profile == "client-error-call":
+                return Response("authentication rejected", status_code=401)
             if profile == "escaped-large-call":
                 return Response(
                     json.dumps(

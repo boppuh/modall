@@ -418,6 +418,18 @@ def test_adapter_invokes_once_between_fences_and_normalizes_safe_results() -> No
             assert type(malformed_failure.value) is InvocationError
             assert malformed_failure.value.code == InvocationFailureCode.INVALID_UPSTREAM_OUTPUT
 
+        rejected, rejected_endpoint = adapter_for("client-error-call")
+        with pytest.raises(InvocationError) as client_rejection:
+            await rejected.invoke(
+                rejected_endpoint,
+                tool_name="status",
+                arguments={},
+                output_schema=None,
+                before_session=session_fence,
+                before_dispatch=dispatch_fence,
+            )
+        assert client_rejection.value.code == InvocationFailureCode.TOOL_CALL_FAILED
+
         escaped, escaped_endpoint = adapter_for(
             "escaped-large-call",
             limits=_invocation_transport_limits(ExecutionLimits()),
@@ -748,6 +760,9 @@ def test_limited_transport_revalidates_before_every_request() -> None:
         (b"", 200, True, False),
         (b'{"jsonrpc":', 202, False, False),
         (b"", 206, False, False),
+        (b"", 401, True, True),
+        (b"not-json", 403, True, True),
+        (b'{"jsonrpc":"2.0","id":2,"result":{}}', 404, True, True),
         (b'{"jsonrpc":', 502, False, False),
         (b"", 503, False, False),
     ),
@@ -771,7 +786,29 @@ def test_tool_call_response_completion_requires_an_exact_response_id(
                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
             )
         assert transport.tool_call_response_completed is completed
-        assert transport.tool_call_jsonrpc_error_completed is failed
+        assert transport.tool_call_failure_completed is failed
+
+    asyncio.run(scenario())
+
+
+def test_tool_call_client_error_is_final_even_when_mislabeled_as_sse() -> None:
+    async def scenario() -> None:
+        async def reject(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                401,
+                headers={"Content-Type": "text/event-stream"},
+                content=b"not-an-event",
+                request=request,
+            )
+
+        transport = LimitedTransport(httpx.MockTransport(reject), 1024)
+        async with httpx.AsyncClient(transport=transport) as client:
+            await client.post(
+                "https://example.test",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
+            )
+        assert transport.tool_call_response_completed
+        assert transport.tool_call_failure_completed
 
     asyncio.run(scenario())
 
