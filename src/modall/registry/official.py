@@ -1072,11 +1072,7 @@ async def _run_scanner(
                     receiver.close()
             if process is not None:
                 cleanup = asyncio.create_task(_close_scanner_process(process))
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    await cleanup
-                    raise
+                await _finish_scanner_cleanup(cleanup)
         finally:
             if permit_acquired:
                 _release_scanner_process_permit()
@@ -1103,6 +1099,19 @@ async def _close_scanner_process(process: SpawnProcess) -> None:
     if not process.is_alive():
         with suppress(Exception):
             process.close()
+
+
+async def _finish_scanner_cleanup(cleanup: asyncio.Task[None]) -> None:
+    cancelled = False
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 async def _bounded_close(close: Callable[[], Awaitable[None]], operation_timeout: float) -> None:

@@ -1205,10 +1205,8 @@ def test_scanner_cleanup_cancellation_releases_process_permit(
 
         async def delayed_close(process: object) -> None:
             cleanup_started.set()
-            try:
-                await finish_cleanup.wait()
-            finally:
-                await original_close(process)  # type: ignore[arg-type]
+            await finish_cleanup.wait()
+            await original_close(process)  # type: ignore[arg-type]
 
         monkeypatch.setattr(official_registry, "_close_scanner_process", delayed_close)
         task = asyncio.create_task(
@@ -1221,6 +1219,8 @@ def test_scanner_cleanup_cancellation_releases_process_permit(
         task.cancel()
         await asyncio.wait_for(cleanup_started.wait(), timeout=1)
         task.cancel()
+        await asyncio.sleep(0)
+        assert task.done() is False
         finish_cleanup.set()
         with suppress(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=1)
