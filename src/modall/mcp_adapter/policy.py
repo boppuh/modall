@@ -238,6 +238,7 @@ class LimitedByteStream(httpx.AsyncByteStream):
         mark_jsonrpc_error: Callable[[], None],
         expected_response_id: object,
         media_type: str,
+        status_code: int,
     ) -> None:
         self._stream = stream
         self._budget = budget
@@ -245,6 +246,7 @@ class LimitedByteStream(httpx.AsyncByteStream):
         self._mark_complete = mark_complete
         self._mark_jsonrpc_error = mark_jsonrpc_error
         self._expected_response_id = expected_response_id
+        self._status_code = status_code
         self._response_marked = False
         self._pending_sensitive_response = False
         self._forbidden_matcher = _IncrementalByteMatcher(forbidden_values)
@@ -283,7 +285,8 @@ class LimitedByteStream(httpx.AsyncByteStream):
         if self._buffer_json_document:
             body = bytes(self._structured_buffer)
             response = _jsonrpc_response(body, self._expected_response_id)
-            if response is None or response[0]:
+            malformed_success = response is None and 200 <= self._status_code < 300
+            if malformed_success or (response is not None and response[0]):
                 self._mark_complete_once()
                 if response is not None and response[1]:
                     self._mark_jsonrpc_error()
@@ -629,6 +632,7 @@ class LimitedTransport(httpx.AsyncBaseTransport):
                 self._mark_tool_call_jsonrpc_error if is_tool_call else _noop,
                 request_id,
                 media_type,
+                response.status_code,
             ),
             extensions=response.extensions,
             request=request,

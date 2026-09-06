@@ -737,24 +737,26 @@ def test_limited_transport_revalidates_before_every_request() -> None:
 
 
 @pytest.mark.parametrize(
-    ("body", "completed", "failed"),
+    ("body", "status_code", "completed", "failed"),
     (
-        (b'{"jsonrpc":"2.0","id":1,"result":{}}', True, False),
-        (b'{"jsonrpc":"2.0","id":1,"error":{"code":-1}}', True, True),
-        (b'{"jsonrpc":"2.0","id":2,"result":{}}', False, False),
-        (b'{"jsonrpc":"2.0","id":2,"error":{"code":-1}}', False, False),
-        (b'{"jsonrpc":"2.0","id":true,"result":{}}', False, False),
-        (b'{"jsonrpc":', True, False),
-        (b"", True, False),
+        (b'{"jsonrpc":"2.0","id":1,"result":{}}', 200, True, False),
+        (b'{"jsonrpc":"2.0","id":1,"error":{"code":-1}}', 200, True, True),
+        (b'{"jsonrpc":"2.0","id":2,"result":{}}', 200, False, False),
+        (b'{"jsonrpc":"2.0","id":2,"error":{"code":-1}}', 200, False, False),
+        (b'{"jsonrpc":"2.0","id":true,"result":{}}', 200, False, False),
+        (b'{"jsonrpc":', 200, True, False),
+        (b"", 200, True, False),
+        (b'{"jsonrpc":', 502, False, False),
+        (b"", 503, False, False),
     ),
 )
 def test_tool_call_response_completion_requires_an_exact_response_id(
-    body: bytes, completed: bool, failed: bool
+    body: bytes, status_code: int, completed: bool, failed: bool
 ) -> None:
     async def scenario() -> None:
         async def respond(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
-                200,
+                status_code,
                 headers={"Content-Type": "application/json"},
                 content=body,
                 request=request,
