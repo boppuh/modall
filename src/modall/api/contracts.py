@@ -2,15 +2,16 @@
 
 import asyncio
 import base64
+import binascii
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Select, select
+from sqlalchemy import Select, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import InstrumentedAttribute
 
@@ -926,8 +927,18 @@ def build_control_plane_router(
             and occurred_after >= occurred_before
         ):
             raise InvalidRequest("invalid audit time range")
-        statement = statement.order_by(AuditEvent.id.desc())
-        statement = _after_cursor(statement, AuditEvent.id, cursor)
+        statement = statement.order_by(AuditEvent.occurred_at.desc(), AuditEvent.id.desc())
+        if cursor is not None:
+            cursor_time, cursor_id = _decode_audit_cursor(cursor)
+            statement = statement.where(
+                or_(
+                    AuditEvent.occurred_at < cursor_time,
+                    and_(
+                        AuditEvent.occurred_at == cursor_time,
+                        AuditEvent.id < cursor_id,
+                    ),
+                )
+            )
         rows = list((await state.session.scalars(statement.limit(limit + 1))).all())
         return AuditEventPage(
             items=[
@@ -943,7 +954,16 @@ def build_control_plane_router(
                 )
                 for item in rows[:limit]
             ],
-            page=PageInfo(next_cursor=_next_cursor(rows, limit, lambda row: row.id)),
+            page=PageInfo(
+                next_cursor=(
+                    _encode_audit_cursor(
+                        rows[limit - 1].occurred_at,
+                        rows[limit - 1].id,
+                    )
+                    if len(rows) > limit
+                    else None
+                )
+            ),
         )
 
     return router
@@ -973,7 +993,7 @@ def _decode_cursor(value: str) -> UUID:
         raise InvalidRequest("invalid cursor")
     try:
         return UUID(bytes=base64.urlsafe_b64decode(value + "=="))
-    except (ValueError, TypeError) as exc:
+    except (binascii.Error, ValueError, TypeError) as exc:
         raise InvalidRequest("invalid cursor") from exc
 
 
@@ -987,7 +1007,7 @@ def _decode_sequence_cursor(value: str) -> int:
     try:
         decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode("ascii")
         sequence = int(decoded)
-    except (ValueError, UnicodeError) as exc:
+    except (binascii.Error, ValueError, UnicodeError) as exc:
         raise InvalidRequest("invalid cursor") from exc
     if sequence < 1:
         raise InvalidRequest("invalid cursor")
@@ -1002,6 +1022,35 @@ def _after_cursor(
     if cursor is None:
         return statement
     return statement.where(column < _decode_cursor(cursor))
+
+
+def _encode_audit_cursor(occurred_at: datetime, identifier: UUID) -> str:
+    normalized = (
+        occurred_at.replace(tzinfo=UTC)
+        if occurred_at.tzinfo is None
+        else occurred_at.astimezone(UTC)
+    )
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    delta = normalized - epoch
+    microseconds = (
+        delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
+    )
+    payload = microseconds.to_bytes(8, "big", signed=True) + identifier.bytes
+    return base64.urlsafe_b64encode(payload).decode("ascii")
+
+
+def _decode_audit_cursor(value: str) -> tuple[datetime, UUID]:
+    if len(value) != 32:
+        raise InvalidRequest("invalid cursor")
+    try:
+        payload = base64.b64decode(value, altchars=b"-_", validate=True)
+        if len(payload) != 24:
+            raise ValueError("invalid payload")
+        microseconds = int.from_bytes(payload[:8], "big", signed=True)
+        occurred_at = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=microseconds)
+        return occurred_at, UUID(bytes=payload[8:])
+    except (binascii.Error, OverflowError, ValueError) as exc:
+        raise InvalidRequest("invalid cursor") from exc
 
 
 def _next_cursor(rows: Sequence[Any], limit: int, identifier: Callable[[Any], UUID]) -> str | None:

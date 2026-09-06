@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import uvicorn
 from fastapi import FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
@@ -18,7 +19,7 @@ from modall.api.errors import InvalidRequest
 from modall.api.idempotency import ApiIdempotencyConflict, ApiIdempotencyHistoryIncomplete
 from modall.config import Settings, get_settings
 from modall.execution.runtime import build_execution_keyrings
-from modall.execution.types import ExecutionError, HmacKeyVersion
+from modall.execution.types import ExecutionError, ExecutionFailureCode, HmacKeyVersion
 from modall.identity.auth import AuthenticationError, build_authenticator
 from modall.identity.repository import AuthorizationDenied
 from modall.persistence.database import (
@@ -27,7 +28,11 @@ from modall.persistence.database import (
     create_engine,
     create_session_factory,
 )
-from modall.registry.official import OfficialRegistryAdapter, OfficialRegistryError
+from modall.registry.official import (
+    OfficialRegistryAdapter,
+    OfficialRegistryError,
+    OfficialRegistryFailureCode,
+)
 from modall.registry.service import InvalidCapabilityTransition, InvalidConnectionTransition
 
 
@@ -95,7 +100,7 @@ def create_app(
             response = await call_next(request)
         except Exception:
             logging.getLogger("modall.api").warning(
-                "unhandled_request_failure correlation_id=%s", correlation_id
+                "unhandled_request_failure correlation_id=%s", correlation_id, exc_info=True
             )
             response = error_response(
                 "internal_error", "The request could not be completed.", 500, request
@@ -104,6 +109,21 @@ def create_app(
         if request.url.path.startswith("/v1/"):
             response.headers["Cache-Control"] = "no-store"
         return response
+
+    if resolved_settings.cors_allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(resolved_settings.cors_allowed_origins),
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=[
+                "Authorization",
+                "Content-Type",
+                "Idempotency-Key",
+                "X-Correlation-ID",
+                "X-Workspace-ID",
+            ],
+            expose_headers=["X-Correlation-ID"],
+        )
 
     def error_response(code: str, message: str, http_status: int, request: Request) -> JSONResponse:
         return JSONResponse(
@@ -133,11 +153,29 @@ def create_app(
 
     @app.exception_handler(OfficialRegistryError)
     async def registry_error(request: Request, exc: OfficialRegistryError) -> JSONResponse:
-        return error_response(exc.code.value, "Registry operation failed.", 422, request)
+        if exc.code in {
+            OfficialRegistryFailureCode.TIMEOUT,
+            OfficialRegistryFailureCode.UPSTREAM_UNAVAILABLE,
+        }:
+            http_status = 503
+        elif exc.code is OfficialRegistryFailureCode.PERSISTENCE_FAILURE:
+            http_status = 500
+        else:
+            http_status = 422
+        return error_response(exc.code.value, "Registry operation failed.", http_status, request)
 
     @app.exception_handler(ExecutionError)
     async def execution_error(request: Request, exc: ExecutionError) -> JSONResponse:
-        return error_response(exc.code.value, "Run operation failed.", 409, request)
+        if exc.code in {
+            ExecutionFailureCode.IDEMPOTENCY_KEY_HISTORY_INCOMPLETE,
+            ExecutionFailureCode.CONFIRMATION_KEY_HISTORY_INCOMPLETE,
+        }:
+            http_status = 503
+        elif exc.code is ExecutionFailureCode.PERSISTENCE_FAILURE:
+            http_status = 500
+        else:
+            http_status = 409
+        return error_response(exc.code.value, "Run operation failed.", http_status, request)
 
     @app.exception_handler(InvalidConnectionTransition)
     @app.exception_handler(InvalidCapabilityTransition)

@@ -10,17 +10,25 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from modall.api.contracts import ConnectionResponse
+from modall.api.contracts import (
+    ConnectionResponse,
+    _decode_audit_cursor,
+    _decode_sequence_cursor,
+    _encode_audit_cursor,
+    _encode_sequence_cursor,
+)
 from modall.api.idempotency import idempotent_mutation, purge_expired_api_idempotency
 from modall.api.main import create_app
 from modall.config import Settings
-from modall.execution.types import HmacKeyVersion
+from modall.execution.service import ExecutionService
+from modall.execution.types import ExecutionError, ExecutionFailureCode, HmacKeyVersion
 from modall.identity.repository import AuthorizationService
 from modall.identity.service import IdentityService
 from modall.identity.types import Permission, Principal, Role, WorkspaceContext
 from modall.persistence.database import create_engine, create_session_factory, transaction
 from modall.persistence.models import (
     ApiIdempotencyRecord,
+    AuditEvent,
     Base,
     Capability,
     CapabilityVersion,
@@ -32,7 +40,12 @@ from modall.persistence.models import (
     ServerConnectionVersion,
     WorkspaceMembership,
 )
-from modall.registry.official import OfficialRegistryAdapter
+from modall.registry.official import (
+    OfficialRegistryAdapter,
+    OfficialRegistryError,
+    OfficialRegistryFailureCode,
+    OfficialRegistryService,
+)
 from modall.registry.service import CapabilityService, ConnectionService
 from modall.registry.types import CapabilityStatus, RegistrySource
 
@@ -40,6 +53,7 @@ from modall.registry.types import CapabilityStatus, RegistrySource
 @asynccontextmanager
 async def api_client(
     registry_adapter: OfficialRegistryAdapter | None = None,
+    settings: Settings | None = None,
 ) -> AsyncIterator[tuple[httpx.AsyncClient, AsyncEngine, UUID]]:
     engine = create_engine("sqlite+aiosqlite:///:memory:")
 
@@ -60,7 +74,7 @@ async def api_client(
         workspace = await IdentityService(session).create_workspace(owner=user, name="API")
         workspace_id = workspace.id
     app = create_app(
-        Settings(environment="test", local_subject="api-user"),
+        settings or Settings(environment="test", local_subject="api-user"),
         readiness_probe=_ready,
         engine=engine,
         registry_adapter=registry_adapter,
@@ -109,6 +123,10 @@ def test_control_plane_requires_workspace_and_has_stable_errors() -> None:
                 "/v1/runs?cursor=bad", headers={"X-Workspace-ID": str(workspace_id)}
             )
             assert invalid_cursor.status_code == 422
+            invalid_base64_cursor = await client.get(
+                f"/v1/runs?cursor={'A' * 21}!", headers={"X-Workspace-ID": str(workspace_id)}
+            )
+            assert invalid_base64_cursor.status_code == 422
 
             unknown = await client.get(
                 f"/v1/capabilities/{uuid4()}",
@@ -117,6 +135,47 @@ def test_control_plane_requires_workspace_and_has_stable_errors() -> None:
             assert unknown.status_code == 403
 
     asyncio.run(scenario())
+
+
+def test_browser_origin_can_preflight_workspace_requests() -> None:
+    async def scenario() -> None:
+        settings = Settings(
+            environment="test",
+            local_subject="api-user",
+            cors_allowed_origins=("http://localhost:5173",),
+        )
+        async with api_client(settings=settings) as (client, _engine, _workspace_id):
+            response = await client.options(
+                "/v1/server-connections",
+                headers={
+                    "Origin": "http://localhost:5173",
+                    "Access-Control-Request-Method": "GET",
+                    "Access-Control-Request-Headers": "authorization,x-workspace-id",
+                },
+            )
+            assert response.status_code == 200
+            assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+            assert "x-workspace-id" in response.headers["access-control-allow-headers"].lower()
+
+    asyncio.run(scenario())
+
+
+def test_specialized_cursors_round_trip_and_reject_malformed_values() -> None:
+    identifier = uuid4()
+    occurred_at = datetime(2026, 1, 3)
+    assert _decode_sequence_cursor(_encode_sequence_cursor(42)) == 42
+    assert _decode_audit_cursor(_encode_audit_cursor(occurred_at, identifier)) == (
+        occurred_at.replace(tzinfo=UTC),
+        identifier,
+    )
+    with pytest.raises(ValueError, match="invalid cursor"):
+        _decode_sequence_cursor("a")
+    with pytest.raises(ValueError, match="invalid cursor"):
+        _decode_sequence_cursor("eHh4eHh4eHh4eHh4")
+    with pytest.raises(ValueError, match="invalid cursor"):
+        _decode_audit_cursor("bad")
+    with pytest.raises(ValueError, match="invalid cursor"):
+        _decode_audit_cursor("!" * 32)
 
 
 def test_connection_contract_and_required_idempotency_key() -> None:
@@ -377,6 +436,50 @@ def test_registry_capability_and_audit_read_contracts() -> None:
             assert audit.json()["items"][0]["action"] == "capability.disabled"
             assert "payload" not in audit.json()["items"][0]
 
+            factory = create_session_factory(engine)
+            async with transaction(factory) as session:
+                events = list(
+                    (
+                        await session.scalars(
+                            select(AuditEvent).where(
+                                AuditEvent.workspace_id == workspace_id,
+                                AuditEvent.resource_type == "capability",
+                            )
+                        )
+                    ).all()
+                )
+                disabled_event = events[0]
+                disabled_event.occurred_at = datetime(2026, 1, 3, tzinfo=UTC)
+                for action, occurred_at in (
+                    ("capability.version_recorded", datetime(2026, 1, 1, tzinfo=UTC)),
+                    ("capability.enabled", datetime(2026, 1, 2, tzinfo=UTC)),
+                ):
+                    session.add(
+                        AuditEvent(
+                            workspace_id=workspace_id,
+                            actor_user_id=disabled_event.actor_user_id,
+                            action=action,
+                            resource_type="capability",
+                            resource_id=capability_id,
+                            outcome="succeeded",
+                            correlation_id=disabled_event.correlation_id,
+                            occurred_at=occurred_at,
+                        )
+                    )
+
+            first_page = await client.get(
+                "/v1/audit-events?resource_type=capability&limit=1", headers=headers
+            )
+            assert first_page.json()["items"][0]["action"] == "capability.disabled"
+            next_cursor = first_page.json()["page"]["next_cursor"]
+            second_page = await client.get(
+                "/v1/audit-events",
+                headers=headers,
+                params={"resource_type": "capability", "limit": 1, "cursor": next_cursor},
+            )
+            assert second_page.status_code == 200, f"{next_cursor!r}: {second_page.text}"
+            assert second_page.json()["items"][0]["action"] == "capability.enabled"
+
             naive_time = await client.get(
                 "/v1/audit-events?occurred_after=2026-09-06T12:00:00", headers=headers
             )
@@ -635,6 +738,10 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             events = await client.get(f"/v1/runs/{run_id}/events", headers=headers)
             assert events.status_code == 200
             assert events.json()["items"][0]["event_type"] == "admitted"
+            invalid_event_cursor = await client.get(
+                f"/v1/runs/{run_id}/events?cursor=a", headers=headers
+            )
+            assert invalid_event_cursor.status_code == 422
 
             cancelled = await client.post(
                 f"/v1/runs/{run_id}/cancel",
@@ -662,6 +769,98 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             )
             assert enabled.status_code == 200
             assert enabled.json()["status"] == "enabled"
+
+    asyncio.run(scenario())
+
+
+def test_retryable_and_internal_service_failures_have_server_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def timeout_search(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise OfficialRegistryError(OfficialRegistryFailureCode.TIMEOUT)
+
+    async def persistence_search(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise OfficialRegistryError(OfficialRegistryFailureCode.PERSISTENCE_FAILURE)
+
+    async def invalid_search(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise OfficialRegistryError(OfficialRegistryFailureCode.INVALID_QUERY)
+
+    async def unavailable_run(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise ExecutionError(ExecutionFailureCode.IDEMPOTENCY_KEY_HISTORY_INCOMPLETE)
+
+    async def persistence_run(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise ExecutionError(ExecutionFailureCode.PERSISTENCE_FAILURE)
+
+    async def invalid_run(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS)
+
+    async def scenario() -> None:
+        async with api_client() as (client, _engine, workspace_id):
+            headers = {"X-Workspace-ID": str(workspace_id)}
+            monkeypatch.setattr(OfficialRegistryService, "search", timeout_search)
+            timeout = await client.post(
+                "/v1/registry/searches", headers=headers, json={"query": "weather"}
+            )
+            assert timeout.status_code == 503
+            assert timeout.json()["error"]["code"] == "timeout"
+
+            monkeypatch.setattr(OfficialRegistryService, "search", persistence_search)
+            persistence = await client.post(
+                "/v1/registry/searches", headers=headers, json={"query": "weather"}
+            )
+            assert persistence.status_code == 500
+
+            monkeypatch.setattr(OfficialRegistryService, "search", invalid_search)
+            invalid = await client.post(
+                "/v1/registry/searches", headers=headers, json={"query": "weather"}
+            )
+            assert invalid.status_code == 422
+
+            monkeypatch.setattr(ExecutionService, "create_run", unavailable_run)
+            unavailable = await client.post(
+                "/v1/runs",
+                headers={**headers, "Idempotency-Key": "unavailable-run"},
+                json={
+                    "capability_version_id": str(uuid4()),
+                    "arguments": {},
+                    "confirmation_token": "token",
+                },
+            )
+            assert unavailable.status_code == 503
+            assert (
+                unavailable.json()["error"]["code"]
+                == "idempotency_key_history_incomplete"
+            )
+
+            monkeypatch.setattr(ExecutionService, "create_run", persistence_run)
+            persistence_failure = await client.post(
+                "/v1/runs",
+                headers={**headers, "Idempotency-Key": "persistence-run"},
+                json={
+                    "capability_version_id": str(uuid4()),
+                    "arguments": {},
+                    "confirmation_token": "token",
+                },
+            )
+            assert persistence_failure.status_code == 500
+
+            monkeypatch.setattr(ExecutionService, "create_run", invalid_run)
+            invalid_arguments = await client.post(
+                "/v1/runs",
+                headers={**headers, "Idempotency-Key": "invalid-run"},
+                json={
+                    "capability_version_id": str(uuid4()),
+                    "arguments": {},
+                    "confirmation_token": "token",
+                },
+            )
+            assert invalid_arguments.status_code == 409
 
     asyncio.run(scenario())
 

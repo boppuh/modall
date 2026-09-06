@@ -27,6 +27,9 @@ services:
       MODALL_DATABASE_URL: postgresql://modall:modall@postgres:5432/modall
       MODALL_ENVIRONMENT: local
       MODALL_LOG_LEVEL: ${MODALL_LOG_LEVEL:-INFO}
+      MODALL_CORS_ALLOWED_ORIGINS: '${MODALL_CORS_ALLOWED_ORIGINS:-["http://localhost:5173"]}'
+      MODALL_CONFIRMATION_HMAC_KEY_VERSIONS: '${MODALL_CONFIRMATION_HMAC_KEY_VERSIONS:-["v1"]}'
+      MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS: '${MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS:-["v1"]}'
       MODALL_FIXTURE_SECRET_ROOT: /run/modall-fixtures
     volumes:
       - ./.modall/fixture-secrets:/run/modall-fixtures:ro

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     )
     confirmation_hmac_key_versions: tuple[str, ...] = ("v1",)
     idempotency_hmac_key_versions: tuple[str, ...] = ("v1",)
+    cors_allowed_origins: tuple[str, ...] = ()
     auth_mode: Literal["local", "oidc"] = "local"
     # Preserve the issuer byte-for-byte for OIDC's exact identifier comparison.
     oidc_issuer: str | None = None
@@ -93,6 +94,17 @@ class Settings(BaseSettings):
                 or any(_KEY_VERSION.fullmatch(version) is None for version in versions)
             ):
                 raise ValueError("invalid HMAC key versions")
+        for origin in self.cors_allowed_origins:
+            parsed_origin = HttpUrl(origin)
+            if (
+                origin != origin.strip().rstrip("/")
+                or parsed_origin.username is not None
+                or parsed_origin.password is not None
+                or parsed_origin.query is not None
+                or parsed_origin.fragment is not None
+                or parsed_origin.path not in {None, "/"}
+            ):
+                raise ValueError("CORS origins must be bare HTTP origins")
         return self
 
 
