@@ -256,6 +256,9 @@ def test_api_concurrency_bound_does_not_block_health() -> None:
 def test_ops_parser_requires_destructive_confirmations() -> None:
     parser = _parser()
 
+    help_text = " ".join(parser.format_help().split())
+    assert "restored database" in help_text
+    assert "before workers start" in help_text
     assert parser.parse_args(["restore-enter", "--confirm", "RESTORE"]).command == "restore-enter"
     assert parser.parse_args(["restore-clear", "--confirm", "CLEAR"]).command == "restore-clear"
     assert parser.parse_args(["restore-reconcile"]).batch_size is None

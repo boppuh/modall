@@ -14,7 +14,8 @@ Never place tokens, arguments, results, endpoint credentials, or secret values i
    discard inbound `X-Real-IP` and `X-Forwarded-For`, then set exactly one validated client IP in
    `X-Real-IP` before proxying. Uvicorn forwarded-header rewriting remains disabled.
 6. Restrict API `/metrics` and the configured worker metrics port (9101 by default) to the monitoring
-   network; neither is an internet-facing endpoint.
+   network; neither is an internet-facing endpoint. Configure the Prometheus worker scrape target
+   with the job label `modall-worker` so target-loss paging remains active.
 7. Require successful API `/health/ready`, API `/metrics`, and worker `/health/live` on the configured
    metrics port from the monitoring network, and verify `/metrics` is unreachable publicly.
 8. Run the clean-install reference journey with synthetic data.

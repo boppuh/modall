@@ -34,7 +34,14 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="modall-ops")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="Show payload-free execution posture")
-    enter = commands.add_parser("restore-enter", help="Fence all dispatch before a restore")
+    enter = commands.add_parser(
+        "restore-enter",
+        help="Fence dispatch in the restored database before workers start",
+        description=(
+            "Run against the restored database, after replacement and before any worker starts, "
+            "to advance the execution epoch and fence dispatch."
+        ),
+    )
     enter.add_argument("--confirm", required=True, choices=("RESTORE",))
     reconcile = commands.add_parser(
         "restore-reconcile", help="Terminalize one bounded batch of restored active runs"

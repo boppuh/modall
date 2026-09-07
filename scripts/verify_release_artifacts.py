@@ -66,6 +66,9 @@ REQUIRED_ALERTS = {
         "modall_worker_liveness_timeout_seconds",
         "time()",
         ">",
+        'up{job="modall-worker"}',
+        "== 0",
+        "absent(",
     ),
     "ModallMaintenanceFailure": (
         "modall_worker_maintenance_total",
