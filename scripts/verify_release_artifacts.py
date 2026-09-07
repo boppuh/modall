@@ -64,8 +64,16 @@ REQUIRED_ALERTS = {
         'event="invocation_terminal"',
         'outcome=~"failed|indeterminate"',
         "> 0",
+        "unless",
+        "offset 10m",
     ),
-    "ModallWorkerPollFailures": ("modall_worker_polls_total", 'outcome="failed"', "> 0"),
+    "ModallWorkerPollFailures": (
+        "modall_worker_polls_total",
+        'outcome="failed"',
+        "> 0",
+        "unless",
+        "offset 10m",
+    ),
     "ModallWorkerStalled": (
         "modall_worker_last_progress_unixtime_seconds",
         "modall_worker_liveness_timeout_seconds",
@@ -79,6 +87,8 @@ REQUIRED_ALERTS = {
         "modall_worker_maintenance_total",
         'outcome="failed"',
         "> 0",
+        "unless",
+        "offset 15m",
     ),
 }
 REQUIRED_DOCUMENT_SECTIONS = {
