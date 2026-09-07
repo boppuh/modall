@@ -295,9 +295,11 @@ class ExecutionService:
         if (active_run_count or 0) >= self._limits.max_active_runs_per_workspace:
             raise ExecutionError(ExecutionFailureCode.ACTIVE_RUN_LIMIT)
         run_id = uuid4()
+        trace_id = correlation_id or uuid4()
         run = Run(
             id=run_id,
             workspace_id=context.workspace_id,
+            correlation_id=trace_id,
             actor_user_id=context.actor_user_id,
             capability_id=target.capability.id,
             capability_version_id=target.version.id,
@@ -373,7 +375,7 @@ class ExecutionService:
                 action=AuditAction.RUN_CREATED,
                 resource_type=ResourceType.RUN,
                 resource_id=run_id,
-                correlation_id=correlation_id or uuid4(),
+                correlation_id=trace_id,
             )
         )
         if not await _flush_execution_payload(self._session):
@@ -506,6 +508,7 @@ class ExecutionService:
             job_id=job.id,
             run_id=job.run_id,
             workspace_id=job.workspace_id,
+            correlation_id=run.correlation_id,
             worker_id=worker_id,
             lease_epoch=job.lease_epoch,
             execution_epoch=job.execution_epoch,
@@ -557,6 +560,7 @@ class ExecutionService:
             job_id=job.id,
             run_id=job.run_id,
             workspace_id=job.workspace_id,
+            correlation_id=lease.correlation_id,
             worker_id=lease.worker_id,
             lease_epoch=lease.lease_epoch,
             execution_epoch=lease.execution_epoch,

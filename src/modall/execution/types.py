@@ -157,6 +157,7 @@ class JobLease:
     job_id: UUID
     run_id: UUID
     workspace_id: UUID
+    correlation_id: UUID
     worker_id: str
     lease_epoch: int
     execution_epoch: int

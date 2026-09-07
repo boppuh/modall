@@ -3,11 +3,29 @@
 from collections.abc import Sequence
 
 from modall.config import Settings
-from modall.execution.types import HmacKeyVersion
+from modall.execution.types import ExecutionLimits, HmacKeyVersion
 from modall.secrets.provider import SecretProvider, SecretReference, build_secret_provider
 
 CONFIRMATION_KEY_REFERENCE = "system-confirmation-hmac"
 IDEMPOTENCY_KEY_REFERENCE = "system-idempotency-hmac"
+
+
+def build_execution_limits(settings: Settings) -> ExecutionLimits:
+    """Construct the one execution policy shared by API and worker."""
+
+    return ExecutionLimits(
+        max_argument_bytes=settings.max_argument_bytes,
+        max_result_bytes=settings.max_result_bytes,
+        confirmation_ttl_seconds=settings.confirmation_ttl_seconds,
+        max_run_seconds=settings.max_run_seconds,
+        argument_retention_days=settings.argument_retention_days,
+        result_retention_days=settings.result_retention_days,
+        run_retention_days=settings.run_retention_days,
+        schema_validation_timeout_seconds=settings.schema_validation_timeout_seconds,
+        schema_validation_memory_bytes=settings.schema_validation_memory_bytes,
+        reconciliation_batch_size=settings.reconciliation_batch_size,
+        max_active_runs_per_workspace=settings.max_active_runs_per_workspace,
+    )
 
 
 def build_execution_keyrings(

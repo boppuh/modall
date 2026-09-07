@@ -1,6 +1,8 @@
 """FastAPI application entry point."""
 
+import asyncio
 import logging
+import time
 import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -10,7 +12,7 @@ import uvicorn
 from fastapi import FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -19,10 +21,12 @@ from modall.api.contracts import build_control_plane_router
 from modall.api.errors import InvalidRequest
 from modall.api.idempotency import ApiIdempotencyConflict, ApiIdempotencyHistoryIncomplete
 from modall.config import Settings, get_settings
-from modall.execution.runtime import build_execution_keyrings
+from modall.execution.runtime import build_execution_keyrings, build_execution_limits
 from modall.execution.types import ExecutionError, ExecutionFailureCode, HmacKeyVersion
 from modall.identity.auth import AuthenticationError, build_authenticator
 from modall.identity.repository import AuthorizationDenied
+from modall.ops.limits import FixedWindowRateLimiter
+from modall.ops.telemetry import MetricsRegistry, configure_json_logging, log_event
 from modall.persistence.database import (
     DatabaseProbe,
     async_database_url,
@@ -53,10 +57,15 @@ def create_app(
     readiness_probe: ReadinessProbe | None = None,
     engine: AsyncEngine | None = None,
     registry_adapter: OfficialRegistryAdapter | None = None,
+    metrics: MetricsRegistry | None = None,
 ) -> FastAPI:
     """Build an application instance without process-global test mutation."""
 
     resolved_settings = settings or get_settings()
+    process_metrics = metrics or MetricsRegistry()
+    rate_limiter = FixedWindowRateLimiter(resolved_settings.api_rate_limit_per_minute)
+    request_slots = asyncio.Semaphore(resolved_settings.api_max_concurrency)
+    in_flight = 0
     database_probe: DatabaseProbe | None = None
     owns_engine = engine is None
     engine = engine or create_engine(async_database_url(str(resolved_settings.database_url)))
@@ -106,24 +115,52 @@ def create_app(
     async def response_policy(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
+        nonlocal in_flight
+        started = time.perf_counter()
         supplied = request.headers.get("X-Correlation-ID")
         try:
             correlation_id = UUID(supplied) if supplied is not None else uuid4()
         except ValueError:
             correlation_id = uuid4()
         request.state.correlation_id = correlation_id
+        peer = request.client.host if request.client is not None else "unknown"
+        acquired = False
+        response: Response
         try:
-            response = await call_next(request)
+            if not request.url.path.startswith("/v1/"):
+                response = await call_next(request)
+            elif not rate_limiter.allow(peer):
+                response = error_response(
+                    "rate_limited", "Request rate limit exceeded.", 429, request
+                )
+                response.headers["Retry-After"] = "60"
+            else:
+                try:
+                    await asyncio.wait_for(
+                        request_slots.acquire(),
+                        timeout=resolved_settings.api_queue_timeout_seconds,
+                    )
+                    acquired = True
+                except TimeoutError:
+                    response = error_response(
+                        "capacity_exceeded",
+                        "Request capacity is temporarily exhausted.",
+                        503,
+                        request,
+                    )
+                else:
+                    in_flight += 1
+                    process_metrics.gauge("modall_http_in_flight", in_flight)
+                    response = await call_next(request)
         except Exception as exc:
-            safe_stack = " <- ".join(
-                f"{frame.filename}:{frame.lineno}:{frame.name}"
-                for frame in traceback.extract_tb(exc.__traceback__)
-            )
-            logging.getLogger("modall.api").warning(
-                "unhandled_request_failure correlation_id=%s exception_type=%s stack=%s",
-                correlation_id,
-                type(exc).__name__,
-                safe_stack,
+            stack = traceback.extract_tb(exc.__traceback__)
+            log_event(
+                logging.getLogger("modall.api"),
+                logging.WARNING,
+                "unhandled_request_failure",
+                correlation_id=correlation_id,
+                exception_type=type(exc).__name__,
+                exception_origin=stack[-1].name if stack else "unknown",
             )
             response = error_response(
                 "internal_error", "The request could not be completed.", 500, request
@@ -133,6 +170,36 @@ def create_app(
                 response.headers["Access-Control-Allow-Origin"] = origin
                 response.headers["Access-Control-Expose-Headers"] = "X-Correlation-ID"
                 response.headers.add_vary_header("Origin")
+        finally:
+            if acquired:
+                in_flight -= 1
+                request_slots.release()
+                process_metrics.gauge("modall_http_in_flight", in_flight)
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", "unmatched")
+        duration = time.perf_counter() - started
+        metric_labels = {
+            "method": request.method,
+            "route": route_path,
+            "status_class": f"{response.status_code // 100}xx",
+        }
+        process_metrics.increment(
+            "modall_http_requests_total",
+            method=request.method,
+            route=route_path,
+            status_class=f"{response.status_code // 100}xx",
+        )
+        process_metrics.observe_http(duration, **metric_labels)
+        log_event(
+            logging.getLogger("modall.api"),
+            logging.INFO,
+            "request_completed",
+            correlation_id=correlation_id,
+            method=request.method,
+            route=route_path,
+            status_code=response.status_code,
+            duration_ms=round(duration * 1000, 3),
+        )
         response.headers["X-Correlation-ID"] = str(correlation_id)
         if request.url.path.startswith("/v1/"):
             response.headers["Cache-Control"] = "no-store"
@@ -225,6 +292,7 @@ def create_app(
             authenticator=build_authenticator(resolved_settings),
             registry_adapter=registry_adapter or OfficialRegistryAdapter(),
             keyring_loader=keyring_loader,
+            execution_limits=build_execution_limits(resolved_settings),
             environment=resolved_settings.environment,
         )
     )
@@ -240,6 +308,12 @@ def create_app(
             return HealthResponse(status="unavailable", service="api")
         return HealthResponse(status="ready", service="api")
 
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics_endpoint() -> PlainTextResponse:
+        return PlainTextResponse(
+            process_metrics.render(), media_type="application/openmetrics-text; version=1.0.0"
+        )
+
     return app
 
 
@@ -250,12 +324,14 @@ def run() -> None:
     """Run the local API server."""
 
     settings = get_settings()
+    configure_json_logging(settings.log_level)
     uvicorn.run(
         "modall.api.main:app",
         host="0.0.0.0",
         port=8000,
         reload=False,
         log_level=settings.log_level.lower(),
+        access_log=False,
     )
 
 

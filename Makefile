@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: bootstrap check compose-down compose-up format help migrate python-check test web-check
+.PHONY: bootstrap check compose-down compose-up format help migrate python-check release-artifacts test web-check
 
 help:
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -28,11 +28,14 @@ web-check: ## Run web lint, types, tests, and production build
 	npm run web:test
 	npm run web:build
 
+release-artifacts: ## Validate release evidence, dashboard, alerts, and runbooks
+	uv run python scripts/verify_release_artifacts.py
+
 test: ## Run Python and web tests
 	uv run pytest
 	npm run web:test
 
-check: python-check web-check ## Run every local quality gate
+check: python-check web-check release-artifacts ## Run every local quality gate
 	docker compose config --quiet
 
 compose-up: ## Build and start the local stack

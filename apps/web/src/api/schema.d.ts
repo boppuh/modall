@@ -975,6 +975,11 @@ export interface components {
              */
             connection_version_id: string;
             /**
+             * Correlation Id
+             * Format: uuid
+             */
+            correlation_id: string;
+            /**
              * Created At
              * Format: date-time
              */
@@ -1041,6 +1046,11 @@ export interface components {
              * Format: uuid
              */
             connection_version_id: string;
+            /**
+             * Correlation Id
+             * Format: uuid
+             */
+            correlation_id: string;
             /**
              * Created At
              * Format: date-time

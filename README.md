@@ -68,6 +68,27 @@ active-first version lists with `MODALL_CONFIRMATION_HMAC_KEY_VERSIONS` and
 `MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS`; deployed mounted-file environments must project the
 corresponding encoded files before either process starts.
 
+## Operate and qualify
+
+API and worker logs are payload-free JSON. A caller-supplied correlation UUID is persisted on each
+new run and follows its worker lifecycle; the full identifier is available in the run detail and API
+response. Scrape API `/metrics` and the worker's internal port 9101 `/metrics`. The maintained alert
+rules and Grafana dashboard live under `ops/`. Deployment ingress must restrict both metrics
+surfaces to the monitoring network.
+
+Admission, content, timeout, retention, reconciliation, rate, and concurrency bounds are explicit
+`MODALL_` settings documented in `.env.example`; API and worker build one shared execution policy.
+The API limiter is process-local for the closed alpha, so multiple replicas require a shared ingress
+limiter before promotion.
+
+Use `modall-ops status` for payload-free execution posture. Restore operations require explicit
+confirmation arguments and must follow
+[the operations runbook](docs/operations/registry-alpha-runbook.md). The
+[threat model](docs/security/registry-alpha-threat-model.md) and
+[qualification record](docs/release/registry-alpha-qualification.md) distinguish automated evidence
+from the still-required human reviews. Validate committed operational artifacts with
+`make release-artifacts`.
+
 ## API contracts
 
 The authenticated control-plane API is published under `/v1`. Supply the selected workspace in

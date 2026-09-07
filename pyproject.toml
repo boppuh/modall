@@ -26,6 +26,7 @@ dependencies = [
 [project.scripts]
 modall-api = "modall.api.main:run"
 modall-worker = "modall.worker.main:run"
+modall-ops = "modall.ops.cli:main"
 
 [dependency-groups]
 dev = [

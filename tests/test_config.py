@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from modall.config import Settings
+from modall.execution.runtime import build_execution_limits
 
 
 def test_settings_use_safe_local_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -16,6 +17,37 @@ def test_settings_use_safe_local_defaults(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.worker_maintenance_timeout_seconds == 5.0
     assert settings.worker_maintenance_interval_seconds == 60.0
     assert str(settings.database_url) == "postgresql://modall:modall@localhost:5432/modall"
+
+
+def test_execution_limits_are_built_from_configuration() -> None:
+    settings = Settings(
+        _env_file=None,
+        max_argument_bytes=2048,
+        max_result_bytes=4096,
+        confirmation_ttl_seconds=30,
+        max_run_seconds=60,
+        argument_retention_days=3,
+        result_retention_days=4,
+        run_retention_days=30,
+        max_active_runs_per_workspace=7,
+        reconciliation_batch_size=11,
+        schema_validation_timeout_seconds=1.5,
+        schema_validation_memory_bytes=67_108_864,
+    )
+
+    limits = build_execution_limits(settings)
+
+    assert limits.max_argument_bytes == 2048
+    assert limits.max_result_bytes == 4096
+    assert limits.confirmation_ttl_seconds == 30
+    assert limits.max_run_seconds == 60
+    assert limits.argument_retention_days == 3
+    assert limits.result_retention_days == 4
+    assert limits.run_retention_days == 30
+    assert limits.max_active_runs_per_workspace == 7
+    assert limits.reconciliation_batch_size == 11
+    assert limits.schema_validation_timeout_seconds == 1.5
+    assert limits.schema_validation_memory_bytes == 67_108_864
 
 
 @pytest.mark.parametrize("interval", [0, -1, math.inf, math.nan, 60.1])

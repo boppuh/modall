@@ -40,6 +40,7 @@ const capability: Capability = {
 
 const run: Run = {
   id: runId,
+  correlation_id: runId,
   actor_user_id: connectionId,
   capability_id: capabilityId,
   capability_version_id: versionId,
@@ -489,6 +490,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Execution timeline" })).toBeTruthy();
     expect(screen.getByText("admitted")).toBeTruthy();
     expect(screen.getByText("Initiating actor").parentElement?.textContent).toContain(connectionId);
+    expect(screen.getByText("Correlation").parentElement?.textContent).toContain(runId);
     fireEvent.click(screen.getByRole("button", { name: "Request cancellation" }));
     await waitFor(() => expect(api.cancelRun).toHaveBeenCalledWith(runId, expect.any(String)));
   });

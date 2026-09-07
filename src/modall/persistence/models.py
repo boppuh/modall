@@ -744,6 +744,7 @@ class Run(Base):
             ondelete="RESTRICT",
         ),
         Index("ix_runs_workspace_created", "workspace_id", "created_at", "id"),
+        Index("ix_runs_workspace_correlation", "workspace_id", "correlation_id"),
         Index(
             "ix_runs_arguments_expiry",
             "arguments_expires_at",
@@ -785,6 +786,7 @@ class Run(Base):
 
     id: Mapped[UuidPrimaryKey]
     workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    correlation_id: Mapped[UUID] = mapped_column(default=uuid4)
     actor_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     capability_id: Mapped[UUID]
     capability_version_id: Mapped[UUID]

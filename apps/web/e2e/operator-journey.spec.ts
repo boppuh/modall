@@ -32,6 +32,7 @@ const capability = {
 };
 const run = {
   id: runId,
+  correlation_id: runId,
   actor_user_id: connectionId,
   capability_id: capabilityId,
   capability_version_id: versionId,

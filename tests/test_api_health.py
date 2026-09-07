@@ -65,14 +65,16 @@ def test_readiness_reports_database_failure_without_detail() -> None:
 
 
 def test_run_starts_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, str, int, bool, str]] = []
+    calls: list[tuple[str, str, int, bool, str, bool]] = []
 
-    def fake_run(app: str, *, host: str, port: int, reload: bool, log_level: str) -> None:
-        calls.append((app, host, port, reload, log_level))
+    def fake_run(
+        app: str, *, host: str, port: int, reload: bool, log_level: str, access_log: bool
+    ) -> None:
+        calls.append((app, host, port, reload, log_level, access_log))
 
     monkeypatch.setattr(main, "get_settings", lambda: Settings(log_level="DEBUG"))
     monkeypatch.setattr("modall.api.main.uvicorn.run", fake_run)
 
     main.run()
 
-    assert calls == [("modall.api.main:app", "0.0.0.0", 8000, False, "debug")]
+    assert calls == [("modall.api.main:app", "0.0.0.0", 8000, False, "debug", False)]

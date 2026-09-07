@@ -34,6 +34,25 @@ class Settings(BaseSettings):
     worker_lease_duration_seconds: Annotated[float, Field(ge=15, le=300, allow_inf_nan=False)] = (
         30.0
     )
+    worker_metrics_port: Annotated[int, Field(ge=1024, le=65535)] = 9101
+    api_max_concurrency: Annotated[int, Field(ge=1, le=1024)] = 64
+    api_queue_timeout_seconds: Annotated[float, Field(gt=0, le=10, allow_inf_nan=False)] = 0.25
+    api_rate_limit_per_minute: Annotated[int, Field(ge=1, le=100_000)] = 600
+    max_argument_bytes: Annotated[int, Field(ge=1_024, le=1_048_576)] = 65_536
+    max_result_bytes: Annotated[int, Field(ge=1_024, le=1_048_576)] = 262_144
+    confirmation_ttl_seconds: Annotated[int, Field(ge=1, le=300)] = 120
+    max_run_seconds: Annotated[int, Field(ge=1, le=3600)] = 300
+    argument_retention_days: Annotated[int, Field(ge=1, le=14)] = 14
+    result_retention_days: Annotated[int, Field(ge=1, le=14)] = 14
+    run_retention_days: Annotated[int, Field(ge=14, le=365)] = 90
+    max_active_runs_per_workspace: Annotated[int, Field(ge=1, le=100)] = 100
+    reconciliation_batch_size: Annotated[int, Field(ge=1, le=1000)] = 100
+    schema_validation_timeout_seconds: Annotated[float, Field(gt=0, le=5, allow_inf_nan=False)] = (
+        2.0
+    )
+    schema_validation_memory_bytes: Annotated[int, Field(ge=67_108_864, le=268_435_456)] = (
+        268_435_456
+    )
     confirmation_hmac_key_versions: tuple[str, ...] = ("v1",)
     idempotency_hmac_key_versions: tuple[str, ...] = ("v1",)
     cors_allowed_origins: tuple[str, ...] = ()

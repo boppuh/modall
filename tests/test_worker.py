@@ -18,14 +18,16 @@ from modall.worker import main
 from modall.worker.main import configure_logging, run_once
 
 
-def test_worker_poll_emits_no_payload(caplog: pytest.LogCaptureFixture) -> None:
+def test_worker_poll_emits_no_payload(capsys: pytest.CaptureFixture[str]) -> None:
     settings = Settings(environment="test", log_level="DEBUG")
     configure_logging(settings)
 
-    with caplog.at_level(logging.DEBUG):
-        run_once(settings)
+    run_once(settings)
+    emitted = capsys.readouterr().err
 
-    assert "worker_poll environment=test" in caplog.text
+    assert '"event":"worker_poll"' in emitted
+    assert '"environment":"test"' in emitted
+    assert "arguments" not in emitted
 
 
 def test_worker_run_polls_with_configured_interval(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,7 +103,7 @@ def test_worker_runs_global_registry_cache_cleanup(
         monkeypatch.setattr(
             main,
             "build_execution_runtime",
-            lambda settings, session_factory: (
+            lambda settings, session_factory, **kwargs: (
                 FakeRunner(),
                 lambda session: FakeExecutionService(),
             ),
@@ -165,7 +167,7 @@ def test_worker_drains_claimed_jobs_before_sleeping(monkeypatch: pytest.MonkeyPa
         monkeypatch.setattr(
             main,
             "build_execution_runtime",
-            lambda settings, session_factory: (
+            lambda settings, session_factory, **kwargs: (
                 FakeRunner(),
                 lambda session: FakeExecutionService(),
             ),

@@ -642,6 +642,7 @@ def test_job_leasing_reclaims_only_with_a_new_epoch_and_rejects_stale_heartbeat(
                 )
                 assert first is not None
                 assert first.run_id == run.id
+                assert first.correlation_id == run.correlation_id
                 assert first.lease_epoch == 1
                 await service(session, now=current).fence_session(first)
 
