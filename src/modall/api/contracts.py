@@ -879,9 +879,23 @@ def build_control_plane_router(
         if actor_id is not None:
             statement = statement.where(Run.actor_user_id == actor_id)
         if created_after is not None:
+            created_after = _require_aware_datetime(created_after)
             statement = statement.where(Run.created_at >= created_after)
         if created_before is not None:
+            created_before = _require_aware_datetime(created_before)
             statement = statement.where(Run.created_at < created_before)
+        if (
+            created_after is not None
+            and created_before is not None
+            and created_after >= created_before
+        ):
+            raise InvalidRequest("invalid run time range")
+        if (
+            min_duration_seconds is not None
+            and max_duration_seconds is not None
+            and min_duration_seconds > max_duration_seconds
+        ):
+            raise InvalidRequest("invalid run duration range")
         duration_seconds = func.extract("epoch", Run.terminal_at) - func.extract(
             "epoch", Run.created_at
         )
@@ -1354,5 +1368,5 @@ def _utc(value: datetime) -> datetime:
 
 def _require_aware_datetime(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
-        raise InvalidRequest("audit timestamps require an offset")
+        raise InvalidRequest("timestamps require an offset")
     return value.astimezone(UTC)

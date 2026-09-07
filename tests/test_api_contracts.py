@@ -854,6 +854,25 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             )
             assert [item["id"] for item in filtered_cancelled.json()["items"]] == [run_id]
 
+            naive_created_after = await client.get(
+                "/v1/runs?created_after=2026-09-06T12:00:00", headers=headers
+            )
+            assert naive_created_after.status_code == 422
+            naive_created_before = await client.get(
+                "/v1/runs?created_before=2026-09-06T12:00:00", headers=headers
+            )
+            assert naive_created_before.status_code == 422
+            invalid_run_time_range = await client.get(
+                "/v1/runs?created_after=2030-01-01T00:00:00Z&created_before=2020-01-01T00:00:00Z",
+                headers=headers,
+            )
+            assert invalid_run_time_range.status_code == 422
+            invalid_run_duration_range = await client.get(
+                "/v1/runs?min_duration_seconds=10&max_duration_seconds=5",
+                headers=headers,
+            )
+            assert invalid_run_duration_range.status_code == 422
+
             replayed_cancel = await client.post(
                 f"/v1/runs/{run_id}/cancel",
                 headers={**headers, "Idempotency-Key": "run-cancel"},

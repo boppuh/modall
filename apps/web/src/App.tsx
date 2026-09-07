@@ -671,11 +671,13 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     refetchInterval: (query) => query.state.status === "error" ? false : 3000,
   });
   const [runFilters, setRunFilters] = useState<RunFilters>({});
+  const [runFilterFormKey, setRunFilterFormKey] = useState(0);
   const history = useInfiniteQuery({
     queryKey: queryKey(scope, "run-history", runFilters),
     queryFn: ({ pageParam }) => api.listRunPage(runFilters, pageParam),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.nextCursor,
+    refetchInterval: (query) => query.state.status === "error" || Object.keys(runFilters).length === 0 ? false : 3000,
   });
   const capabilities = useQuery({
     queryKey: queryKey(scope, "capabilities"),
@@ -848,7 +850,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
         </div>
         <div className="section-block run-inventory">
           <div className="section-heading"><div><span className="index">Ledger / 02</span><h2>Recent runs</h2></div></div>
-          <form className="audit-filters" onSubmit={submitRunFilters}>
+          <form className="audit-filters" key={runFilterFormKey} onSubmit={submitRunFilters}>
             <label>Status<select name="run-status" defaultValue={runFilters.status ?? ""}><option value="">Any</option>{["queued", "preparing", "session_fenced", "dispatch_fenced", "succeeded", "failed", "cancelled", "timed_out", "indeterminate"].map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
             <label>Capability<select name="run-capability" defaultValue={runFilters.capability_id ?? ""}><option value="">Any</option>{(capabilities.data ?? []).map((item) => <option key={item.id} value={item.id}>{item.tool_identity}</option>)}</select></label>
             <label>Actor ID<input name="run-actor" defaultValue={runFilters.actor_id ?? ""} placeholder="UUID" pattern="[0-9a-fA-F-]{36}" /></label>
@@ -856,7 +858,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
             <label>Created before<input name="run-created-before" type="datetime-local" defaultValue={localDateTimeValue(runFilters.created_before)} /></label>
             <label>Min duration (s)<input name="run-min-duration" type="number" min="0" defaultValue={runFilters.min_duration_seconds} /></label>
             <label>Max duration (s)<input name="run-max-duration" type="number" min="0" defaultValue={runFilters.max_duration_seconds} /></label>
-            <div className="action-strip"><button type="button" onClick={() => setRunFilters({})}>Clear</button><button className="secondary-action" type="submit">Apply filters</button></div>
+            <div className="action-strip"><button type="button" onClick={() => { setRunFilters({}); setRunFilterFormKey((value) => value + 1); }}>Clear</button><button className="secondary-action" type="submit">Apply filters</button></div>
           </form>
           {history.isPending ? <LoadingState label="Loading runs" /> : history.isError ? <QueryFailure error={history.error} retry={() => void history.refetch()} /> : orderedRuns.length === 0 ? <EmptyState title="No runs retained" copy="Completed and in-flight work will appear here." /> : (
             <ul className="select-list">{orderedRuns.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{capabilityNames.get(run.capability_id) ?? shortId(run.capability_id)}</strong><small>{connectionNames.get(run.connection_id) ?? shortId(run.connection_id)} · actor {shortId(run.actor_user_id)} · {shortId(run.id)} · {formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>

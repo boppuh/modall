@@ -332,6 +332,13 @@ describe("App", () => {
     await waitFor(() => expect(listRunPage).toHaveBeenCalledWith(expect.objectContaining({ status: "failed", actor_id: connectionId, min_duration_seconds: 5 }), undefined));
     fireEvent.click(await screen.findByRole("button", { name: "Load older runs" }));
     await waitFor(() => expect(listRunPage).toHaveBeenCalledWith(expect.objectContaining({ status: "failed" }), "older"));
+    await waitFor(() => expect(listRunPage.mock.calls.filter(([filters, cursor]) => filters?.status === "failed" && cursor === undefined).length).toBeGreaterThan(1), { timeout: 4000 });
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(screen.getByLabelText("Status")).toHaveProperty("value", "");
+    expect(screen.getByLabelText("Actor ID")).toHaveProperty("value", "");
+    expect(screen.getByLabelText("Min duration (s)")).toHaveProperty("value", "");
+    await waitFor(() => expect(listRunPage).toHaveBeenCalledWith({}, undefined));
   });
 
   it("preserves a run key across ambiguous submission recovery", async () => {
