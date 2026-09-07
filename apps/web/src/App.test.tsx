@@ -392,7 +392,10 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Modall overview" }));
     expect(await screen.findByRole("heading", { name: "Registry overview" })).toBeTruthy();
-    await act(async () => { resolveRun?.(run); });
+    await act(async () => {
+      resolveRun?.(run);
+      await Promise.resolve();
+    });
     expect(screen.getByRole("heading", { name: "Registry overview" })).toBeTruthy();
     expect(window.location.pathname).toBe("/");
   });
