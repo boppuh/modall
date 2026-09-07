@@ -144,7 +144,13 @@ def create_app(
         acquired = False
         response: Response
         try:
-            if request.method == "OPTIONS" or not request.url.path.startswith("/v1/"):
+            origin = request.headers.get("Origin")
+            is_allowed_preflight = (
+                request.method == "OPTIONS"
+                and origin in resolved_settings.cors_allowed_origins
+                and "Access-Control-Request-Method" in request.headers
+            )
+            if is_allowed_preflight or not request.url.path.startswith("/v1/"):
                 response = await call_next(request)
             elif not rate_limiter.allow(peer):
                 response = error_response(

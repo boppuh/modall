@@ -1558,8 +1558,7 @@ class ExecutionService:
                 else RunStatus.TIMED_OUT
             )
             await self._terminalize_run(run, status, now, RunFailureCode.DEADLINE_EXCEEDED)
-            if status == RunStatus.INDETERMINATE:
-                reconciled.append(self._reconciled_job(run, job, status))
+            reconciled.append(self._reconciled_job(run, job, status))
         return reconciled
 
     async def _terminalize_abandoned_dispatches(self, now: datetime) -> list[ReconciledJob]:

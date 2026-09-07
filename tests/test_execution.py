@@ -1470,6 +1470,19 @@ def test_runner_emits_terminal_metric_for_reconciled_expired_dispatch() -> None:
                 assert lease is not None
                 await execution.fence_session(lease)
                 await execution.fence_dispatch(lease)
+                queued_token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "queued-timeout"},
+                )
+                queued_run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "queued-timeout"},
+                    confirmation_token=queued_token.confirmation_token,
+                    idempotency_key="runner-queued-timeout",
+                    deadline=now + timedelta(seconds=1),
+                )
 
             current[0] = now + timedelta(seconds=2)
             metrics = MetricsRegistry()
@@ -1489,9 +1502,18 @@ def test_runner_emits_terminal_metric_for_reconciled_expired_dispatch() -> None:
                 assert stored is not None
                 assert stored.status == RunStatus.INDETERMINATE.value
                 assert stored.safe_error_code == RunFailureCode.DEADLINE_EXCEEDED.value
+                stored_queued = await session.get(Run, queued_run.id)
+                assert stored_queued is not None
+                assert stored_queued.status == RunStatus.TIMED_OUT.value
+                assert stored_queued.safe_error_code == RunFailureCode.DEADLINE_EXCEEDED.value
+            rendered = metrics.render()
             assert (
                 'modall_worker_invocations_total{event="invocation_terminal",'
-                'outcome="indeterminate"} 1' in metrics.render()
+                'outcome="indeterminate"} 1' in rendered
+            )
+            assert (
+                'modall_worker_invocations_total{event="invocation_terminal",'
+                'outcome="timed_out"} 1' in rendered
             )
 
     asyncio.run(scenario())

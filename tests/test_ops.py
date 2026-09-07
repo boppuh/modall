@@ -176,6 +176,18 @@ def test_api_metrics_and_rate_limit_are_payload_free() -> None:
                     "X-Real-IP": "203.0.113.1",
                 },
             )
+            malformed_options = await client.options(
+                "/v1/not-a-real-resource",
+                headers={"Origin": "https://console.example", "X-Real-IP": "203.0.113.1"},
+            )
+            disallowed_preflight = await client.options(
+                "/v1/not-a-real-resource",
+                headers={
+                    "Origin": "https://untrusted.example",
+                    "Access-Control-Request-Method": "GET",
+                    "X-Real-IP": "203.0.113.1",
+                },
+            )
             other_client = await client.get(
                 "/v1/not-a-real-resource", headers={"X-Real-IP": "203.0.113.2"}
             )
@@ -189,6 +201,8 @@ def test_api_metrics_and_rate_limit_are_payload_free() -> None:
         assert unusual.status_code == 429
         assert preflight.status_code == 200
         assert preflight.headers["Access-Control-Allow-Origin"] == "https://console.example"
+        assert malformed_options.status_code == 429
+        assert disallowed_preflight.status_code == 429
         assert other_client.status_code == 404
         assert 'route="unmatched"' in exposed.text
         assert "not-a-real-resource" not in exposed.text
