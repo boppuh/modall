@@ -236,7 +236,7 @@ describe("App", () => {
       listCapabilities: vi.fn().mockResolvedValue([pending]),
       getCapability: vi.fn().mockResolvedValue({ ...pending, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: connectionId, sequence: 1, display_name: "Unsafe search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: false, created_at: timestamp }], versions_truncated: false }),
     });
-    renderApp(api);
+    renderApp(api, true, "operator");
     fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
     fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
     expect(await screen.findByRole("button", { name: "Enable exact version" })).toHaveProperty("disabled", true);

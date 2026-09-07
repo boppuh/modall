@@ -1863,6 +1863,7 @@ export interface operations {
                 limit?: number;
                 cursor?: string | null;
                 status?: string | null;
+                active?: boolean;
             };
             header?: {
                 "X-Workspace-ID"?: string | null;

@@ -202,14 +202,12 @@ class GeneratedControlPlane implements ControlPlane {
   }
 
   async listRuns(): Promise<Run[]> {
-    const [recent, ...activePages] = await Promise.all([
+    const [recent, active] = await Promise.all([
       unwrap(this.client.GET("/v1/runs", { params: { query: { limit: 100 } } })),
-      ...["queued", "preparing", "session_fenced", "dispatch_fenced"].map((status) =>
-        collectPages((cursor) => unwrap(this.client.GET("/v1/runs", { params: { query: { limit: 100, cursor, status } } }))),
-      ),
+      unwrap(this.client.GET("/v1/runs", { params: { query: { limit: 100, active: true } } })),
     ]);
     const byId = new Map(recent.items.map((run) => [run.id, run]));
-    for (const run of activePages.flat()) byId.set(run.id, run);
+    for (const run of active.items) byId.set(run.id, run);
     return [...byId.values()].sort((left, right) => right.created_at.localeCompare(left.created_at));
   }
 

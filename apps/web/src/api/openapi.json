@@ -2845,6 +2845,16 @@
             }
           },
           {
+            "in": "query",
+            "name": "active",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Active",
+              "type": "boolean"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Workspace-ID",
             "required": false,

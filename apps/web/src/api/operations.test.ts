@@ -145,8 +145,8 @@ describe("control-plane operations", () => {
     await api.capabilityAction(otherId, "enable", "cap-enable-key");
     await api.capabilityAction(otherId, "disable", "cap-disable-key");
     expect(await api.listRuns()).toHaveLength(1);
-    const runStatuses = requests.filter((request) => new URL(request.url).pathname === "/v1/runs" && request.method === "GET").map((request) => new URL(request.url).searchParams.get("status"));
-    expect(runStatuses).toEqual(expect.arrayContaining(["queued", "preparing", "session_fenced", "dispatch_fenced"]));
+    const runRequests = requests.filter((request) => new URL(request.url).pathname === "/v1/runs" && request.method === "GET");
+    expect(runRequests.some((request) => new URL(request.url).searchParams.get("active") === "true")).toBe(true);
     expect((await api.getRun(id)).status).toBe("succeeded");
     expect(await api.listRunEvents(id)).toEqual([]);
     const preflight = await api.preflight(otherId, { query: "status" });
@@ -206,7 +206,7 @@ describe("control-plane operations", () => {
       page += 1;
       const request = input instanceof Request ? input : new Request(input);
       runRequestUrls.push(request.url);
-      if (new URL(request.url).searchParams.has("status")) {
+      if (new URL(request.url).searchParams.get("active") === "true") {
         return Promise.resolve(new Response(JSON.stringify({ items: [], page: { next_cursor: null } }), { status: 200, headers: { "Content-Type": "application/json" } }));
       }
       return Promise.resolve(new Response(JSON.stringify({
@@ -216,9 +216,9 @@ describe("control-plane operations", () => {
     }));
     const runApi = createControlPlane({ identityId: "reviewer", workspaceId: id });
     const listedRuns = await runApi.listRuns();
-    expect(runRequestUrls.filter((url) => new URL(url).searchParams.has("status"))).toHaveLength(4);
+    expect(runRequestUrls.filter((url) => new URL(url).searchParams.get("active") === "true")).toHaveLength(1);
     expect(listedRuns.map((item) => item.id)).toEqual([id]);
-    expect(page).toBe(5);
+    expect(page).toBe(2);
 
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(() => Promise.resolve(new Response(JSON.stringify({
       items: [connection], page: { next_cursor: "same" },

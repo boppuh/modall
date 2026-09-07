@@ -19,7 +19,7 @@ from modall.api.errors import InvalidRequest
 from modall.api.idempotency import idempotent_mutation
 from modall.audit.types import AuditAction, AuditOutcome, ResourceType
 from modall.execution.service import ExecutionService
-from modall.execution.types import HmacKeyVersion
+from modall.execution.types import HmacKeyVersion, RunStatus
 from modall.identity.auth import Authenticator
 from modall.identity.repository import AuthorizationDenied, AuthorizationService
 from modall.identity.service import IdentityService
@@ -824,9 +824,21 @@ def build_control_plane_router(
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
         cursor: str | None = None,
         run_status: str | None = Query(default=None, alias="status"),
+        active: bool = False,
     ) -> RunPage:
         statement: Select[Any] = select(Run).where(Run.workspace_id == state.context.workspace_id)
-        if run_status is not None:
+        if active:
+            statement = statement.where(
+                Run.status.in_(
+                    [
+                        RunStatus.QUEUED.value,
+                        RunStatus.PREPARING.value,
+                        RunStatus.SESSION_FENCED.value,
+                        RunStatus.DISPATCH_FENCED.value,
+                    ]
+                )
+            )
+        elif run_status is not None:
             statement = statement.where(Run.status == run_status)
         statement = statement.order_by(Run.created_at.desc(), Run.id.desc())
         if cursor is not None:
