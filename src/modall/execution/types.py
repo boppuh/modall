@@ -157,10 +157,23 @@ class JobLease:
     job_id: UUID
     run_id: UUID
     workspace_id: UUID
+    correlation_id: UUID
     worker_id: str
     lease_epoch: int
     execution_epoch: int
     expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciledJob:
+    """Payload-free identity for a job terminalized while polling."""
+
+    job_id: UUID
+    run_id: UUID
+    workspace_id: UUID
+    correlation_id: UUID
+    lease_epoch: int
+    status: RunStatus
 
 
 class SystemExecutionAuthority:

@@ -760,6 +760,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "pyyaml" },
     { name = "ruff" },
     { name = "types-jsonschema" },
 ]
@@ -787,6 +788,7 @@ dev = [
     { name = "mypy", specifier = ">=1.17,<2" },
     { name = "pytest", specifier = ">=8.4,<9" },
     { name = "pytest-cov", specifier = ">=6.2,<7" },
+    { name = "pyyaml", specifier = ">=6.0.2,<7" },
     { name = "ruff", specifier = ">=0.12,<1" },
     { name = "types-jsonschema", specifier = ">=4.25,<5" },
 ]

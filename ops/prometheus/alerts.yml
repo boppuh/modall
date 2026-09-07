@@ -1,0 +1,38 @@
+groups:
+  - name: modall-registry-alpha
+    rules:
+      - alert: ModallApiErrorRateHigh
+        expr: sum(rate(modall_http_responses_total{scope="v1",status_class="5xx"}[5m])) / clamp_min(sum(rate(modall_http_responses_total{scope="v1"}[5m])), 1e-9) > 0.02
+        for: 10m
+        labels: { severity: page }
+        annotations: { summary: "Modall API 5xx rate exceeds 2%" }
+      - alert: ModallApiLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(modall_http_request_duration_seconds_bucket{scope="v1"}[5m]))) > 1
+        for: 10m
+        labels: { severity: ticket }
+        annotations: { summary: "Modall API p95 latency exceeds one second" }
+      - alert: ModallApiTargetDown
+        expr: up{job="modall-api"} == 0 or absent(up{job="modall-api"})
+        for: 0m
+        labels: { severity: page }
+        annotations: { summary: "The API scrape target is unavailable" }
+      - alert: ModallWorkerInvocationFailures
+        expr: increase(modall_worker_invocations_total{event="invocation_terminal",outcome=~"failed|indeterminate"}[10m]) > 0 or (modall_worker_invocations_total{event="invocation_terminal",outcome=~"failed|indeterminate"} > 0 unless modall_worker_invocations_total{event="invocation_terminal",outcome=~"failed|indeterminate"} offset 10m)
+        for: 0m
+        labels: { severity: ticket }
+        annotations: { summary: "A worker invocation needs diagnosis" }
+      - alert: ModallWorkerPollFailures
+        expr: increase(modall_worker_polls_total{outcome="failed"}[10m]) > 0 or (modall_worker_polls_total{outcome="failed"} > 0 unless modall_worker_polls_total{outcome="failed"} offset 10m)
+        for: 0m
+        labels: { severity: page }
+        annotations: { summary: "A worker cannot reliably poll durable jobs" }
+      - alert: ModallWorkerStalled
+        expr: time() - modall_worker_last_progress_unixtime_seconds > modall_worker_liveness_timeout_seconds or up{job="modall-worker"} == 0 or absent(up{job="modall-worker"})
+        for: 0m
+        labels: { severity: page }
+        annotations: { summary: "The worker loop stalled or its scrape target is unavailable" }
+      - alert: ModallMaintenanceFailure
+        expr: increase(modall_worker_maintenance_total{outcome="failed"}[15m]) > 0 or (modall_worker_maintenance_total{outcome="failed"} > 0 unless modall_worker_maintenance_total{outcome="failed"} offset 15m)
+        for: 0m
+        labels: { severity: page }
+        annotations: { summary: "Retention maintenance failed" }

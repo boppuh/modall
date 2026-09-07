@@ -1,5 +1,6 @@
 """One-shot MCP invocation orchestration across durable fence transactions."""
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -13,6 +14,7 @@ from modall.execution.types import (
     ExecutionError,
     ExecutionFailureCode,
     JobLease,
+    ReconciledJob,
     RunFailureCode,
     RunStatus,
 )
@@ -23,6 +25,7 @@ from modall.mcp_adapter.client import (
     InvocationIndeterminate,
     McpClientAdapter,
 )
+from modall.ops.telemetry import MetricsRegistry, log_event
 from modall.persistence.database import transaction
 from modall.persistence.models import (
     CapabilityVersion,
@@ -55,28 +58,37 @@ class InvocationRunner:
         execution_service_factory: ExecutionServiceFactory,
         secret_provider: SecretProvider,
         adapter_factory: AdapterFactory,
+        metrics: MetricsRegistry | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._execution_service_factory = execution_service_factory
         self._secret_provider = secret_provider
         self._adapter_factory = adapter_factory
+        self._metrics = metrics
+        self._logger = logging.getLogger("modall.worker.invocation")
 
     async def claim_and_run(self, *, worker_id: str, lease_duration: timedelta) -> bool:
         """Claim at most one durable job and execute it outside the claim transaction."""
 
+        reconciled_jobs: list[ReconciledJob] = []
         async with transaction(self._session_factory) as session:
             lease = await self._execution_service_factory(session).claim_job(
                 worker_id=worker_id,
                 lease_duration=lease_duration,
+                reconciled_jobs=reconciled_jobs,
             )
+        for reconciled in reconciled_jobs:
+            self._event("invocation_terminal", reconciled, outcome=reconciled.status.value)
         if lease is None:
             return False
+        self._event("job_claimed", lease)
         await self.run(lease, lease_duration=lease_duration)
         return True
 
     async def run(
         self, lease: JobLease, *, lease_duration: timedelta | None = None
     ) -> RunStatus | None:
+        self._event("invocation_started", lease)
         try:
             target = await self._load_target(lease)
             adapter = self._adapter_factory(target.policy_version)
@@ -101,6 +113,7 @@ class InvocationRunner:
                         before_dispatch=lambda: self._fence_dispatch(lease),
                     )
         except InvocationFenceRejected:
+            self._event("invocation_fence_rejected", lease, outcome="fenced")
             return None
         except (KeyError, ValueError, SecretProviderError):
             return await self._complete_failure(
@@ -157,7 +170,27 @@ class InvocationRunner:
                     lease_duration=lease_duration,
                 )
             return None
-        return RunStatus(completed.status)
+        status = RunStatus(completed.status)
+        self._event("invocation_terminal", lease, outcome=status.value)
+        return status
+
+    def _event(
+        self, event: str, lease: JobLease | ReconciledJob, *, outcome: str | None = None
+    ) -> None:
+        fields: dict[str, object] = {
+            "correlation_id": lease.correlation_id,
+            "workspace_id": lease.workspace_id,
+            "run_id": lease.run_id,
+            "job_id": lease.job_id,
+            "lease_epoch": lease.lease_epoch,
+        }
+        if outcome is not None:
+            fields["outcome"] = outcome
+        log_event(self._logger, logging.INFO, event, **fields)
+        if self._metrics is not None:
+            self._metrics.increment(
+                "modall_worker_invocations_total", event=event, outcome=outcome or "none"
+            )
 
     async def _fence_session(self, lease: JobLease, lease_duration: timedelta | None) -> None:
         try:
@@ -166,6 +199,7 @@ class InvocationRunner:
                 if lease_duration is not None:
                     await execution.heartbeat(lease, lease_duration=lease_duration)
                 await execution.fence_session(lease)
+            self._event("mcp_session_fenced", lease)
         except ExecutionError as exc:
             raise InvocationFenceRejected(
                 InvocationFailureCode.SESSION_INITIALIZATION_FAILED
@@ -175,6 +209,7 @@ class InvocationRunner:
         try:
             async with transaction(self._session_factory) as session:
                 await self._execution_service_factory(session).fence_dispatch(lease)
+            self._event("mcp_dispatch_fenced", lease)
         except ExecutionError as exc:
             raise InvocationFenceRejected(InvocationFailureCode.TOOL_CALL_FAILED) from exc
 
@@ -192,7 +227,9 @@ class InvocationRunner:
                 run = await self._execution_service_factory(session).complete_lease(
                     lease, status=status, safe_error_code=code
                 )
-                return RunStatus(run.status)
+                result = RunStatus(run.status)
+            self._event("invocation_terminal", lease, outcome=result.value)
+            return result
         except ExecutionError:
             return None
 

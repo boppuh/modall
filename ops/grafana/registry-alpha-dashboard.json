@@ -1,0 +1,15 @@
+{
+  "title": "Modall Registry Alpha",
+  "uid": "modall-registry-alpha",
+  "schemaVersion": 39,
+  "tags": ["modall", "registry-alpha"],
+  "timezone": "utc",
+  "refresh": "30s",
+  "panels": [
+    {"id": 1, "type": "timeseries", "title": "API request rate", "targets": [{"expr": "sum by (status_class) (rate(modall_http_responses_total{scope=\"v1\"}[5m]))"}]},
+    {"id": 2, "type": "timeseries", "title": "API p95 latency", "targets": [{"expr": "histogram_quantile(0.95, sum by (le) (rate(modall_http_request_duration_seconds_bucket{scope=\"v1\"}[5m])))"}]},
+    {"id": 3, "type": "stat", "title": "Requests in flight", "targets": [{"expr": "sum(modall_http_in_flight)"}]},
+    {"id": 4, "type": "timeseries", "title": "Worker outcomes", "targets": [{"expr": "sum by (outcome) (rate(modall_worker_invocations_total{event=\"invocation_terminal\"}[5m]))"}]},
+    {"id": 5, "type": "timeseries", "title": "Maintenance failures", "targets": [{"expr": "sum by (operation) (increase(modall_worker_maintenance_total{outcome=\"failed\"}[15m]))"}]}
+  ]
+}

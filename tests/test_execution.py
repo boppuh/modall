@@ -25,6 +25,7 @@ from modall.execution.types import (
     ExecutionLimits,
     HmacKeyVersion,
     JobLease,
+    ReconciledJob,
     RunFailureCode,
     RunStatus,
     SystemExecutionAuthority,
@@ -39,6 +40,7 @@ from modall.mcp_adapter.client import (
     InvocationResult,
     McpClientAdapter,
 )
+from modall.ops.telemetry import MetricsRegistry
 from modall.persistence.database import create_engine, create_session_factory, transaction
 from modall.persistence.models import (
     AuditEvent,
@@ -642,6 +644,7 @@ def test_job_leasing_reclaims_only_with_a_new_epoch_and_rejects_stale_heartbeat(
                 )
                 assert first is not None
                 assert first.run_id == run.id
+                assert first.correlation_id == run.correlation_id
                 assert first.lease_epoch == 1
                 await service(session, now=current).fence_session(first)
 
@@ -1439,6 +1442,136 @@ def test_invocation_runner_maps_only_safe_failures(
     asyncio.run(scenario())
 
 
+def test_runner_emits_terminal_metric_for_reconciled_expired_dispatch() -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        current = [now]
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="runner-reconcile")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=current[0])
+                token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "reconcile"},
+                )
+                run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "reconcile"},
+                    confirmation_token=token.confirmation_token,
+                    idempotency_key="runner-reconcile",
+                    deadline=now + timedelta(seconds=1),
+                )
+                lease = await execution.claim_job(
+                    worker_id="lost-worker", lease_duration=timedelta(seconds=30)
+                )
+                assert lease is not None
+                await execution.fence_session(lease)
+                await execution.fence_dispatch(lease)
+                queued_token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "queued-timeout"},
+                )
+                queued_run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "queued-timeout"},
+                    confirmation_token=queued_token.confirmation_token,
+                    idempotency_key="runner-queued-timeout",
+                    deadline=now + timedelta(seconds=1),
+                )
+
+            current[0] = now + timedelta(seconds=2)
+            metrics = MetricsRegistry()
+            runner = InvocationRunner(
+                session_factory=factory,
+                execution_service_factory=lambda session: service(session, now=current[0]),
+                secret_provider=FixtureSecretProvider({}),
+                adapter_factory=lambda _: pytest.fail("a reconciled job must not be invoked"),
+                metrics=metrics,
+            )
+
+            assert not await runner.claim_and_run(
+                worker_id="reconciliation-worker", lease_duration=timedelta(seconds=30)
+            )
+            async with factory() as session:
+                stored = await session.get(Run, run.id)
+                assert stored is not None
+                assert stored.status == RunStatus.INDETERMINATE.value
+                assert stored.safe_error_code == RunFailureCode.DEADLINE_EXCEEDED.value
+                stored_queued = await session.get(Run, queued_run.id)
+                assert stored_queued is not None
+                assert stored_queued.status == RunStatus.TIMED_OUT.value
+                assert stored_queued.safe_error_code == RunFailureCode.DEADLINE_EXCEEDED.value
+            rendered = metrics.render()
+            assert (
+                'modall_worker_invocations_total{event="invocation_terminal",'
+                'outcome="indeterminate"} 1' in rendered
+            )
+            assert (
+                'modall_worker_invocations_total{event="invocation_terminal",'
+                'outcome="timed_out"} 1' in rendered
+            )
+
+    asyncio.run(scenario())
+
+
+def test_runner_emits_terminal_metric_for_stale_claim_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="runner-stale-target")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=now)
+                token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "stale"},
+                )
+                run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "stale"},
+                    confirmation_token=token.confirmation_token,
+                    idempotency_key="runner-stale-target",
+                )
+
+            monkeypatch.setattr(
+                "modall.execution.service.QUALIFIED_PROTOCOL_REVISION", "future-revision"
+            )
+            metrics = MetricsRegistry()
+            runner = InvocationRunner(
+                session_factory=factory,
+                execution_service_factory=lambda session: service(session, now=now),
+                secret_provider=FixtureSecretProvider({}),
+                adapter_factory=lambda _: pytest.fail("a stale target must not be invoked"),
+                metrics=metrics,
+            )
+
+            assert not await runner.claim_and_run(
+                worker_id="claim-worker", lease_duration=timedelta(seconds=30)
+            )
+            async with factory() as session:
+                stored = await session.get(Run, run.id)
+                assert stored is not None
+                assert stored.status == RunStatus.FAILED.value
+                assert stored.safe_error_code == RunFailureCode.PREPARATION_FAILED.value
+            assert (
+                'modall_worker_invocations_total{event="invocation_terminal",outcome="failed"} 1'
+                in metrics.render()
+            )
+
+    asyncio.run(scenario())
+
+
 def test_worker_rechecks_its_qualified_protocol_at_claim_and_each_fence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1578,13 +1711,19 @@ def test_admission_and_claim_refresh_time_after_slow_validation_and_target_locks
                     return True
 
                 monkeypatch.setattr(changing_clock, "_claim_target_is_current", slow_target)
+                reconciled_jobs: list[ReconciledJob] = []
                 assert (
                     await changing_clock.claim_job(
-                        worker_id="slow-worker", lease_duration=timedelta(seconds=30)
+                        worker_id="slow-worker",
+                        lease_duration=timedelta(seconds=30),
+                        reconciled_jobs=reconciled_jobs,
                     )
                     is None
                 )
                 assert run.status == RunStatus.TIMED_OUT.value
+                assert len(reconciled_jobs) == 1
+                assert reconciled_jobs[0].run_id == run.id
+                assert reconciled_jobs[0].status == RunStatus.TIMED_OUT
                 assert await session.scalar(select(func.count()).select_from(RunAttempt)) == 0
 
     asyncio.run(scenario())

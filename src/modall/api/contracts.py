@@ -19,7 +19,7 @@ from modall.api.errors import InvalidRequest
 from modall.api.idempotency import idempotent_mutation
 from modall.audit.types import AuditAction, AuditOutcome, ResourceType
 from modall.execution.service import ExecutionService
-from modall.execution.types import HmacKeyVersion, RunStatus
+from modall.execution.types import ExecutionLimits, HmacKeyVersion, RunStatus
 from modall.identity.auth import Authenticator
 from modall.identity.repository import AuthorizationDenied, AuthorizationService
 from modall.identity.service import IdentityService
@@ -227,6 +227,7 @@ class RunPreflightResponse(BaseModel):
 
 class RunSummaryResponse(BaseModel):
     id: UUID
+    correlation_id: UUID
     actor_user_id: UUID
     capability_id: UUID
     capability_version_id: UUID
@@ -297,6 +298,7 @@ def build_control_plane_router(
     authenticator: Authenticator,
     registry_adapter: OfficialRegistryAdapter,
     keyring_loader: Callable[[], tuple[Sequence[HmacKeyVersion], Sequence[HmacKeyVersion]]],
+    execution_limits: ExecutionLimits,
     environment: str,
 ) -> APIRouter:
     """Bind the HTTP surface to one process-scoped set of dependencies."""
@@ -306,6 +308,7 @@ def build_control_plane_router(
         responses={
             status.HTTP_401_UNAUTHORIZED: {"model": ErrorResponse},
             status.HTTP_403_FORBIDDEN: {"model": ErrorResponse},
+            status.HTTP_429_TOO_MANY_REQUESTS: {"model": ErrorResponse},
             status.HTTP_409_CONFLICT: {"model": ErrorResponse},
             status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ErrorResponse},
             status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponse},
@@ -351,6 +354,7 @@ def build_control_plane_router(
             session,
             confirmation_keys=confirmation_keys,
             idempotency_keys=idempotency_keys,
+            limits=execution_limits,
         )
 
     async def mutate[ResponseT: BaseModel](
@@ -886,7 +890,6 @@ def build_control_plane_router(
         "/runs",
         response_model=RunResponse,
         status_code=status.HTTP_201_CREATED,
-        responses={status.HTTP_429_TOO_MANY_REQUESTS: {"model": ErrorResponse}},
     )
     async def create_run(
         body: RunCreateRequest, state: State, idempotency_key: Idempotency
@@ -1342,6 +1345,7 @@ def _run_response_value(
     persisted_result_expiry = result.expires_at if result is not None else None
     return RunResponse(
         id=run.id,
+        correlation_id=run.correlation_id,
         actor_user_id=run.actor_user_id,
         capability_id=run.capability_id,
         capability_version_id=run.capability_version_id,
@@ -1367,6 +1371,7 @@ def _run_response_value(
 def _run_summary(run: Run) -> RunSummaryResponse:
     return RunSummaryResponse(
         id=run.id,
+        correlation_id=run.correlation_id,
         actor_user_id=run.actor_user_id,
         capability_id=run.capability_id,
         capability_version_id=run.capability_version_id,

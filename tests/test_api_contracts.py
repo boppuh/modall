@@ -656,8 +656,13 @@ def test_unhandled_v1_failure_keeps_safe_response_policy(
             assert response.headers["cache-control"] == "no-store"
             assert UUID(response.headers["x-correlation-id"])
             assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
-            assert "RuntimeError" in caplog.text
-            assert "broken_upstream" in caplog.text
+            failure = next(
+                record
+                for record in caplog.records
+                if record.getMessage() == "unhandled_request_failure"
+            )
+            assert failure.telemetry["exception_type"] == "RuntimeError"  # type: ignore[attr-defined]
+            assert failure.telemetry["exception_origin"] == "broken_upstream"  # type: ignore[attr-defined]
             assert "sensitive-upstream-value" not in caplog.text
 
     asyncio.run(scenario())
@@ -766,10 +771,15 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             assert preflight.status_code == 200
             assert preflight.json()["server_observed_at"]
             confirmation = preflight.json()["confirmation_token"]
+            correlation_id = uuid4()
 
             created = await client.post(
                 "/v1/runs",
-                headers={**headers, "Idempotency-Key": "run-create"},
+                headers={
+                    **headers,
+                    "Idempotency-Key": "run-create",
+                    "X-Correlation-ID": str(correlation_id),
+                },
                 json={
                     "capability_version_id": str(version.id),
                     "arguments": arguments,
@@ -782,6 +792,7 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             assert created.json()["arguments_expires_at"]
             assert created.json()["result_expires_at"] is None
             assert created.json()["server_observed_at"]
+            assert created.json()["correlation_id"] == str(correlation_id)
             run_id = created.json()["id"]
 
             factory = create_session_factory(engine)
@@ -1174,6 +1185,12 @@ def test_openapi_publishes_every_planned_alpha_route() -> None:
         "/v1/audit-events",
     } <= set(paths)
     assert "429" in paths["/v1/runs"]["post"]["responses"]
+    assert all(
+        "429" in operation["responses"]
+        for path_name, path in paths.items()
+        for method, operation in path.items()
+        if path_name.startswith("/v1/") and method in {"get", "post", "put", "patch", "delete"}
+    )
 
 
 def test_api_idempotency_rejects_invalid_configuration_before_database_access() -> None:

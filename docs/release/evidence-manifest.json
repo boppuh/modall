@@ -1,0 +1,25 @@
+{
+  "milestone": "registry-alpha",
+  "automated_gates": [
+    "python-quality",
+    "web-quality",
+    "accessibility-reference-journey",
+    "migration-clean-install",
+    "compose-build",
+    "restore-quarantine-state-machine",
+    "bounded-load",
+    "release-artifacts"
+  ],
+  "human_gates": {
+    "primary_reviewer": "pending",
+    "ios_engineer": "pending",
+    "security_reviewer": "pending",
+    "staging_owner": "pending"
+  },
+  "prohibited_evidence": [
+    "access_tokens",
+    "credentials",
+    "invocation_arguments",
+    "invocation_results"
+  ]
+}

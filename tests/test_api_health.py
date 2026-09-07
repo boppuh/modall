@@ -49,6 +49,7 @@ def test_production_disables_interactive_docs() -> None:
         oidc_audience="modall",
         oidc_jwks_url="https://issuer.example/jwks",
         secret_provider="mounted_file",
+        trusted_proxy_addresses=("10.0.0.10",),
     )
     response = asyncio.run(get(create_app(settings, readiness_probe=ready), "/docs"))
 
@@ -65,14 +66,24 @@ def test_readiness_reports_database_failure_without_detail() -> None:
 
 
 def test_run_starts_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, str, int, bool, str]] = []
+    calls: list[tuple[str, str, int, bool, str, bool, None, bool]] = []
 
-    def fake_run(app: str, *, host: str, port: int, reload: bool, log_level: str) -> None:
-        calls.append((app, host, port, reload, log_level))
+    def fake_run(
+        app: str,
+        *,
+        host: str,
+        port: int,
+        reload: bool,
+        log_level: str,
+        access_log: bool,
+        log_config: None,
+        proxy_headers: bool,
+    ) -> None:
+        calls.append((app, host, port, reload, log_level, access_log, log_config, proxy_headers))
 
     monkeypatch.setattr(main, "get_settings", lambda: Settings(log_level="DEBUG"))
     monkeypatch.setattr("modall.api.main.uvicorn.run", fake_run)
 
     main.run()
 
-    assert calls == [("modall.api.main:app", "0.0.0.0", 8000, False, "debug")]
+    assert calls == [("modall.api.main:app", "0.0.0.0", 8000, False, "debug", False, None, False)]

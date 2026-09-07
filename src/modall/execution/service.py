@@ -26,6 +26,7 @@ from modall.execution.types import (
     HmacKeyVersion,
     JobLease,
     JobStatus,
+    ReconciledJob,
     RunEventType,
     RunFailureCode,
     RunPreflight,
@@ -295,9 +296,11 @@ class ExecutionService:
         if (active_run_count or 0) >= self._limits.max_active_runs_per_workspace:
             raise ExecutionError(ExecutionFailureCode.ACTIVE_RUN_LIMIT)
         run_id = uuid4()
+        trace_id = correlation_id or uuid4()
         run = Run(
             id=run_id,
             workspace_id=context.workspace_id,
+            correlation_id=trace_id,
             actor_user_id=context.actor_user_id,
             capability_id=target.capability.id,
             capability_version_id=target.version.id,
@@ -373,7 +376,7 @@ class ExecutionService:
                 action=AuditAction.RUN_CREATED,
                 resource_type=ResourceType.RUN,
                 resource_id=run_id,
-                correlation_id=correlation_id or uuid4(),
+                correlation_id=trace_id,
             )
         )
         if not await _flush_execution_payload(self._session):
@@ -385,6 +388,7 @@ class ExecutionService:
         *,
         worker_id: str,
         lease_duration: timedelta,
+        reconciled_jobs: list[ReconciledJob] | None = None,
     ) -> JobLease | None:
         if not worker_id or len(worker_id) > 128 or lease_duration <= timedelta(0):
             raise ValueError("invalid worker lease")
@@ -392,12 +396,16 @@ class ExecutionService:
         state = await self._execution_state(lock="shared")
         if state.dispatch_quarantined:
             raise ExecutionError(ExecutionFailureCode.DISPATCH_QUARANTINED)
-        await self._terminalize_expired_jobs(now)
+        expired = await self._terminalize_expired_jobs(now)
+        if reconciled_jobs is not None:
+            reconciled_jobs.extend(expired)
         # The session disables autoflush. Persist terminal projections before
         # the next reconciliation query so one dispatch-fenced deadline cannot
         # be selected and terminalized twice with the same event sequence.
         await self._session.flush()
-        await self._terminalize_abandoned_dispatches(now)
+        abandoned = await self._terminalize_abandoned_dispatches(now)
+        if reconciled_jobs is not None:
+            reconciled_jobs.extend(abandoned)
         run = await self._session.scalar(
             select(Run)
             .join(
@@ -440,6 +448,8 @@ class ExecutionService:
                 now,
                 RunFailureCode.DEADLINE_EXCEEDED,
             )
+            if reconciled_jobs is not None:
+                reconciled_jobs.append(self._reconciled_job(run, job, RunStatus.TIMED_OUT))
             await self._session.flush()
             return None
         target_is_current = await self._claim_target_is_current(run)
@@ -451,6 +461,8 @@ class ExecutionService:
                 now,
                 RunFailureCode.DEADLINE_EXCEEDED,
             )
+            if reconciled_jobs is not None:
+                reconciled_jobs.append(self._reconciled_job(run, job, RunStatus.TIMED_OUT))
             await self._session.flush()
             return None
         if not target_is_current:
@@ -460,6 +472,8 @@ class ExecutionService:
                 now,
                 RunFailureCode.PREPARATION_FAILED,
             )
+            if reconciled_jobs is not None:
+                reconciled_jobs.append(self._reconciled_job(run, job, RunStatus.FAILED))
             await self._session.flush()
             return None
         if job.status == JobStatus.LEASED.value:
@@ -506,6 +520,7 @@ class ExecutionService:
             job_id=job.id,
             run_id=job.run_id,
             workspace_id=job.workspace_id,
+            correlation_id=run.correlation_id,
             worker_id=worker_id,
             lease_epoch=job.lease_epoch,
             execution_epoch=job.execution_epoch,
@@ -557,6 +572,7 @@ class ExecutionService:
             job_id=job.id,
             run_id=job.run_id,
             workspace_id=job.workspace_id,
+            correlation_id=lease.correlation_id,
             worker_id=lease.worker_id,
             lease_epoch=lease.lease_epoch,
             execution_epoch=lease.execution_epoch,
@@ -1519,11 +1535,11 @@ class ExecutionService:
             ),
         )
 
-    async def _terminalize_expired_jobs(self, now: datetime) -> None:
-        runs = list(
+    async def _terminalize_expired_jobs(self, now: datetime) -> list[ReconciledJob]:
+        rows = list(
             (
-                await self._session.scalars(
-                    select(Run)
+                await self._session.execute(
+                    select(Run, Job)
                     .join(
                         Job,
                         and_(Job.workspace_id == Run.workspace_id, Job.run_id == Run.id),
@@ -1538,19 +1554,22 @@ class ExecutionService:
                 )
             ).all()
         )
-        for run in runs:
+        reconciled: list[ReconciledJob] = []
+        for run, job in rows:
             status = (
                 RunStatus.INDETERMINATE
                 if run.status == RunStatus.DISPATCH_FENCED.value
                 else RunStatus.TIMED_OUT
             )
             await self._terminalize_run(run, status, now, RunFailureCode.DEADLINE_EXCEEDED)
+            reconciled.append(self._reconciled_job(run, job, status))
+        return reconciled
 
-    async def _terminalize_abandoned_dispatches(self, now: datetime) -> None:
-        runs = list(
+    async def _terminalize_abandoned_dispatches(self, now: datetime) -> list[ReconciledJob]:
+        rows = list(
             (
-                await self._session.scalars(
-                    select(Run)
+                await self._session.execute(
+                    select(Run, Job)
                     .join(
                         Job,
                         and_(Job.workspace_id == Run.workspace_id, Job.run_id == Run.id),
@@ -1566,14 +1585,28 @@ class ExecutionService:
                 )
             ).all()
         )
-        for run in runs:
+        reconciled: list[ReconciledJob] = []
+        for run, job in rows:
             await self._terminalize_run(
                 run,
                 RunStatus.INDETERMINATE,
                 now,
                 RunFailureCode.WORKER_LOST_AFTER_DISPATCH,
             )
+            reconciled.append(self._reconciled_job(run, job, RunStatus.INDETERMINATE))
         await self._session.flush()
+        return reconciled
+
+    @staticmethod
+    def _reconciled_job(run: Run, job: Job, status: RunStatus) -> ReconciledJob:
+        return ReconciledJob(
+            job_id=job.id,
+            run_id=run.id,
+            workspace_id=run.workspace_id,
+            correlation_id=run.correlation_id,
+            lease_epoch=job.lease_epoch,
+            status=status,
+        )
 
     async def _terminalize_run(
         self,
