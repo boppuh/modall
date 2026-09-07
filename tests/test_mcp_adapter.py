@@ -758,6 +758,7 @@ def test_limited_transport_revalidates_before_every_request() -> None:
         (b'{"jsonrpc":"2.0","id":true,"result":{}}', 200, False, False),
         (b'{"jsonrpc":', 200, True, False),
         (b"", 200, True, False),
+        (b"", 204, True, False),
         (b'{"jsonrpc":', 202, False, False),
         (b"", 206, False, False),
         (b"", 401, True, True),
@@ -809,6 +810,50 @@ def test_tool_call_client_error_is_final_even_when_mislabeled_as_sse() -> None:
             )
         assert transport.tool_call_response_completed
         assert transport.tool_call_failure_completed
+
+    asyncio.run(scenario())
+
+
+def test_tool_call_client_error_is_final_before_early_response_screening() -> None:
+    async def scenario() -> None:
+        async def encoded_rejection(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                401,
+                headers={"Content-Encoding": "gzip"},
+                content=gzip.compress(b"rejected"),
+                request=request,
+            )
+
+        encoded_transport = LimitedTransport(httpx.MockTransport(encoded_rejection), 1024)
+        async with httpx.AsyncClient(transport=encoded_transport) as client:
+            with pytest.raises(ResponseLimitExceeded):
+                await client.post(
+                    "https://example.test",
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
+                )
+        assert encoded_transport.tool_call_response_completed
+        assert encoded_transport.tool_call_failure_completed
+
+        async def sensitive_rejection(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                403,
+                headers={"X-Upstream-State": FIXTURE_TOKEN},
+                request=request,
+            )
+
+        sensitive_transport = LimitedTransport(
+            httpx.MockTransport(sensitive_rejection),
+            1024,
+            forbidden_response_values=(FIXTURE_TOKEN,),
+        )
+        async with httpx.AsyncClient(transport=sensitive_transport) as client:
+            with pytest.raises(EndpointPolicyError, match="response header"):
+                await client.post(
+                    "https://example.test",
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
+                )
+        assert sensitive_transport.tool_call_response_completed
+        assert sensitive_transport.tool_call_failure_completed
 
     asyncio.run(scenario())
 

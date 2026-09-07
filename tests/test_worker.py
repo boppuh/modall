@@ -19,6 +19,16 @@ from modall.worker import main
 from modall.worker.main import configure_logging, run_once
 
 
+@pytest.mark.parametrize("environment", ("local", "test"))
+def test_worker_invocation_policy_allows_loopback_fixtures(environment: str) -> None:
+    async def scenario() -> None:
+        policy = main._invocation_endpoint_policy(Settings(environment=environment))
+        resolution = await policy.validate("http://127.0.0.1:8000/mcp")
+        assert resolution.addresses == ("127.0.0.1",)
+
+    asyncio.run(scenario())
+
+
 def test_worker_poll_emits_no_payload(capsys: pytest.CaptureFixture[str]) -> None:
     settings = Settings(environment="test", log_level="DEBUG")
     configure_logging(settings)

@@ -90,6 +90,48 @@ def _leaf_exceptions(error: BaseException) -> list[BaseException]:
     return [error]
 
 
+def test_reference_server_rejects_malformed_json_rpc_shapes() -> None:
+    async def scenario() -> None:
+        transport = httpx.ASGITransport(app=create_mcp_fixture_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://fixture") as client:
+            malformed_json = await client.post(
+                "/mcp/default",
+                headers={**ACCEPT_HEADERS, "Content-Type": "application/json"},
+                content=b"{",
+            )
+            malformed_envelope = await client.post(
+                "/mcp/default",
+                headers=ACCEPT_HEADERS,
+                json=[],
+            )
+            malformed_params = await client.post(
+                "/mcp/default",
+                headers=ACCEPT_HEADERS,
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": []},
+            )
+            malformed_arguments = await client.post(
+                "/mcp/default",
+                headers=ACCEPT_HEADERS,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"arguments": []},
+                },
+            )
+
+        assert malformed_json.status_code == 400
+        assert malformed_json.json() == {"error": "invalid JSON body"}
+        assert malformed_envelope.status_code == 400
+        assert malformed_envelope.json() == {"error": "invalid JSON-RPC envelope"}
+        assert malformed_params.status_code == 400
+        assert malformed_params.json() == {"error": "invalid JSON-RPC parameters"}
+        assert malformed_arguments.status_code == 400
+        assert malformed_arguments.json() == {"error": "invalid JSON-RPC parameters"}
+
+    asyncio.run(scenario())
+
+
 def test_reference_server_initialization_pagination_drift_and_results() -> None:
     async def scenario() -> None:
         transport = httpx.ASGITransport(app=create_mcp_fixture_app())
