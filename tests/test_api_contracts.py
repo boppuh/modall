@@ -815,6 +815,11 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             active = await client.get("/v1/runs?active=true", headers=headers)
             assert active.status_code == 200
             assert [item["id"] for item in active.json()["items"]] == [run_id]
+            active_by_duration = await client.get(
+                "/v1/runs?status=queued&min_duration_seconds=0", headers=headers
+            )
+            assert active_by_duration.status_code == 200
+            assert [item["id"] for item in active_by_duration.json()["items"]] == [run_id]
 
             fetched = await client.get(f"/v1/runs/{run_id}", headers=headers)
             assert fetched.status_code == 200

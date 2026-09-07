@@ -899,7 +899,8 @@ def build_control_plane_router(
             and min_duration_seconds > max_duration_seconds
         ):
             raise InvalidRequest("invalid run duration range")
-        duration_seconds = func.extract("epoch", Run.terminal_at) - func.extract(
+        duration_end = func.coalesce(Run.terminal_at, func.now())
+        duration_seconds = func.extract("epoch", duration_end) - func.extract(
             "epoch", Run.created_at
         )
         if min_duration_seconds is not None:
