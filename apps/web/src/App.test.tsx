@@ -69,7 +69,7 @@ function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
     createConnection: vi.fn().mockResolvedValue(connection),
     appendConnectionVersion: vi.fn().mockResolvedValue({ id: versionId, sequence: 2, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http", created_at: timestamp }),
     connectionAction: vi.fn().mockResolvedValue(undefined),
-    searchRegistry: vi.fn().mockImplementation(() => Promise.resolve({ cache_id: connectionId, fetched_at: timestamp, expires_at: new Date(Date.now() + 60_000).toISOString(), from_cache: false, items: [{ external_id: "io.modall/search", source_version: "1.2.0", name: "Public search", description: "Search public records", advertised_urls: ["https://mcp.example/tools"], provenance_digest: "a".repeat(64) }] })),
+    searchRegistry: vi.fn().mockImplementation(() => Promise.resolve({ cache_id: connectionId, fetched_at: timestamp, expires_at: new Date(Date.now() + 60_000).toISOString(), server_observed_at: new Date().toISOString(), from_cache: false, items: [{ external_id: "io.modall/search", source_version: "1.2.0", name: "Public search", description: "Search public records", advertised_urls: ["https://mcp.example/tools"], provenance_digest: "a".repeat(64) }] })),
     importRegistry: vi.fn().mockResolvedValue({ id: connectionId, source: "official", external_id: "io.modall/search", current_version_id: versionId, name: "Public search", description: "Search public records", created_at: timestamp }),
     listRegistryEntries: vi.fn().mockResolvedValue([]),
     listCapabilities: vi.fn().mockResolvedValue([capability]),
@@ -80,7 +80,7 @@ function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
     listRunPage: vi.fn().mockResolvedValue({ items: [run] }),
     getRun: vi.fn().mockResolvedValue(run),
     listRunEvents: vi.fn().mockResolvedValue([{ id: connectionId, sequence: 1, event_type: "admitted", status: "queued", safe_error_code: null, occurred_at: timestamp }]),
-    preflight: vi.fn().mockImplementation(() => Promise.resolve({ capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "confirmation", expires_at: new Date(Date.now() + 60_000).toISOString() })),
+    preflight: vi.fn().mockImplementation(() => Promise.resolve({ capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "confirmation", expires_at: new Date(Date.now() + 60_000).toISOString(), server_observed_at: new Date().toISOString() })),
     createRun: vi.fn().mockResolvedValue(run),
     cancelRun: vi.fn().mockResolvedValue({ ...run, status: "cancelled" }),
     listAuditEvents: vi.fn().mockResolvedValue({ items: [] }),
@@ -122,7 +122,7 @@ describe("App", () => {
     vi.restoreAllMocks();
   });
 
-  afterEach(() => cleanup());
+  afterEach(() => { vi.useRealTimers(); cleanup(); });
 
   it("validates, saves, and clears the workspace session", async () => {
     const api = fakeApi({ overview: vi.fn().mockResolvedValue({ connections: [], capabilities: [], runs: [] }) });
@@ -460,7 +460,7 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Execution timeline" })).toBeTruthy();
     expect(screen.getByText("admitted")).toBeTruthy();
-    expect(screen.getByText("Initiating actor").parentElement?.textContent).toContain("22222222");
+    expect(screen.getByText("Initiating actor").parentElement?.textContent).toContain(connectionId);
     fireEvent.click(screen.getByRole("button", { name: "Request cancellation" }));
     await waitFor(() => expect(api.cancelRun).toHaveBeenCalledWith(runId, expect.any(String)));
   });
@@ -594,13 +594,13 @@ describe("App", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("Do not retry this invocation");
   });
 
-  it("expires stale confirmations and fetches a terminal run's final event", async () => {
+  it("uses server-relative confirmation lifetime and fetches a terminal run's final event", async () => {
     const terminalRun = { ...run, status: "succeeded" as const, terminal_at: timestamp };
     const listRunEvents = vi.fn().mockResolvedValue([{ id: connectionId, sequence: 1, event_type: "completed", status: "succeeded", safe_error_code: null, occurred_at: timestamp }]);
     const api = fakeApi({
       getRun: vi.fn().mockResolvedValue(terminalRun),
       listRunEvents,
-      preflight: vi.fn().mockImplementation(() => Promise.resolve({ capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "expired", expires_at: new Date(Date.now() + 20).toISOString() })),
+      preflight: vi.fn().mockImplementation(() => Promise.resolve({ capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "confirmation", expires_at: "2020-01-01T00:01:00Z", server_observed_at: "2020-01-01T00:00:00Z" })),
     });
     renderApp(api);
     fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
@@ -609,9 +609,8 @@ describe("App", () => {
 
     fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
     fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
-    const expired = await screen.findByRole("button", { name: "Confirmation expired" });
-    expect(expired).toHaveProperty("disabled", true);
-    expect(screen.getByRole("alert").textContent).toContain("confirmation expired");
+    const confirm = await screen.findByRole("button", { name: "Confirm and run" });
+    await waitFor(() => expect(confirm).toHaveProperty("disabled", false));
   });
 
   it("retries pinned endpoint resolution before confirmation expires", async () => {
@@ -755,8 +754,22 @@ describe("App", () => {
     expect(screen.queryByRole("heading", { name: "Confirm exact invocation" })).toBeNull();
   });
 
+  it("refreshes capability history explicitly instead of polling large schemas", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const getCapability = vi.fn<ControlPlane["getCapability"]>().mockResolvedValue({ ...capability, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false, observed_in_current_snapshot: true });
+    renderApp(fakeApi({ getCapability }));
+    fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
+    await waitFor(() => expect(getCapability).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(5_100);
+    expect(getCapability).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh tools" }));
+    await waitFor(() => expect(getCapability).toHaveBeenCalledTimes(2));
+    vi.useRealTimers();
+  });
+
   it("retries failed searches and expires stale import controls", async () => {
-    const recovered = { cache_id: connectionId, fetched_at: timestamp, expires_at: new Date(Date.now() + 60_000).toISOString(), from_cache: false, items: [{ external_id: "entry", source_version: "1", name: "Recovered", description: null, advertised_urls: [], provenance_digest: "a".repeat(64) }] };
+    const recovered = { cache_id: connectionId, fetched_at: timestamp, expires_at: new Date(Date.now() + 60_000).toISOString(), server_observed_at: new Date().toISOString(), from_cache: false, items: [{ external_id: "entry", source_version: "1", name: "Recovered", description: null, advertised_urls: [], provenance_digest: "a".repeat(64) }] };
     const searchRegistry = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(recovered);
     const api = fakeApi({ searchRegistry });
     renderApp(api);
@@ -767,7 +780,12 @@ describe("App", () => {
     expect(await screen.findByText("Recovered")).toBeTruthy();
     expect(searchRegistry).toHaveBeenCalledTimes(2);
 
-    searchRegistry.mockResolvedValueOnce({ ...recovered, expires_at: "2020-01-01T00:00:00Z" });
+    searchRegistry.mockResolvedValueOnce({ ...recovered, expires_at: "2020-01-01T00:01:00Z", server_observed_at: "2020-01-01T00:00:00Z" });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(searchRegistry).toHaveBeenCalledTimes(3));
+    expect(screen.getByRole("button", { name: "Import" })).toHaveProperty("disabled", false);
+
+    searchRegistry.mockResolvedValueOnce({ ...recovered, expires_at: "2020-01-01T00:00:00Z", server_observed_at: "2020-01-01T00:00:01Z" });
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     expect(await screen.findByText(/results expired/i)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import" })).toHaveProperty("disabled", true);
@@ -955,6 +973,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Audit/ }));
     expect(await screen.findByText("connection created")).toBeTruthy();
+    expect(await screen.findByText(new RegExp(`Actor ${connectionId}`))).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Resource type"), { target: { value: "server_connection" } });
     fireEvent.change(screen.getByLabelText("Resource ID"), { target: { value: connectionId } });
     fireEvent.change(screen.getByLabelText("Actor ID"), { target: { value: connectionId } });
@@ -964,7 +983,7 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Before"), { target: { value: "2026-09-07T08:00" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
     await waitFor(() => expect(api.listAuditEvents).toHaveBeenCalledWith({ resource_type: "server_connection", resource_id: connectionId, actor_id: connectionId, action: "connection.created", outcome: "succeeded", occurred_after: new Date("2026-09-06T08:00").toISOString(), occurred_before: new Date("2026-09-07T08:00").toISOString() }, undefined));
-    fireEvent.click(screen.getByRole("button", { name: "Load older events" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Load older events" }));
     await waitFor(() => expect(api.listAuditEvents).toHaveBeenCalledTimes(3));
     fireEvent.click(screen.getByRole("button", { name: "Refresh ledger" }));
     await waitFor(() => expect(vi.mocked(api.listAuditEvents).mock.calls.length).toBeGreaterThan(3));

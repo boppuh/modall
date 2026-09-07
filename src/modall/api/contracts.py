@@ -19,7 +19,7 @@ from modall.api.errors import InvalidRequest
 from modall.api.idempotency import idempotent_mutation
 from modall.audit.types import AuditAction, AuditOutcome, ResourceType
 from modall.execution.service import ExecutionService
-from modall.execution.types import MAX_ACTIVE_RUNS_PER_WORKSPACE, HmacKeyVersion, RunStatus
+from modall.execution.types import HmacKeyVersion, RunStatus
 from modall.identity.auth import Authenticator
 from modall.identity.repository import AuthorizationDenied, AuthorizationService
 from modall.identity.service import IdentityService
@@ -119,6 +119,7 @@ class RegistrySearchResponse(BaseModel):
     items: list[RegistrySearchItemResponse]
     fetched_at: datetime
     expires_at: datetime
+    server_observed_at: datetime
     from_cache: bool
 
 
@@ -220,6 +221,7 @@ class RunPreflightResponse(BaseModel):
     connection_version_id: UUID
     argument_digest: str
     expires_at: datetime
+    server_observed_at: datetime
 
 
 class RunSummaryResponse(BaseModel):
@@ -407,6 +409,7 @@ def build_control_plane_router(
             ],
             fetched_at=found.fetched_at,
             expires_at=found.expires_at,
+            server_observed_at=datetime.now(UTC),
             from_cache=found.from_cache,
         )
 
@@ -876,6 +879,7 @@ def build_control_plane_router(
             connection_version_id=result.connection_version_id,
             argument_digest=result.argument_digest,
             expires_at=result.expires_at,
+            server_observed_at=result.server_observed_at,
         )
 
     @router.post(
@@ -969,10 +973,7 @@ def build_control_plane_router(
                     and_(Run.created_at == cursor_time, Run.id < cursor_id),
                 )
             )
-        query_limit = MAX_ACTIVE_RUNS_PER_WORKSPACE + 1 if active else limit + 1
-        rows = list((await state.session.scalars(statement.limit(query_limit))).all())
-        if active and len(rows) > MAX_ACTIVE_RUNS_PER_WORKSPACE:
-            raise RuntimeError("active run limit invariant exceeded")
+        rows = list((await state.session.scalars(statement.limit(limit + 1))).all())
         page_runs = rows[:limit]
         return RunPage(
             items=[_run_summary(run) for run in page_runs],

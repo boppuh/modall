@@ -1017,6 +1017,11 @@
             },
             "title": "Items",
             "type": "array"
+          },
+          "server_observed_at": {
+            "format": "date-time",
+            "title": "Server Observed At",
+            "type": "string"
           }
         },
         "required": [
@@ -1024,6 +1029,7 @@
           "items",
           "fetched_at",
           "expires_at",
+          "server_observed_at",
           "from_cache"
         ],
         "title": "RegistrySearchResponse",
@@ -1221,6 +1227,11 @@
             "format": "date-time",
             "title": "Expires At",
             "type": "string"
+          },
+          "server_observed_at": {
+            "format": "date-time",
+            "title": "Server Observed At",
+            "type": "string"
           }
         },
         "required": [
@@ -1228,7 +1239,8 @@
           "capability_version_id",
           "connection_version_id",
           "argument_digest",
-          "expires_at"
+          "expires_at",
+          "server_observed_at"
         ],
         "title": "RunPreflightResponse",
         "type": "object"

@@ -149,6 +149,7 @@ class RunPreflight:
     connection_version_id: UUID
     argument_digest: str
     expires_at: datetime
+    server_observed_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

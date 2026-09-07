@@ -604,6 +604,7 @@ def test_official_registry_search_import_and_replay_contract() -> None:
             assert searched.status_code == 200
             result = searched.json()
             assert result["items"][0]["name"] == "io.modall.fixture/weather"
+            assert result["server_observed_at"]
 
             body = {
                 "cache_id": result["cache_id"],
@@ -763,6 +764,7 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
                 json={"capability_version_id": str(version.id), "arguments": arguments},
             )
             assert preflight.status_code == 200
+            assert preflight.json()["server_observed_at"]
             confirmation = preflight.json()["confirmation_token"]
 
             created = await client.post(
@@ -858,6 +860,39 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
                 },
             )
             assert second_created.status_code == 201
+            factory = create_session_factory(engine)
+            async with transaction(factory) as session:
+                stored_run = await session.get(Run, UUID(run_id))
+                assert stored_run is not None
+                for offset in range(99):
+                    session.add(
+                        Run(
+                            id=uuid4(),
+                            workspace_id=stored_run.workspace_id,
+                            actor_user_id=stored_run.actor_user_id,
+                            capability_id=stored_run.capability_id,
+                            capability_version_id=stored_run.capability_version_id,
+                            connection_id=stored_run.connection_id,
+                            connection_version_id=stored_run.connection_version_id,
+                            connection_control_epoch=stored_run.connection_control_epoch,
+                            capability_status_epoch=stored_run.capability_status_epoch,
+                            protocol_revision=stored_run.protocol_revision,
+                            status="preparing",
+                            arguments={},
+                            argument_digest="0" * 64,
+                            arguments_expires_at=stored_run.arguments_expires_at,
+                            deadline=stored_run.deadline,
+                            cancellation_requested=False,
+                            safe_error_code=None,
+                            created_at=stored_run.created_at - timedelta(seconds=offset + 1),
+                            updated_at=stored_run.updated_at,
+                            terminal_at=None,
+                        )
+                    )
+            legacy_active = await client.get("/v1/runs?active=true", headers=headers)
+            assert legacy_active.status_code == 200
+            assert len(legacy_active.json()["items"]) == 50
+            assert legacy_active.json()["page"]["next_cursor"] is not None
             active_page = await client.get("/v1/runs?active=true&limit=1", headers=headers)
             assert active_page.status_code == 200
             assert len(active_page.json()["items"]) == 1

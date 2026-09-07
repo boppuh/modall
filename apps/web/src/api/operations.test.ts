@@ -91,7 +91,7 @@ describe("control-plane operations", () => {
         } else if (path.startsWith("/v1/server-connections/")) {
           payload = connection;
         } else if (path === "/v1/registry/searches") {
-          payload = { cache_id: id, items: [], fetched_at: timestamp, expires_at: timestamp, from_cache: false };
+          payload = { cache_id: id, items: [], fetched_at: timestamp, expires_at: timestamp, server_observed_at: timestamp, from_cache: false };
         } else if (path === "/v1/registry/imports") {
           payload = { id, source: "official", external_id: "entry", current_version_id: otherId, name: "Entry", description: null, created_at: timestamp };
         } else if (path === "/v1/registry/entries") {
@@ -111,7 +111,7 @@ describe("control-plane operations", () => {
         } else if (path.startsWith("/v1/runs/")) {
           payload = run;
         } else if (path === "/v1/run-preflights") {
-          payload = { capability_version_id: otherId, connection_version_id: otherId, argument_digest: "a".repeat(64), confirmation_token: "token", expires_at: timestamp };
+          payload = { capability_version_id: otherId, connection_version_id: otherId, argument_digest: "a".repeat(64), confirmation_token: "token", expires_at: timestamp, server_observed_at: timestamp };
         } else if (path === "/v1/audit-events") {
           payload = { items: [], page: { next_cursor: null } };
         }

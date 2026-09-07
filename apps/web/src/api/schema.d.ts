@@ -830,6 +830,11 @@ export interface components {
             from_cache: boolean;
             /** Items */
             items: components["schemas"]["RegistrySearchItemResponse"][];
+            /**
+             * Server Observed At
+             * Format: date-time
+             */
+            server_observed_at: string;
         };
         /**
          * ResourceType
@@ -923,6 +928,11 @@ export interface components {
              * Format: date-time
              */
             expires_at: string;
+            /**
+             * Server Observed At
+             * Format: date-time
+             */
+            server_observed_at: string;
         };
         /** RunResponse */
         RunResponse: {

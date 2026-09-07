@@ -89,7 +89,7 @@ async function mockControlPlane(route: Route) {
   } else if (key === `GET /v1/runs/${runId}/events`) {
     body = { items: [{ id: connectionId, sequence: 1, event_type: "completed", status: "succeeded", safe_error_code: null, occurred_at: timestamp }], page: { next_cursor: null } };
   } else if (key === "POST /v1/run-preflights") {
-    body = { capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "token", expires_at: new Date(Date.now() + 60_000).toISOString() };
+    body = { capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "token", expires_at: new Date(Date.now() + 60_000).toISOString(), server_observed_at: new Date().toISOString() };
   } else if (key === "GET /v1/audit-events") {
     body = { items: [], page: { next_cursor: null } };
   } else {

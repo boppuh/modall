@@ -172,6 +172,7 @@ class ExecutionService:
             connection_version_id=target.binding.connection_version_id,
             argument_digest=argument_digest,
             expires_at=expires_at,
+            server_observed_at=now,
         )
 
     async def create_run(

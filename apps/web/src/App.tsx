@@ -368,14 +368,15 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
   });
   const [searchResult, setSearchResult] = useState<RegistrySearch | null>(null);
   const [lastSearchQuery, setLastSearchQuery] = useState("");
-  const [clock, setClock] = useState(() => Date.now());
+  const [expiredSearchKey, setExpiredSearchKey] = useState<string | null>(null);
+  const searchExpiryKey = searchResult ? `${searchResult.cache_id}:${searchResult.server_observed_at}` : null;
   useEffect(() => {
-    if (!searchResult) return;
-    const delay = Math.max(0, Date.parse(searchResult.expires_at) - Date.now());
-    const timer = window.setTimeout(() => setClock(Date.now()), delay + 1);
+    if (!searchResult || !searchExpiryKey) return;
+    const delay = Math.max(0, Date.parse(searchResult.expires_at) - Date.parse(searchResult.server_observed_at));
+    const timer = window.setTimeout(() => setExpiredSearchKey(searchExpiryKey), delay + 1);
     return () => window.clearTimeout(timer);
-  }, [searchResult]);
-  const searchExpired = searchResult ? Date.parse(searchResult.expires_at) <= clock : false;
+  }, [searchExpiryKey, searchResult]);
+  const searchExpired = searchExpiryKey !== null && expiredSearchKey === searchExpiryKey;
   const search = useMutation({
     mutationFn: (query: string) => api.searchRegistry(query),
     onMutate: () => setSearchResult(null),
@@ -596,13 +597,11 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
     queryKey: queryKey(scope, "capability", selectedId),
     queryFn: () => api.getCapability(selectedId as string),
     enabled: selectedId !== null,
-    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
   });
   const sourceConnection = useQuery({
     queryKey: queryKey(scope, "capability-source-connection", detail.data?.connection_id),
     queryFn: () => api.getConnection(detail.data?.connection_id as string),
     enabled: Boolean(detail.data?.connection_id),
-    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
   });
   const action = useMutation({
     mutationFn: ({ versionId, verb, key }: { versionId: string; verb: "enable" | "disable"; key: string; operation: string }) => api.capabilityAction(versionId, verb, key),
@@ -622,7 +621,7 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
       <header className="page-heading"><div><p className="kicker">Review and approval</p><h1>Capabilities</h1><p>Approve exact immutable versions. New schema never inherits old trust.</p></div></header>
       <section className="split-detail capability-layout">
         <div className="section-block">
-          <div className="section-heading"><div><span className="index">Review queue / 01</span><h2>Discovered tools</h2></div><button className="secondary-action" type="button" disabled={capabilities.isFetching} onClick={() => void capabilities.refetch()}>{capabilities.isFetching ? "Refreshing…" : "Refresh tools"}</button></div>
+          <div className="section-heading"><div><span className="index">Review queue / 01</span><h2>Discovered tools</h2></div><button className="secondary-action" type="button" disabled={capabilities.isFetching || detail.isFetching || sourceConnection.isFetching} onClick={() => void Promise.all([capabilities.refetch(), connections.refetch(), ...(selectedId ? [detail.refetch()] : []), ...(detail.data?.connection_id ? [sourceConnection.refetch()] : [])])}>{capabilities.isFetching || detail.isFetching || sourceConnection.isFetching ? "Refreshing…" : "Refresh tools"}</button></div>
           <form className="inline-form" onSubmit={(event) => event.preventDefault()}>
             <label>Status<select aria-label="Capability status" value={filter} onChange={(event) => setFilter(event.target.value as CapabilityFilter)}><option value="pending_review">Pending review</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option><option value="unavailable">Unavailable</option><option value="all">All statuses</option></select></label>
           </form>
@@ -732,7 +731,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     queryFn: () => api.listConnections(),
   });
   const [argumentsError, setArgumentsError] = useState("");
-  const [confirmationClock, setConfirmationClock] = useState(() => Date.now());
+  const [expiredConfirmationToken, setExpiredConfirmationToken] = useState<string | null>(null);
   const runDetail = useQuery({
     queryKey: queryKey(scope, "run", selectedId),
     queryFn: () => api.getRun(selectedId as string),
@@ -759,7 +758,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
       if (query.state.status === "error") return false;
       const current = runDetail.data;
       if (!current || !terminal(current.status)) return 1500;
-      const argumentExpired = Date.parse(current.arguments_expires_at) <= Date.now();
+      const argumentExpired = current.arguments === null;
       const expiryPublished = query.state.data?.some((event) => event.event_type === "content_expired");
       return argumentExpired && !expiryPublished ? 10_000 : false;
     },
@@ -779,13 +778,14 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
   }, [eventsKey, queryClient, runDetail.data]);
   useEffect(() => {
     if (!preflight) return;
-    const delay = Math.max(0, Date.parse(preflight.expires_at) - Date.now());
-    const timer = window.setTimeout(() => setConfirmationClock(Date.now()), delay + 1);
+    const delay = Math.max(0, Date.parse(preflight.expires_at) - Date.parse(preflight.server_observed_at));
+    const timer = window.setTimeout(() => setExpiredConfirmationToken(preflight.confirmation_token), delay + 1);
     return () => window.clearTimeout(timer);
   }, [preflight]);
+  const confirmationExpired = preflight !== null && expiredConfirmationToken === preflight.confirmation_token;
   const prepare = useMutation({
     mutationFn: ({ versionId, args }: { versionId: string; args: Record<string, unknown> }) => api.preflight(versionId, args),
-    onSuccess: (prepared) => { setConfirmationClock(Date.now()); setDraft((current) => ({ ...current, preflight: prepared })); },
+    onSuccess: (prepared) => setDraft((current) => ({ ...current, preflight: prepared })),
   });
   const invoke = useMutation({
     mutationFn: ({ prepared, args }: { prepared: RunPreflight; args: Record<string, unknown> }) => {
@@ -831,7 +831,6 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     enabled: Boolean(preflight && selectedCapability),
   });
   const confirmedEndpoint = confirmationConnection.data?.versions.find((version) => version.id === preflight?.connection_version_id)?.endpoint_url;
-  const confirmationExpired = preflight ? Date.parse(preflight.expires_at) <= confirmationClock : false;
 
   function invalidatePreparedRun() {
     setDraft((current) => ({ ...current, preflight: null, pendingArguments: null })); prepare.reset(); invoke.reset();
@@ -914,7 +913,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
           {ledgerCapabilities.isError && <QueryFailure error={ledgerCapabilities.error} retry={() => void ledgerCapabilities.refetch()} />}
           {ledgerCapabilities.hasNextPage && <button className="secondary-action" disabled={ledgerCapabilities.isFetchingNextPage} type="button" onClick={() => void ledgerCapabilities.fetchNextPage()}>{ledgerCapabilities.isFetchingNextPage ? "Loading…" : "Load more filter tools"}</button>}
           {(hasRunFilters ? history.isPending : runs.isPending) ? <LoadingState label="Loading runs" /> : (hasRunFilters ? history.isError : runs.isError) ? <QueryFailure error={hasRunFilters ? history.error : runs.error} retry={() => void (hasRunFilters ? history.refetch() : runs.refetch())} /> : orderedRuns.length === 0 ? <EmptyState title="No runs retained" copy="Completed and in-flight work will appear here." /> : (
-            <ul className="select-list">{orderedRuns.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{capabilityNames.get(run.capability_id) ?? shortId(run.capability_id)}</strong><small>{connectionNames.get(run.connection_id) ?? shortId(run.connection_id)} · actor {shortId(run.actor_user_id)} · {shortId(run.id)} · {formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
+            <ul className="select-list">{orderedRuns.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{capabilityNames.get(run.capability_id) ?? shortId(run.capability_id)}</strong><small>{connectionNames.get(run.connection_id) ?? shortId(run.connection_id)} · actor {run.actor_user_id} · {shortId(run.id)} · {formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
           )}
           {!hasRunFilters && history.isError && <QueryFailure error={history.error} retry={() => void history.refetch()} />}
           {history.hasNextPage && <button className="secondary-action" disabled={history.isFetchingNextPage} type="button" onClick={() => void history.fetchNextPage()}>{history.isFetchingNextPage ? "Loading…" : "Load older runs"}</button>}
@@ -938,7 +937,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
         {selectedId === null ? <EmptyState title="Select a run" copy="Inspect lineage, safe output, and status events." /> : runDetail.isPending ? <LoadingState label="Loading run detail" /> : runDetail.isError ? <QueryFailure error={runDetail.error} retry={() => void runDetail.refetch()} /> : (
           <>
             <div className="detail-title"><div><span className="index">Run {shortId(runDetail.data.id)}</span><h2>Execution timeline</h2></div><StatusMark value={runDetail.data.status} /></div>
-            <dl className="detail-facts"><div><dt>Capability</dt><dd>{capabilityNames.get(runDetail.data.capability_id) ?? shortId(runDetail.data.capability_id)} · {shortId(runDetail.data.capability_version_id)}</dd></div><div><dt>Source connection</dt><dd>{connectionNames.get(runDetail.data.connection_id) ?? shortId(runDetail.data.connection_id)}</dd></div><div><dt>Initiating actor</dt><dd>{shortId(runDetail.data.actor_user_id)}</dd></div><div><dt>Connection version</dt><dd>{shortId(runDetail.data.connection_version_id)}</dd></div><div><dt>Deadline</dt><dd>{formatTime(runDetail.data.deadline)}</dd></div><div><dt>Updated</dt><dd>{formatTime(runDetail.data.updated_at)}</dd></div></dl>
+            <dl className="detail-facts"><div><dt>Capability</dt><dd>{capabilityNames.get(runDetail.data.capability_id) ?? shortId(runDetail.data.capability_id)} · {shortId(runDetail.data.capability_version_id)}</dd></div><div><dt>Source connection</dt><dd>{connectionNames.get(runDetail.data.connection_id) ?? shortId(runDetail.data.connection_id)}</dd></div><div><dt>Initiating actor</dt><dd><code>{runDetail.data.actor_user_id}</code></dd></div><div><dt>Connection version</dt><dd>{shortId(runDetail.data.connection_version_id)}</dd></div><div><dt>Deadline</dt><dd>{formatTime(runDetail.data.deadline)}</dd></div><div><dt>Updated</dt><dd>{formatTime(runDetail.data.updated_at)}</dd></div></dl>
             {runDetail.data.cancellation_requested && !terminal(runDetail.data.status) && <p className="incident-note">Cancellation requested; waiting for the worker to reach a safe boundary.</p>}
             {canOperate(role) && !terminal(runDetail.data.status) && !runDetail.data.cancellation_requested && <button className="danger-action" disabled={cancel.isPending} type="button" onClick={() => { const key = cancelKeys.current.get(runDetail.data.id) ?? mutationId(); cancelKeys.current.set(runDetail.data.id, key); cancel.mutate({ id: runDetail.data.id, key }); }}>Request cancellation</button>}
             {cancel.isError && <p className="field-error" role="alert">{failureMessage(cancel.error)}</p>}
@@ -980,7 +979,7 @@ function Audit({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
         <label>Before<input type="datetime-local" value={localDateTimeValue(draft.occurred_before)} onChange={(event) => setDraft({ ...draft, occurred_before: event.target.value ? new Date(event.target.value).toISOString() : undefined })} /></label>
         <div className="action-strip"><button type="button" onClick={() => { setDraft({}); setFilters({}); }}>Clear</button><button className="secondary-action" type="submit">Apply filters</button></div>
       </form>
-      {events.isPending ? <LoadingState label="Loading audit events" /> : events.isError ? <QueryFailure error={events.error} retry={() => void events.refetch()} /> : rows.length === 0 ? <EmptyState title="No audit events" copy="Authorized mutations will appear here." /> : <><ol className="timeline">{rows.map((event) => <li key={event.id}><span aria-hidden="true" /><div><strong>{event.action.replaceAll(".", " ")}</strong><small>{formatTime(event.occurred_at)} · {event.outcome}</small><code>{event.resource_type} / {shortId(event.resource_id)}</code><small>Actor {shortId(event.actor_user_id)} · Correlation {shortId(event.correlation_id)}</small></div></li>)}</ol>{events.hasNextPage && <button className="secondary-action" disabled={events.isFetchingNextPage} type="button" onClick={() => void events.fetchNextPage()}>{events.isFetchingNextPage ? "Loading…" : "Load older events"}</button>}</>}
+      {events.isPending ? <LoadingState label="Loading audit events" /> : events.isError ? <QueryFailure error={events.error} retry={() => void events.refetch()} /> : rows.length === 0 ? <EmptyState title="No audit events" copy="Authorized mutations will appear here." /> : <><ol className="timeline">{rows.map((event) => <li key={event.id}><span aria-hidden="true" /><div><strong>{event.action.replaceAll(".", " ")}</strong><small>{formatTime(event.occurred_at)} · {event.outcome}</small><code>{event.resource_type} / {shortId(event.resource_id)}</code><small>Actor {event.actor_user_id} · Correlation {shortId(event.correlation_id)}</small></div></li>)}</ol>{events.hasNextPage && <button className="secondary-action" disabled={events.isFetchingNextPage} type="button" onClick={() => void events.fetchNextPage()}>{events.isFetchingNextPage ? "Loading…" : "Load older events"}</button>}</>}
     </section>
   </div>;
 }
