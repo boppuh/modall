@@ -26,7 +26,7 @@ at most one dispatch, and release transient content.
 | Duplicate side effects | Durable nonce/idempotency records, session and dispatch fences, indeterminate terminal state | `tests/test_execution.py`, `tests/test_postgres_concurrency.py` |
 | Schema/result resource exhaustion | Byte, depth, regex, process memory, and timeout bounds | `tests/test_mcp_adapter.py`, `tests/test_execution.py` |
 | Silent capability drift | Immutable snapshots/versions and exact-version approval | `tests/test_registry.py`, `tests/test_discovery_publication.py` |
-| Restored work dispatches twice | Installation epoch, startup quarantine, bounded reconciliation | restore qualification in `tests/test_execution.py` |
+| Restored work dispatches twice | Installation epoch, startup quarantine, bounded reconciliation | quarantine state-machine tests plus the pending actual backup/restore manual gate |
 | API abuse | Configured per-peer rate and concurrency admission plus bounded query pagination | `tests/test_ops.py`, API contract tests |
 | Retained content outlives policy | Absolute database-clock expiry and bounded worker cleanup | `tests/test_execution.py` |
 

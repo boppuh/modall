@@ -139,6 +139,7 @@ def test_api_metrics_and_rate_limit_are_payload_free() -> None:
         assert "UNBOUNDED-METHOD-TOKEN" not in exposed.text
         assert 'method="OTHER"' in exposed.text
         assert 'modall_http_responses_total{scope="v1",status_class="4xx"}' in exposed.text
+        assert "modall_http_in_flight 0" in exposed.text
 
     asyncio.run(scenario())
 

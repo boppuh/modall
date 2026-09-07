@@ -12,7 +12,7 @@ Release candidate: pending. This file separates reproducible evidence from human
 | Migration/clean install | CI Python migration cycle | upgrade, drift check, downgrade, fresh upgrade pass |
 | Local topology | CI Compose build and `docker compose config --quiet` | pass |
 | Release artifacts | `make release-artifacts` | manifest, dashboard, alerts, runbook, threat model valid |
-| Restore/no-duplicate invariant | `uv run pytest --no-cov tests/test_execution.py -k test_restore_quarantine_fences_old_jobs_and_retention_erases_content` | pass |
+| Restore-quarantine state machine | `uv run pytest --no-cov tests/test_execution.py -k test_restore_quarantine_fences_old_jobs_and_retention_erases_content` | pass |
 | Admission/load bounds | active-run admission, API concurrency/rate, and bounded pagination tests | pass |
 
 ## Manual gates
@@ -20,8 +20,9 @@ Release candidate: pending. This file separates reproducible evidence from human
 These are intentionally not marked complete by automation.
 
 - [ ] Primary reviewer: reference journey, failure diagnosis, and release scope accepted.
-- [ ] Qualified iOS engineer: independently executes deploy, restore, rollback, disable, rotation,
-  outage, keyboard, and screen-reader procedures.
+- [ ] Qualified iOS engineer: independently executes deploy, an actual database backup/restore with
+  a counted upstream side effect, rollback, disable, rotation, outage, keyboard, and screen-reader
+  procedures.
 - [ ] Independent security reviewer: reviews the threat model and records no open release blockers.
 - [ ] Staging owner: records backup identifier, deployed revision, dashboards, and alert routing.
 

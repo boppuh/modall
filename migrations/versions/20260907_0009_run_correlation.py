@@ -15,18 +15,22 @@ def upgrade() -> None:
     op.add_column("runs", sa.Column("correlation_id", sa.Uuid(), nullable=True))
     op.execute(
         """
-        UPDATE runs AS r
-        SET correlation_id = (
-            SELECT event.correlation_id
+        WITH created_run_events AS (
+            SELECT DISTINCT ON (event.workspace_id, event.resource_id)
+                event.workspace_id,
+                event.resource_id,
+                event.correlation_id
             FROM audit_events AS event
-            WHERE event.workspace_id = r.workspace_id
-              AND event.resource_type = 'run'
-              AND event.resource_id = r.id
+            WHERE event.resource_type = 'run'
               AND event.action = 'run.created'
               AND event.outcome = 'succeeded'
-            ORDER BY event.occurred_at, event.id
-            LIMIT 1
+            ORDER BY event.workspace_id, event.resource_id, event.occurred_at, event.id
         )
+        UPDATE runs AS r
+        SET correlation_id = event.correlation_id
+        FROM created_run_events AS event
+        WHERE event.workspace_id = r.workspace_id
+          AND event.resource_id = r.id
         """
     )
     op.execute("UPDATE runs SET correlation_id = id WHERE correlation_id IS NULL")

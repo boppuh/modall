@@ -73,6 +73,7 @@ def create_app(
             "modall_http_responses_total", amount=0, scope="v1", status_class=status_class
         )
     process_metrics.initialize_http(scope="v1")
+    process_metrics.gauge("modall_http_in_flight", 0)
     database_probe: DatabaseProbe | None = None
     owns_engine = engine is None
     engine = engine or create_engine(async_database_url(str(resolved_settings.database_url)))
@@ -343,6 +344,7 @@ def run() -> None:
         reload=False,
         log_level=settings.log_level.lower(),
         access_log=False,
+        log_config=None,
     )
 
 

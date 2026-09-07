@@ -15,7 +15,7 @@ REQUIRED_AUTOMATED_GATES = {
     "accessibility-reference-journey",
     "migration-clean-install",
     "compose-build",
-    "restore-fence",
+    "restore-quarantine-state-machine",
     "bounded-load",
     "release-artifacts",
 }
