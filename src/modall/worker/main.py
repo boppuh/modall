@@ -220,7 +220,7 @@ def build_execution_runtime(
         if policy_version != "v1":
             raise KeyError("unknown endpoint policy version")
         return McpClientAdapter(
-            endpoint_policy=EndpointPolicy(environment=settings.environment),
+            endpoint_policy=_invocation_endpoint_policy(settings),
             limits=_invocation_transport_limits(limits),
             max_result_bytes=limits.max_result_bytes,
             schema_validation_timeout_seconds=limits.schema_validation_timeout_seconds,
@@ -236,6 +236,13 @@ def build_execution_runtime(
             metrics=metrics,
         ),
         execution_service_factory,
+    )
+
+
+def _invocation_endpoint_policy(settings: Settings) -> EndpointPolicy:
+    return EndpointPolicy(
+        environment=settings.environment,
+        allow_loopback_http=settings.environment in {"local", "test"},
     )
 
 

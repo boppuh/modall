@@ -289,9 +289,19 @@ def create_mcp_fixture_app() -> FastAPI:
         if content_type != "application/json":
             return JSONResponse({"error": "invalid content type"}, status_code=415)
 
-        payload = await request.json()
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "invalid JSON-RPC envelope"}, status_code=400)
         method = payload.get("method")
         request_id = payload.get("id")
+        params = payload.get("params", {})
+        if not isinstance(params, dict) or (
+            method == "tools/call" and not isinstance(params.get("arguments", {}), dict)
+        ):
+            return JSONResponse({"error": "invalid JSON-RPC parameters"}, status_code=400)
         is_initialized_notification = method == "notifications/initialized"
         if (
             payload.get("jsonrpc") != "2.0"
@@ -303,7 +313,7 @@ def create_mcp_fixture_app() -> FastAPI:
         if profile in {"redirect", "authenticated-redirect"}:
             return RedirectResponse("https://redirect.invalid/mcp", status_code=307)
         if method == "initialize":
-            requested_revision = payload.get("params", {}).get("protocolVersion")
+            requested_revision = params.get("protocolVersion")
             if requested_revision != PROTOCOL_REVISION:
                 return JSONResponse({"error": "unsupported requested protocol"}, status_code=400)
             revision = "2025-11-25" if profile == "protocol-mismatch" else PROTOCOL_REVISION
@@ -378,7 +388,7 @@ def create_mcp_fixture_app() -> FastAPI:
             return StreamingResponse(abort_body(), media_type="application/json")
         if method == "tools/list":
             tools = _tools(session[3])
-            cursor = payload.get("params", {}).get("cursor")
+            cursor = params.get("cursor")
             result: dict[str, Any]
             if cursor is None:
                 result = {"tools": tools[:2], "nextCursor": f"{mcp_session_id}:page-2"}
@@ -453,7 +463,6 @@ def create_mcp_fixture_app() -> FastAPI:
                     raise ConnectionError("fixture disconnect")
 
                 return StreamingResponse(sensitive_notification(), media_type="text/event-stream")
-            params = payload.get("params", {})
             name = params.get("name")
             arguments = params.get("arguments", {})
             if profile == "invalid-call-result":

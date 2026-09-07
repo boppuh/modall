@@ -285,7 +285,7 @@ class LimitedByteStream(httpx.AsyncByteStream):
         if self._buffer_json_document:
             body = bytes(self._structured_buffer)
             response = _jsonrpc_response(body, self._expected_response_id)
-            malformed_success = response is None and self._status_code == 200
+            malformed_success = response is None and self._status_code in {200, 204}
             client_rejection = 400 <= self._status_code < 500
             if client_rejection or malformed_success or (response is not None and response[0]):
                 self._mark_complete_once()
@@ -581,6 +581,9 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         method, request_id = _request_envelope(request)
         response = await self._inner.handle_async_request(request)
         is_tool_call = method == "tools/call"
+        if is_tool_call and 400 <= response.status_code < 500:
+            self._mark_tool_call_response_complete()
+            self._mark_tool_call_failure()
         content_encoding = response.headers.get("content-encoding", "identity").lower()
         if content_encoding != "identity":
             await response.aclose()
