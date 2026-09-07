@@ -448,6 +448,8 @@ class ExecutionService:
                 now,
                 RunFailureCode.DEADLINE_EXCEEDED,
             )
+            if reconciled_jobs is not None:
+                reconciled_jobs.append(self._reconciled_job(run, job, RunStatus.TIMED_OUT))
             await self._session.flush()
             return None
         target_is_current = await self._claim_target_is_current(run)
@@ -459,6 +461,8 @@ class ExecutionService:
                 now,
                 RunFailureCode.DEADLINE_EXCEEDED,
             )
+            if reconciled_jobs is not None:
+                reconciled_jobs.append(self._reconciled_job(run, job, RunStatus.TIMED_OUT))
             await self._session.flush()
             return None
         if not target_is_current:

@@ -25,6 +25,7 @@ from modall.execution.types import (
     ExecutionLimits,
     HmacKeyVersion,
     JobLease,
+    ReconciledJob,
     RunFailureCode,
     RunStatus,
     SystemExecutionAuthority,
@@ -1710,13 +1711,19 @@ def test_admission_and_claim_refresh_time_after_slow_validation_and_target_locks
                     return True
 
                 monkeypatch.setattr(changing_clock, "_claim_target_is_current", slow_target)
+                reconciled_jobs: list[ReconciledJob] = []
                 assert (
                     await changing_clock.claim_job(
-                        worker_id="slow-worker", lease_duration=timedelta(seconds=30)
+                        worker_id="slow-worker",
+                        lease_duration=timedelta(seconds=30),
+                        reconciled_jobs=reconciled_jobs,
                     )
                     is None
                 )
                 assert run.status == RunStatus.TIMED_OUT.value
+                assert len(reconciled_jobs) == 1
+                assert reconciled_jobs[0].run_id == run.id
+                assert reconciled_jobs[0].status == RunStatus.TIMED_OUT
                 assert await session.scalar(select(func.count()).select_from(RunAttempt)) == 0
 
     asyncio.run(scenario())
