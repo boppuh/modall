@@ -168,6 +168,14 @@ def test_api_metrics_and_rate_limit_are_payload_free() -> None:
                 "/v1/not-a-real-resource",
                 headers={"X-Real-IP": "203.0.113.1"},
             )
+            preflight = await client.options(
+                "/v1/not-a-real-resource",
+                headers={
+                    "Origin": "https://console.example",
+                    "Access-Control-Request-Method": "GET",
+                    "X-Real-IP": "203.0.113.1",
+                },
+            )
             other_client = await client.get(
                 "/v1/not-a-real-resource", headers={"X-Real-IP": "203.0.113.2"}
             )
@@ -179,6 +187,8 @@ def test_api_metrics_and_rate_limit_are_payload_free() -> None:
         assert second.headers["Retry-After"] == "60"
         assert second.headers["Access-Control-Allow-Origin"] == "https://console.example"
         assert unusual.status_code == 429
+        assert preflight.status_code == 200
+        assert preflight.headers["Access-Control-Allow-Origin"] == "https://console.example"
         assert other_client.status_code == 404
         assert 'route="unmatched"' in exposed.text
         assert "not-a-real-resource" not in exposed.text

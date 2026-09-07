@@ -144,7 +144,7 @@ def create_app(
         acquired = False
         response: Response
         try:
-            if not request.url.path.startswith("/v1/"):
+            if request.method == "OPTIONS" or not request.url.path.startswith("/v1/"):
                 response = await call_next(request)
             elif not rate_limiter.allow(peer):
                 response = error_response(

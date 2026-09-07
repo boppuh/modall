@@ -468,6 +468,8 @@ class ExecutionService:
                 now,
                 RunFailureCode.PREPARATION_FAILED,
             )
+            if reconciled_jobs is not None:
+                reconciled_jobs.append(self._reconciled_job(run, job, RunStatus.FAILED))
             await self._session.flush()
             return None
         if job.status == JobStatus.LEASED.value:

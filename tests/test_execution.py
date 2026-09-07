@@ -1497,6 +1497,58 @@ def test_runner_emits_terminal_metric_for_reconciled_expired_dispatch() -> None:
     asyncio.run(scenario())
 
 
+def test_runner_emits_terminal_metric_for_stale_claim_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="runner-stale-target")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=now)
+                token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "stale"},
+                )
+                run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "stale"},
+                    confirmation_token=token.confirmation_token,
+                    idempotency_key="runner-stale-target",
+                )
+
+            monkeypatch.setattr(
+                "modall.execution.service.QUALIFIED_PROTOCOL_REVISION", "future-revision"
+            )
+            metrics = MetricsRegistry()
+            runner = InvocationRunner(
+                session_factory=factory,
+                execution_service_factory=lambda session: service(session, now=now),
+                secret_provider=FixtureSecretProvider({}),
+                adapter_factory=lambda _: pytest.fail("a stale target must not be invoked"),
+                metrics=metrics,
+            )
+
+            assert not await runner.claim_and_run(
+                worker_id="claim-worker", lease_duration=timedelta(seconds=30)
+            )
+            async with factory() as session:
+                stored = await session.get(Run, run.id)
+                assert stored is not None
+                assert stored.status == RunStatus.FAILED.value
+                assert stored.safe_error_code == RunFailureCode.PREPARATION_FAILED.value
+            assert (
+                'modall_worker_invocations_total{event="invocation_terminal",outcome="failed"} 1'
+                in metrics.render()
+            )
+
+    asyncio.run(scenario())
+
+
 def test_worker_rechecks_its_qualified_protocol_at_claim_and_each_fence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
