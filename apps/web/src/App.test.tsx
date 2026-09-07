@@ -74,6 +74,7 @@ function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
     getCapability: vi.fn().mockResolvedValue({ ...capability, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Search", description: "Search public records", input_schema: { type: "object" }, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false }),
     capabilityAction: vi.fn().mockResolvedValue(capability),
     listRuns: vi.fn().mockResolvedValue([run]),
+    listRunPage: vi.fn().mockResolvedValue({ items: [run] }),
     getRun: vi.fn().mockResolvedValue(run),
     listRunEvents: vi.fn().mockResolvedValue([{ id: connectionId, sequence: 1, event_type: "admitted", status: "queued", safe_error_code: null, occurred_at: timestamp }]),
     preflight: vi.fn().mockImplementation(() => Promise.resolve({ capability_version_id: versionId, connection_version_id: versionId, argument_digest: "c".repeat(64), confirmation_token: "confirmation", expires_at: new Date(Date.now() + 60_000).toISOString() })),
@@ -298,7 +299,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Runs" })).toBeTruthy();
     expect(await screen.findByRole("button", { name: /tools\/search.*Internal developer tools.*55555555/ })).toBeTruthy();
 
-    await screen.findByRole("option", { name: /tools\/search/ });
+    await screen.findAllByRole("option", { name: /tools\/search/ });
     fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
     fireEvent.change(screen.getByLabelText("Arguments"), { target: { value: "[]" } });
     fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
@@ -319,12 +320,26 @@ describe("App", () => {
     await waitFor(() => expect(api.cancelRun).toHaveBeenCalledWith(runId, expect.any(String)));
   });
 
+  it("filters and explicitly paginates the run ledger", async () => {
+    const listRunPage = vi.fn<ControlPlane["listRunPage"]>().mockResolvedValue({ items: [run], nextCursor: "older" });
+    renderApp(fakeApi({ listRunPage }));
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
+    await waitFor(() => expect(listRunPage).toHaveBeenCalled());
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "failed" } });
+    fireEvent.change(screen.getByLabelText("Actor ID"), { target: { value: connectionId } });
+    fireEvent.change(screen.getByLabelText("Min duration (s)"), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    await waitFor(() => expect(listRunPage).toHaveBeenCalledWith(expect.objectContaining({ status: "failed", actor_id: connectionId, min_duration_seconds: 5 }), undefined));
+    fireEvent.click(await screen.findByRole("button", { name: "Load older runs" }));
+    await waitFor(() => expect(listRunPage).toHaveBeenCalledWith(expect.objectContaining({ status: "failed" }), "older"));
+  });
+
   it("preserves a run key across ambiguous submission recovery", async () => {
     const createRun = vi.fn<ControlPlane["createRun"]>().mockRejectedValue(new Error("response lost"));
     const api = fakeApi({ createRun });
     renderApp(api);
     fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
-    await screen.findByRole("option", { name: /tools\/search/ });
+    await screen.findAllByRole("option", { name: /tools\/search/ });
     fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
     fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
     let confirm = await screen.findByRole("button", { name: "Confirm and run" });
@@ -375,7 +390,7 @@ describe("App", () => {
     const api = fakeApi({ getConnection });
     renderApp(api);
     fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
-    await screen.findByRole("option", { name: /tools\/search/ });
+    await screen.findAllByRole("option", { name: /tools\/search/ });
     fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
     fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
     fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
@@ -408,7 +423,9 @@ describe("App", () => {
       overview: vi.fn().mockRejectedValue(new ApiFailure("access_denied", "Workspace denied.", connectionId)),
     });
     const deniedRender = renderApp(denied);
-    expect((await screen.findByRole("alert")).textContent).toContain("Reference 22222222…2222");
+    const deniedAlert = await screen.findByRole("alert");
+    expect(deniedAlert.textContent).toContain("Code access_denied");
+    expect(deniedAlert.textContent).toContain("Reference 22222222…2222");
     deniedRender.unmount();
 
     localStorage.clear();
@@ -498,7 +515,7 @@ describe("App", () => {
     const api = fakeApi({ createRun: vi.fn().mockRejectedValue(new ApiFailure("confirmation_expired", "Confirmation expired.")) });
     renderApp(api);
     fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
-    await screen.findByRole("option", { name: /tools\/search/ });
+    await screen.findAllByRole("option", { name: /tools\/search/ });
     fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
     fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
     const confirm = await screen.findByRole("button", { name: "Confirm and run" });

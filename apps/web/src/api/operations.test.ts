@@ -147,6 +147,11 @@ describe("control-plane operations", () => {
     expect(await api.listRuns()).toHaveLength(1);
     const runRequests = requests.filter((request) => new URL(request.url).pathname === "/v1/runs" && request.method === "GET");
     expect(runRequests.some((request) => new URL(request.url).searchParams.get("active") === "true")).toBe(true);
+    expect((await api.listRunPage({ status: "failed", actor_id: otherId }, "older")).items).toHaveLength(1);
+    const filteredRunUrl = new URL(requests.at(-1)?.url ?? "http://localhost");
+    expect(filteredRunUrl.searchParams.get("status")).toBe("failed");
+    expect(filteredRunUrl.searchParams.get("actor_id")).toBe(otherId);
+    expect(filteredRunUrl.searchParams.get("cursor")).toBe("older");
     expect((await api.getRun(id)).status).toBe("succeeded");
     expect(await api.listRunEvents(id)).toEqual([]);
     const preflight = await api.preflight(otherId, { query: "status" });

@@ -839,6 +839,20 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             assert cancelled.status_code == 200
             assert cancelled.json()["status"] == "cancelled"
             assert cancelled.json()["safe_error_code"] == "cancelled_before_dispatch"
+            filtered_cancelled = await client.get(
+                "/v1/runs",
+                headers=headers,
+                params={
+                    "status": "cancelled",
+                    "capability_id": str(version.capability_id),
+                    "actor_id": cancelled.json()["actor_user_id"],
+                    "created_after": "2020-01-01T00:00:00Z",
+                    "created_before": "2030-01-01T00:00:00Z",
+                    "min_duration_seconds": 0,
+                    "max_duration_seconds": 300,
+                },
+            )
+            assert [item["id"] for item in filtered_cancelled.json()["items"]] == [run_id]
 
             replayed_cancel = await client.post(
                 f"/v1/runs/{run_id}/cancel",

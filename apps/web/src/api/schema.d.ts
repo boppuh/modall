@@ -1864,6 +1864,12 @@ export interface operations {
                 cursor?: string | null;
                 status?: string | null;
                 active?: boolean;
+                capability_id?: string | null;
+                actor_id?: string | null;
+                created_after?: string | null;
+                created_before?: string | null;
+                min_duration_seconds?: number | null;
+                max_duration_seconds?: number | null;
             };
             header?: {
                 "X-Workspace-ID"?: string | null;

@@ -8,6 +8,7 @@ import {
   type CapabilityStatus,
   type ControlPlane,
   type RegistrySearch,
+  type RunFilters,
   type RunPreflight,
 } from "./api/operations";
 import {
@@ -103,7 +104,7 @@ function capabilityPath(filter: CapabilityFilter, selectedId: string | null = nu
 function failureMessage(error: unknown): string {
   if (error instanceof ApiFailure) {
     const reference = error.correlationId ? ` Reference ${shortId(error.correlationId)}.` : "";
-    return `${error.message}${reference}`;
+    return `${error.message} Code ${error.code}.${reference}`;
   }
   return "The control plane could not be reached. Check the API and try again.";
 }
@@ -662,13 +663,19 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
   const queryClient = useQueryClient();
   const { selectedVersionId, argumentsText, pendingArguments, preflight } = draft;
   const finalEventFetchRun = useRef<string | null>(null);
-  const retentionEventTimers = useRef(new Map<string, number>());
   const runsKey = useMemo(() => queryKey(scope, "runs"), [scope]);
   const eventsKey = useMemo(() => queryKey(scope, "run-events", selectedId), [scope, selectedId]);
   const runs = useQuery({
     queryKey: runsKey,
     queryFn: () => api.listRuns(),
     refetchInterval: (query) => query.state.status === "error" ? false : 3000,
+  });
+  const [runFilters, setRunFilters] = useState<RunFilters>({});
+  const history = useInfiniteQuery({
+    queryKey: queryKey(scope, "run-history", runFilters),
+    queryFn: ({ pageParam }) => api.listRunPage(runFilters, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
   });
   const capabilities = useQuery({
     queryKey: queryKey(scope, "capabilities"),
@@ -688,7 +695,14 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     queryKey: eventsKey,
     queryFn: () => api.listRunEvents(selectedId as string),
     enabled: selectedId !== null,
-    refetchInterval: (query) => query.state.status === "error" || (runDetail.data && terminal(runDetail.data.status)) ? false : 1500,
+    refetchInterval: (query) => {
+      if (query.state.status === "error") return false;
+      const current = runDetail.data;
+      if (!current || !terminal(current.status)) return 1500;
+      const argumentExpired = Date.parse(current.arguments_expires_at) <= Date.now();
+      const expiryPublished = query.state.data?.some((event) => event.event_type === "content_expired");
+      return argumentExpired && !expiryPublished ? 10_000 : false;
+    },
   });
   useEffect(() => {
     const current = runDetail.data;
@@ -718,24 +732,6 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     }, Math.max(0, nextExpiry - Date.now()) + 1);
     return () => window.clearTimeout(timer);
   }, [eventsKey, queryClient, runDetail.data, scope]);
-  useEffect(() => {
-    const current = runDetail.data;
-    if (!current || !terminal(current.status)) return;
-    for (const expiry of [current.arguments_expires_at, current.result_expires_at]) {
-      if (expiry === null) continue;
-      const timerKey = `${current.id}:${expiry}`;
-      if (retentionEventTimers.current.has(timerKey)) continue;
-      const timer = window.setTimeout(() => {
-        retentionEventTimers.current.delete(timerKey);
-        void queryClient.refetchQueries({ queryKey: queryKey(scope, "run-events", current.id), exact: true });
-      }, Math.max(0, Date.parse(expiry) - Date.now()) + 61_000);
-      retentionEventTimers.current.set(timerKey, timer);
-    }
-  }, [queryClient, runDetail.data, scope]);
-  useEffect(() => () => {
-    for (const timer of retentionEventTimers.current.values()) window.clearTimeout(timer);
-    retentionEventTimers.current.clear();
-  }, []);
   useEffect(() => {
     if (!preflight) return;
     const delay = Math.max(0, Date.parse(preflight.expires_at) - Date.now());
@@ -777,7 +773,9 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
   const enabledCapabilities = (capabilities.data ?? []).filter((item) => item.status === "enabled" && item.enabled_version_id);
   const connectionNames = new Map((connections.data ?? []).map((item) => [item.id, item.name]));
   const capabilityNames = new Map((capabilities.data ?? []).map((item) => [item.id, item.tool_identity]));
-  const orderedRuns = [...(runs.data ?? [])].sort((left, right) => right.created_at.localeCompare(left.created_at));
+  const runIndex = new Map((history.data?.pages.flatMap((page) => page.items) ?? []).map((run) => [run.id, run]));
+  if (Object.keys(runFilters).length === 0) for (const run of runs.data ?? []) runIndex.set(run.id, run);
+  const orderedRuns = [...runIndex.values()].sort((left, right) => right.created_at.localeCompare(left.created_at));
   const selectedCapability = enabledCapabilities.find((item) => item.enabled_version_id === selectedVersionId);
   const confirmationConnection = useQuery({
     queryKey: queryKey(scope, "confirmation-connection", selectedCapability?.connection_id),
@@ -809,6 +807,27 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     }
   }
 
+  function submitRunFilters(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const status = formValue(data, "run-status");
+    const capabilityId = formValue(data, "run-capability");
+    const actorId = formValue(data, "run-actor");
+    const createdAfter = formValue(data, "run-created-after");
+    const createdBefore = formValue(data, "run-created-before");
+    const minDuration = formValue(data, "run-min-duration");
+    const maxDuration = formValue(data, "run-max-duration");
+    setRunFilters({
+      ...(status ? { status } : {}),
+      ...(capabilityId ? { capability_id: capabilityId } : {}),
+      ...(actorId ? { actor_id: actorId } : {}),
+      ...(createdAfter ? { created_after: new Date(createdAfter).toISOString() } : {}),
+      ...(createdBefore ? { created_before: new Date(createdBefore).toISOString() } : {}),
+      ...(minDuration ? { min_duration_seconds: Number(minDuration) } : {}),
+      ...(maxDuration ? { max_duration_seconds: Number(maxDuration) } : {}),
+    });
+  }
+
   return (
     <div className="page-flow">
       <header className="page-heading"><div><p className="kicker">Durable invocation</p><h1>Runs</h1><p>Preflight exact inputs, confirm once, then follow the append-only timeline.</p></div></header>
@@ -829,10 +848,20 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
         </div>
         <div className="section-block run-inventory">
           <div className="section-heading"><div><span className="index">Ledger / 02</span><h2>Recent runs</h2></div></div>
-          {runs.isPending ? <LoadingState label="Loading runs" /> : runs.isError ? <QueryFailure error={runs.error} retry={() => void runs.refetch()} /> : runs.data.length === 0 ? <EmptyState title="No runs retained" copy="Completed and in-flight work will appear here." /> : (
+          <form className="audit-filters" onSubmit={submitRunFilters}>
+            <label>Status<select name="run-status" defaultValue={runFilters.status ?? ""}><option value="">Any</option>{["queued", "preparing", "session_fenced", "dispatch_fenced", "succeeded", "failed", "cancelled", "timed_out", "indeterminate"].map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
+            <label>Capability<select name="run-capability" defaultValue={runFilters.capability_id ?? ""}><option value="">Any</option>{(capabilities.data ?? []).map((item) => <option key={item.id} value={item.id}>{item.tool_identity}</option>)}</select></label>
+            <label>Actor ID<input name="run-actor" defaultValue={runFilters.actor_id ?? ""} placeholder="UUID" pattern="[0-9a-fA-F-]{36}" /></label>
+            <label>Created after<input name="run-created-after" type="datetime-local" defaultValue={localDateTimeValue(runFilters.created_after)} /></label>
+            <label>Created before<input name="run-created-before" type="datetime-local" defaultValue={localDateTimeValue(runFilters.created_before)} /></label>
+            <label>Min duration (s)<input name="run-min-duration" type="number" min="0" defaultValue={runFilters.min_duration_seconds} /></label>
+            <label>Max duration (s)<input name="run-max-duration" type="number" min="0" defaultValue={runFilters.max_duration_seconds} /></label>
+            <div className="action-strip"><button type="button" onClick={() => setRunFilters({})}>Clear</button><button className="secondary-action" type="submit">Apply filters</button></div>
+          </form>
+          {history.isPending ? <LoadingState label="Loading runs" /> : history.isError ? <QueryFailure error={history.error} retry={() => void history.refetch()} /> : orderedRuns.length === 0 ? <EmptyState title="No runs retained" copy="Completed and in-flight work will appear here." /> : (
             <ul className="select-list">{orderedRuns.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{capabilityNames.get(run.capability_id) ?? shortId(run.capability_id)}</strong><small>{connectionNames.get(run.connection_id) ?? shortId(run.connection_id)} · actor {shortId(run.actor_user_id)} · {shortId(run.id)} · {formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
           )}
-          {(runs.data?.length ?? 0) === 100 && <p className="field-help">Showing the 100 most recent runs.</p>}
+          {history.hasNextPage && <button className="secondary-action" disabled={history.isFetchingNextPage} type="button" onClick={() => void history.fetchNextPage()}>{history.isFetchingNextPage ? "Loading…" : "Load older runs"}</button>}
         </div>
       </section>
       {preflight && pendingArguments && (

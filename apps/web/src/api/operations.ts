@@ -18,6 +18,15 @@ export type RunEvent = Schemas["RunEventResponse"];
 export type RunPreflight = Schemas["RunPreflightResponse"];
 export type AuditEvent = Schemas["AuditEventResponse"];
 export type AuditFilters = Omit<NonNullable<paths["/v1/audit-events"]["get"]["parameters"]["query"]>, "cursor" | "limit">;
+export type RunFilters = {
+  status?: string;
+  capability_id?: string;
+  actor_id?: string;
+  created_after?: string;
+  created_before?: string;
+  min_duration_seconds?: number;
+  max_duration_seconds?: number;
+};
 export type EffectiveSession = Schemas["SessionResponse"];
 
 export class ApiFailure extends Error {
@@ -87,6 +96,7 @@ export interface ControlPlane {
   getCapability(id: string): Promise<CapabilityDetail>;
   capabilityAction(versionId: string, action: "enable" | "disable", idempotencyKey: string): Promise<Capability>;
   listRuns(): Promise<Run[]>;
+  listRunPage(filters?: RunFilters, cursor?: string): Promise<{ items: Run[]; nextCursor?: string }>;
   getRun(id: string): Promise<Run>;
   listRunEvents(id: string): Promise<RunEvent[]>;
   preflight(versionId: string, argumentsValue: Record<string, unknown>): Promise<RunPreflight>;
@@ -209,6 +219,11 @@ class GeneratedControlPlane implements ControlPlane {
     const byId = new Map(recent.items.map((run) => [run.id, run]));
     for (const run of active.items) byId.set(run.id, run);
     return [...byId.values()].sort((left, right) => right.created_at.localeCompare(left.created_at));
+  }
+
+  async listRunPage(filters: RunFilters = {}, cursor?: string): Promise<{ items: Run[]; nextCursor?: string }> {
+    const page = await unwrap(this.client.GET("/v1/runs", { params: { query: { limit: 100, cursor, ...filters } } }));
+    return { items: page.items, ...(page.page.next_cursor ? { nextCursor: page.page.next_cursor } : {}) };
   }
 
   getRun(id: string): Promise<Run> {

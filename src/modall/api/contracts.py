@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Header, Query, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Select, and_, or_, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import InstrumentedAttribute, defer
 
@@ -849,6 +849,12 @@ def build_control_plane_router(
         cursor: str | None = None,
         run_status: str | None = Query(default=None, alias="status"),
         active: bool = False,
+        capability_id: UUID | None = None,
+        actor_id: UUID | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        min_duration_seconds: Annotated[int | None, Query(ge=0)] = None,
+        max_duration_seconds: Annotated[int | None, Query(ge=0)] = None,
     ) -> RunPage:
         statement: Select[Any] = (
             select(Run)
@@ -868,6 +874,21 @@ def build_control_plane_router(
             )
         elif run_status is not None:
             statement = statement.where(Run.status == run_status)
+        if capability_id is not None:
+            statement = statement.where(Run.capability_id == capability_id)
+        if actor_id is not None:
+            statement = statement.where(Run.actor_user_id == actor_id)
+        if created_after is not None:
+            statement = statement.where(Run.created_at >= created_after)
+        if created_before is not None:
+            statement = statement.where(Run.created_at < created_before)
+        duration_seconds = func.extract("epoch", Run.terminal_at) - func.extract(
+            "epoch", Run.created_at
+        )
+        if min_duration_seconds is not None:
+            statement = statement.where(duration_seconds >= min_duration_seconds)
+        if max_duration_seconds is not None:
+            statement = statement.where(duration_seconds <= max_duration_seconds)
         statement = statement.order_by(Run.created_at.desc(), Run.id.desc())
         if cursor is not None:
             cursor_time, cursor_id = _decode_audit_cursor(cursor)
