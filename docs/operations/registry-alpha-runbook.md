@@ -11,7 +11,8 @@ Never place tokens, arguments, results, endpoint credentials, or secret values i
 3. Run `alembic upgrade head`; `alembic check` must report no drift.
 4. Start the API, then worker, then web application.
 5. Configure `MODALL_TRUSTED_PROXY_ADDRESSES` with the ingress transport addresses. The ingress must
-   discard any inbound `X-Real-IP` and set exactly one validated client IP before proxying.
+   discard inbound `X-Real-IP` and `X-Forwarded-For`, then set exactly one validated client IP in
+   `X-Real-IP` before proxying. Uvicorn forwarded-header rewriting remains disabled.
 6. Restrict API `/metrics` and the configured worker metrics port (9101 by default) to the monitoring
    network; neither is an internet-facing endpoint.
 7. Require successful API `/health/ready`, API `/metrics`, and worker `/health/live` on the configured

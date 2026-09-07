@@ -354,6 +354,7 @@ def run() -> None:
         log_level=settings.log_level.lower(),
         access_log=False,
         log_config=None,
+        proxy_headers=False,
     )
 
 

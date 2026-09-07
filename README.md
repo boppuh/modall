@@ -80,7 +80,8 @@ Admission, content, timeout, retention, reconciliation, rate, and concurrency bo
 `MODALL_` settings documented in `.env.example`; API and worker build one shared execution policy.
 The API limiter is process-local for the closed alpha, so multiple replicas require a shared ingress
 limiter before promotion. Behind ingress, configure `MODALL_TRUSTED_PROXY_ADDRESSES` and require
-the ingress to replace inbound `X-Real-IP` with one validated client address.
+the ingress to discard inbound `X-Real-IP` and `X-Forwarded-For`, then set one validated client
+address in `X-Real-IP`; Uvicorn's independent forwarded-header rewriting is disabled.
 
 Use `modall-ops status` for payload-free execution posture. Restore operations require explicit
 confirmation arguments and must follow

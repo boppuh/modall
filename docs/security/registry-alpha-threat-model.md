@@ -36,7 +36,8 @@ at most one dispatch, and release transient content.
   payloads.
 - API rate limiting is process-local. Multiple API replicas require a shared gateway limiter before
   horizontal scale. Behind ingress, the API accepts `X-Real-IP` only from explicitly configured
-  proxy transport addresses; ingress must discard the caller-supplied value and set a validated IP.
+  proxy transport addresses; Uvicorn forwarded-header rewriting is disabled, and ingress must
+  discard caller-supplied `X-Real-IP` and `X-Forwarded-For` values before setting a validated IP.
 - Metrics endpoints are unauthenticated and must be restricted to the monitoring network by
   deployment ingress policy.
 - The mounted-file provider assumes the deployment platform protects its filesystem and process
