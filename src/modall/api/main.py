@@ -186,6 +186,8 @@ def create_app(
             http_status = 503
         elif exc.code is ExecutionFailureCode.PERSISTENCE_FAILURE:
             http_status = 500
+        elif exc.code is ExecutionFailureCode.ACTIVE_RUN_LIMIT:
+            http_status = 429
         else:
             http_status = 409
         return error_response(exc.code.value, "Run operation failed.", http_status, request)

@@ -369,6 +369,7 @@ def test_registry_capability_and_audit_read_contracts() -> None:
             capability_version_id = uuid4()
             registry_id = uuid4()
             registry_version_id = uuid4()
+            newer_capability_version_ids = [uuid4() for _ in range(101)]
             factory = create_session_factory(engine)
             async with transaction(factory) as session:
                 session.add_all(
@@ -426,6 +427,32 @@ def test_registry_capability_and_audit_read_contracts() -> None:
                         ),
                     )
                 )
+                for sequence, newer_version_id in enumerate(newer_capability_version_ids, start=2):
+                    session.add(
+                        CapabilityVersion(
+                            id=newer_version_id,
+                            workspace_id=workspace_id,
+                            capability_id=capability_id,
+                            sequence=sequence,
+                            display_name=f"Test tool {sequence}",
+                            description=None,
+                            input_schema={"type": "object"},
+                            output_schema=None,
+                            metadata_digest=f"{sequence:064x}",
+                            schema_supported=True,
+                        )
+                    )
+                    session.add(
+                        McpToolBinding(
+                            capability_version_id=newer_version_id,
+                            capability_id=capability_id,
+                            workspace_id=workspace_id,
+                            connection_id=connection_id,
+                            connection_version_id=connection_version_id,
+                            tool_name="test",
+                            protocol_revision="2025-06-18",
+                        )
+                    )
 
             registry = await client.get("/v1/registry/entries", headers=headers)
             assert registry.status_code == 200
@@ -437,10 +464,16 @@ def test_registry_capability_and_audit_read_contracts() -> None:
 
             capability = await client.get(f"/v1/capabilities/{capability_id}", headers=headers)
             assert capability.status_code == 200
-            assert capability.json()["versions"][0]["display_name"] == "Test tool"
-            assert capability.json()["versions"][0]["connection_version_id"] == str(
-                connection_version_id
+            assert capability.json()["versions"][0]["display_name"] == "Test tool 102"
+            assert len(capability.json()["versions"]) == 101
+            assert capability.json()["versions_truncated"] is True
+            pending_version = next(
+                item
+                for item in capability.json()["versions"]
+                if item["id"] == str(capability_version_id)
             )
+            assert pending_version["display_name"] == "Test tool"
+            assert pending_version["connection_version_id"] == str(connection_version_id)
 
             version = await client.get(
                 f"/v1/capability-versions/{capability_version_id}", headers=headers
@@ -898,6 +931,10 @@ def test_retryable_and_internal_service_failures_have_server_statuses(
         del args, kwargs
         raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS)
 
+    async def active_limit_run(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise ExecutionError(ExecutionFailureCode.ACTIVE_RUN_LIMIT)
+
     async def scenario() -> None:
         async with api_client() as (client, _engine, workspace_id):
             headers = {"X-Workspace-ID": str(workspace_id)}
@@ -932,6 +969,19 @@ def test_retryable_and_internal_service_failures_have_server_statuses(
             )
             assert unavailable.status_code == 503
             assert unavailable.json()["error"]["code"] == "idempotency_key_history_incomplete"
+
+            monkeypatch.setattr(ExecutionService, "create_run", active_limit_run)
+            limited = await client.post(
+                "/v1/runs",
+                headers={**headers, "Idempotency-Key": "limited-run"},
+                json={
+                    "capability_version_id": str(uuid4()),
+                    "arguments": {},
+                    "confirmation_token": "token",
+                },
+            )
+            assert limited.status_code == 429
+            assert limited.json()["error"]["code"] == "active_run_limit"
 
             monkeypatch.setattr(ExecutionService, "create_run", persistence_run)
             persistence_failure = await client.post(

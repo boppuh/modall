@@ -432,7 +432,8 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
     const data = new FormData(event.currentTarget);
     const secretBindingId = formValue(data, "version-secret-binding");
     const input = { endpointUrl: formValue(data, "version-endpoint"), ...(secretBindingId ? { secretBindingId } : {}) };
-    const operation = `append:${selectedId}:${JSON.stringify(input)}`;
+    const baseVersionId = detail.data?.versions[0]?.id ?? "none";
+    const operation = `append:${selectedId}:${baseVersionId}:${JSON.stringify(input)}`;
     append.mutate({ ...input, operation, key: keyFor(operation) });
   }
 
@@ -661,6 +662,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
   const queryClient = useQueryClient();
   const { selectedVersionId, argumentsText, pendingArguments, preflight } = draft;
   const finalEventFetchRun = useRef<string | null>(null);
+  const retentionEventTimers = useRef(new Map<string, number>());
   const runsKey = useMemo(() => queryKey(scope, "runs"), [scope]);
   const eventsKey = useMemo(() => queryKey(scope, "run-events", selectedId), [scope, selectedId]);
   const runs = useQuery({
@@ -716,6 +718,24 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     }, Math.max(0, nextExpiry - Date.now()) + 1);
     return () => window.clearTimeout(timer);
   }, [eventsKey, queryClient, runDetail.data, scope]);
+  useEffect(() => {
+    const current = runDetail.data;
+    if (!current || !terminal(current.status)) return;
+    for (const expiry of [current.arguments_expires_at, current.result_expires_at]) {
+      if (expiry === null) continue;
+      const timerKey = `${current.id}:${expiry}`;
+      if (retentionEventTimers.current.has(timerKey)) continue;
+      const timer = window.setTimeout(() => {
+        retentionEventTimers.current.delete(timerKey);
+        void queryClient.refetchQueries({ queryKey: queryKey(scope, "run-events", current.id), exact: true });
+      }, Math.max(0, Date.parse(expiry) - Date.now()) + 61_000);
+      retentionEventTimers.current.set(timerKey, timer);
+    }
+  }, [queryClient, runDetail.data, scope]);
+  useEffect(() => () => {
+    for (const timer of retentionEventTimers.current.values()) window.clearTimeout(timer);
+    retentionEventTimers.current.clear();
+  }, []);
   useEffect(() => {
     if (!preflight) return;
     const delay = Math.max(0, Date.parse(preflight.expires_at) - Date.now());
@@ -887,7 +907,11 @@ function WorkspaceApp({ session, api, onLogout }: { session: WorkspaceSession; a
   const runKeys = useRef(new Map<string, string>());
   const cancelKeys = useRef(new Map<string, string>());
   const [runDraft, setRunDraft] = useState<RunDraft>({ selectedVersionId: "", argumentsText: "{\n  \"query\": \"status\"\n}", pendingArguments: null, preflight: null });
-  const access = useQuery({ queryKey: queryKey(scope, "session"), queryFn: () => api.currentSession() });
+  const access = useQuery({
+    queryKey: queryKey(scope, "session"),
+    queryFn: () => api.currentSession(),
+    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
+  });
   const [route, setRoute] = useState<Route>(() => readRoute());
   useEffect(() => {
     const handlePopState = () => setRoute(readRoute());

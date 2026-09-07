@@ -13,13 +13,13 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Select, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.orm import InstrumentedAttribute, defer
 
 from modall.api.errors import InvalidRequest
 from modall.api.idempotency import idempotent_mutation
 from modall.audit.types import AuditAction, AuditOutcome, ResourceType
 from modall.execution.service import ExecutionService
-from modall.execution.types import HmacKeyVersion, RunStatus
+from modall.execution.types import MAX_ACTIVE_RUNS_PER_WORKSPACE, HmacKeyVersion, RunStatus
 from modall.identity.auth import Authenticator
 from modall.identity.repository import AuthorizationDenied, AuthorizationService
 from modall.identity.service import IdentityService
@@ -696,11 +696,35 @@ def build_control_plane_router(
                 )
             ).all()
         )
+        visible_versions = versions[:_DETAIL_VERSION_LIMIT]
+        visible_ids = {item.id for item, _connection_version_id in visible_versions}
+        decision_ids = {
+            version_id
+            for version_id in (capability.pending_version_id, capability.enabled_version_id)
+            if version_id is not None and version_id not in visible_ids
+        }
+        if decision_ids:
+            visible_versions.extend(
+                (
+                    await state.session.execute(
+                        select(CapabilityVersion, McpToolBinding.connection_version_id)
+                        .join(
+                            McpToolBinding,
+                            McpToolBinding.capability_version_id == CapabilityVersion.id,
+                        )
+                        .where(
+                            CapabilityVersion.capability_id == capability.id,
+                            CapabilityVersion.id.in_(decision_ids),
+                        )
+                        .order_by(CapabilityVersion.sequence.desc())
+                    )
+                ).all()
+            )
         return CapabilityDetailResponse(
             **_capability(capability).model_dump(),
             versions=[
                 _capability_version(item, connection_version_id)
-                for item, connection_version_id in versions[:_DETAIL_VERSION_LIMIT]
+                for item, connection_version_id in visible_versions
             ],
             versions_truncated=len(versions) > _DETAIL_VERSION_LIMIT,
         )
@@ -826,7 +850,11 @@ def build_control_plane_router(
         run_status: str | None = Query(default=None, alias="status"),
         active: bool = False,
     ) -> RunPage:
-        statement: Select[Any] = select(Run).where(Run.workspace_id == state.context.workspace_id)
+        statement: Select[Any] = (
+            select(Run)
+            .options(defer(Run.arguments, raiseload=True))
+            .where(Run.workspace_id == state.context.workspace_id)
+        )
         if active:
             statement = statement.where(
                 Run.status.in_(
@@ -849,12 +877,28 @@ def build_control_plane_router(
                     and_(Run.created_at == cursor_time, Run.id < cursor_id),
                 )
             )
-        rows = list((await state.session.scalars(statement.limit(limit + 1))).all())
-        page_runs = rows[:limit]
+        query_limit = MAX_ACTIVE_RUNS_PER_WORKSPACE + 1 if active else limit + 1
+        rows = list((await state.session.scalars(statement.limit(query_limit))).all())
+        if active and len(rows) > MAX_ACTIVE_RUNS_PER_WORKSPACE:
+            raise RuntimeError("active run limit invariant exceeded")
+        page_runs = rows if active else rows[:limit]
+        retained_arguments: dict[UUID, dict[str, object]] = {}
         result_expiries: dict[UUID, datetime] = {}
         results: dict[UUID, RunResult] = {}
         if page_runs:
             now = datetime.now(UTC)
+            retained_arguments = {
+                run_id: arguments
+                for run_id, arguments in (
+                    await state.session.execute(
+                        select(Run.id, Run.arguments).where(
+                            Run.workspace_id == state.context.workspace_id,
+                            Run.id.in_([run.id for run in page_runs]),
+                            Run.arguments_expires_at > now,
+                        )
+                    )
+                ).all()
+            }
             result_expiries = {
                 run_id: expires_at
                 for run_id, expires_at in (
@@ -883,6 +927,8 @@ def build_control_plane_router(
                 _run_response_value(
                     run,
                     results.get(run.id),
+                    retained_arguments=retained_arguments.get(run.id),
+                    arguments_loaded=True,
                     result_expires_at=result_expiries.get(run.id),
                 )
                 for run in page_runs
@@ -890,7 +936,7 @@ def build_control_plane_router(
             page=PageInfo(
                 next_cursor=(
                     _encode_audit_cursor(page_runs[-1].created_at, page_runs[-1].id)
-                    if len(rows) > limit
+                    if not active and len(rows) > limit
                     else None
                 )
             ),
@@ -1236,10 +1282,18 @@ def _run_response_value(
     result: RunResult | None,
     *,
     now: datetime | None = None,
+    retained_arguments: dict[str, object] | None = None,
+    arguments_loaded: bool = False,
     result_expires_at: datetime | None = None,
 ) -> RunResponse:
     current = now or datetime.now(UTC)
-    arguments = run.arguments if _utc(run.arguments_expires_at) > current else None
+    arguments = (
+        retained_arguments
+        if arguments_loaded
+        else run.arguments
+        if _utc(run.arguments_expires_at) > current
+        else None
+    )
     result_payload = (
         result.payload if result is not None and _utc(result.expires_at) > current else None
     )

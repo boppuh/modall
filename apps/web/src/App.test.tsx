@@ -597,6 +597,28 @@ describe("App", () => {
     expect(await screen.findByDisplayValue("https://new.example/tools")).toBeTruthy();
   });
 
+  it("rotates append keys when the base version advances", async () => {
+    const newerVersionId = "77777777-7777-4777-8777-777777777777";
+    const initial = { ...connection, versions: [{ id: versionId, sequence: 1, endpoint_url: "https://old.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http" as const, created_at: timestamp }], versions_truncated: false };
+    const advanced = { ...connection, versions: [{ id: newerVersionId, sequence: 2, endpoint_url: "https://new.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http" as const, created_at: timestamp }], versions_truncated: false };
+    const getConnection = vi.fn<ControlPlane["getConnection"]>().mockResolvedValueOnce(initial).mockResolvedValue(advanced);
+    const appendConnectionVersion = vi.fn<ControlPlane["appendConnectionVersion"]>().mockRejectedValue(new Error("response lost"));
+    renderApp(fakeApi({ getConnection, appendConnectionVersion }));
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Append version" }));
+    await waitFor(() => expect(appendConnectionVersion).toHaveBeenCalledTimes(1));
+    const originalKey = appendConnectionVersion.mock.calls[0]?.[2];
+    fireEvent.click(screen.getByRole("button", { name: "Modall overview" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    const endpoint = await screen.findByDisplayValue("https://new.example/tools");
+    fireEvent.change(endpoint, { target: { value: "https://old.example/tools" } });
+    fireEvent.click(screen.getByRole("button", { name: "Append version" }));
+    await waitFor(() => expect(appendConnectionVersion).toHaveBeenCalledTimes(2));
+    expect(appendConnectionVersion.mock.calls[1]?.[2]).not.toBe(originalKey);
+  });
+
   it("preserves seconds in run timeline diagnostics", async () => {
     window.history.replaceState({}, "", `/runs/${runId}`);
     renderApp(fakeApi({ listRunEvents: vi.fn().mockResolvedValue([{ id: connectionId, sequence: 1, event_type: "admitted", status: "queued", safe_error_code: null, occurred_at: "2026-09-06T12:00:37Z" }]) }));

@@ -6,6 +6,8 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
+MAX_ACTIVE_RUNS_PER_WORKSPACE = 100
+
 
 class RunStatus(StrEnum):
     QUEUED = "queued"
@@ -55,6 +57,7 @@ class ExecutionFailureCode(StrEnum):
     IDEMPOTENCY_KEY_HISTORY_INCOMPLETE = "idempotency_key_history_incomplete"
     CONFIRMATION_KEY_HISTORY_INCOMPLETE = "confirmation_key_history_incomplete"
     DISPATCH_QUARANTINED = "dispatch_quarantined"
+    ACTIVE_RUN_LIMIT = "active_run_limit"
     NO_JOB_AVAILABLE = "no_job_available"
     LEASE_LOST = "lease_lost"
     INVALID_TRANSITION = "invalid_transition"
@@ -116,6 +119,7 @@ class ExecutionLimits:
     schema_validation_timeout_seconds: float = 2.0
     schema_validation_memory_bytes: int = 256 * 1024 * 1024
     reconciliation_batch_size: int = 100
+    max_active_runs_per_workspace: int = MAX_ACTIVE_RUNS_PER_WORKSPACE
 
     def __post_init__(self) -> None:
         if (
@@ -133,6 +137,7 @@ class ExecutionLimits:
             or not math.isfinite(self.schema_validation_timeout_seconds)
             or not 64 * 1024 * 1024 <= self.schema_validation_memory_bytes <= 256 * 1024 * 1024
             or not 1 <= self.reconciliation_batch_size <= 1000
+            or not 1 <= self.max_active_runs_per_workspace <= MAX_ACTIVE_RUNS_PER_WORKSPACE
         ):
             raise ValueError("invalid execution limits")
 
