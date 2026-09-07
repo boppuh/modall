@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from modall.api.contracts import (
@@ -16,6 +16,7 @@ from modall.api.contracts import (
     _decode_sequence_cursor,
     _encode_audit_cursor,
     _encode_sequence_cursor,
+    _run_response,
 )
 from modall.api.idempotency import idempotent_mutation, purge_expired_api_idempotency
 from modall.api.main import create_app
@@ -35,8 +36,11 @@ from modall.persistence.models import (
     DiscoveryPayload,
     DiscoverySnapshot,
     DiscoverySnapshotCapability,
+    McpToolBinding,
     RegistryEntry,
     RegistryEntryVersion,
+    Run,
+    RunResult,
     ServerConnectionVersion,
     WorkspaceMembership,
 )
@@ -127,6 +131,11 @@ def test_control_plane_requires_workspace_and_has_stable_errors() -> None:
                 f"/v1/runs?cursor={'A' * 21}!", headers={"X-Workspace-ID": str(workspace_id)}
             )
             assert invalid_base64_cursor.status_code == 422
+
+            current = await client.get("/v1/session", headers={"X-Workspace-ID": str(workspace_id)})
+            assert current.status_code == 200
+            assert current.json()["workspace_id"] == str(workspace_id)
+            assert current.json()["role"] == "admin"
 
             unknown = await client.get(
                 f"/v1/capabilities/{uuid4()}",
@@ -355,10 +364,12 @@ def test_registry_capability_and_audit_read_contracts() -> None:
                 },
             )
             connection_id = UUID(connection.json()["id"])
+            connection_version_id = UUID(connection.json()["pending_version_id"])
             capability_id = uuid4()
             capability_version_id = uuid4()
             registry_id = uuid4()
             registry_version_id = uuid4()
+            newer_capability_version_ids = [uuid4() for _ in range(101)]
             factory = create_session_factory(engine)
             async with transaction(factory) as session:
                 session.add_all(
@@ -385,6 +396,15 @@ def test_registry_capability_and_audit_read_contracts() -> None:
                             metadata_digest="a" * 64,
                             schema_supported=True,
                         ),
+                        McpToolBinding(
+                            capability_version_id=capability_version_id,
+                            capability_id=capability_id,
+                            workspace_id=workspace_id,
+                            connection_id=connection_id,
+                            connection_version_id=connection_version_id,
+                            tool_name="test",
+                            protocol_revision="2025-06-18",
+                        ),
                         RegistryEntry(
                             id=registry_id,
                             workspace_id=workspace_id,
@@ -407,6 +427,32 @@ def test_registry_capability_and_audit_read_contracts() -> None:
                         ),
                     )
                 )
+                for sequence, newer_version_id in enumerate(newer_capability_version_ids, start=2):
+                    session.add(
+                        CapabilityVersion(
+                            id=newer_version_id,
+                            workspace_id=workspace_id,
+                            capability_id=capability_id,
+                            sequence=sequence,
+                            display_name=f"Test tool {sequence}",
+                            description=None,
+                            input_schema={"type": "object"},
+                            output_schema=None,
+                            metadata_digest=f"{sequence:064x}",
+                            schema_supported=True,
+                        )
+                    )
+                    session.add(
+                        McpToolBinding(
+                            capability_version_id=newer_version_id,
+                            capability_id=capability_id,
+                            workspace_id=workspace_id,
+                            connection_id=connection_id,
+                            connection_version_id=connection_version_id,
+                            tool_name="test",
+                            protocol_revision="2025-06-18",
+                        )
+                    )
 
             registry = await client.get("/v1/registry/entries", headers=headers)
             assert registry.status_code == 200
@@ -418,13 +464,24 @@ def test_registry_capability_and_audit_read_contracts() -> None:
 
             capability = await client.get(f"/v1/capabilities/{capability_id}", headers=headers)
             assert capability.status_code == 200
-            assert capability.json()["versions"][0]["display_name"] == "Test tool"
+            assert capability.json()["versions"][0]["display_name"] == "Test tool 102"
+            assert len(capability.json()["versions"]) == 101
+            assert capability.json()["versions_truncated"] is True
+            assert capability.json()["observed_in_current_snapshot"] is False
+            pending_version = next(
+                item
+                for item in capability.json()["versions"]
+                if item["id"] == str(capability_version_id)
+            )
+            assert pending_version["display_name"] == "Test tool"
+            assert pending_version["connection_version_id"] == str(connection_version_id)
 
             version = await client.get(
                 f"/v1/capability-versions/{capability_version_id}", headers=headers
             )
             assert version.status_code == 200
             assert version.json()["input_schema"] == {"type": "object"}
+            assert version.json()["connection_version_id"] == str(connection_version_id)
 
             disabled = await client.post(
                 f"/v1/capability-versions/{capability_version_id}/disable",
@@ -547,6 +604,7 @@ def test_official_registry_search_import_and_replay_contract() -> None:
             assert searched.status_code == 200
             result = searched.json()
             assert result["items"][0]["name"] == "io.modall.fixture/weather"
+            assert result["server_observed_at"]
 
             body = {
                 "cache_id": result["cache_id"],
@@ -706,6 +764,7 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
                 json={"capability_version_id": str(version.id), "arguments": arguments},
             )
             assert preflight.status_code == 200
+            assert preflight.json()["server_observed_at"]
             confirmation = preflight.json()["confirmation_token"]
 
             created = await client.post(
@@ -719,9 +778,20 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             )
             assert created.status_code == 201
             assert created.json()["status"] == "queued"
+            assert created.json()["actor_user_id"]
+            assert created.json()["arguments_expires_at"]
+            assert created.json()["result_expires_at"] is None
+            assert created.json()["server_observed_at"]
             run_id = created.json()["id"]
 
-            result_queries = 0
+            factory = create_session_factory(engine)
+            async with transaction(factory) as session:
+                stored_run = await session.get(Run, UUID(run_id))
+                assert stored_run is not None
+                direct_response = await _run_response(session, stored_run)
+                assert direct_response.id == UUID(run_id)
+
+            result_queries: list[str] = []
 
             def count_result_queries(
                 connection: object,
@@ -732,20 +802,127 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
                 executemany: bool,
             ) -> None:
                 del connection, cursor, parameters, context, executemany
-                nonlocal result_queries
                 if "FROM run_results" in statement:
-                    result_queries += 1
+                    result_queries.append(statement)
 
             event.listen(engine.sync_engine, "before_cursor_execute", count_result_queries)
             listed = await client.get("/v1/runs", headers=headers)
             event.remove(engine.sync_engine, "before_cursor_execute", count_result_queries)
             assert listed.status_code == 200
-            assert listed.json()["items"][0]["arguments"] == arguments
-            assert result_queries == 1
+            assert "arguments" not in listed.json()["items"][0]
+            assert "result" not in listed.json()["items"][0]
+            assert result_queries == []
 
             filtered = await client.get("/v1/runs?status=queued", headers=headers)
             assert filtered.status_code == 200
             assert len(filtered.json()["items"]) == 1
+            active = await client.get("/v1/runs?active=true", headers=headers)
+            assert active.status_code == 200
+            assert [item["id"] for item in active.json()["items"]] == [run_id]
+            active_with_terminal_status = await client.get(
+                "/v1/runs?active=true&status=succeeded", headers=headers
+            )
+            assert active_with_terminal_status.status_code == 200
+            assert active_with_terminal_status.json()["items"] == []
+            executable = await client.get("/v1/capabilities?executable=true", headers=headers)
+            assert executable.status_code == 200
+            assert [item["id"] for item in executable.json()["items"]] == [
+                str(version.capability_id)
+            ]
+            executable_detail = await client.get(
+                f"/v1/capabilities/{version.capability_id}", headers=headers
+            )
+            assert executable_detail.status_code == 200
+            assert executable_detail.json()["observed_version_id"] == str(version.id)
+            scoped_capability = await client.get(
+                "/v1/capabilities",
+                headers=headers,
+                params={
+                    "connection_id": executable.json()["items"][0]["connection_id"],
+                    "status": "enabled",
+                    "limit": 1,
+                },
+            )
+            assert scoped_capability.status_code == 200
+            assert len(scoped_capability.json()["items"]) == 1
+
+            second_arguments = {"query": "forecast"}
+            second_preflight = await client.post(
+                "/v1/run-preflights",
+                headers=headers,
+                json={
+                    "capability_version_id": str(version.id),
+                    "arguments": second_arguments,
+                },
+            )
+            second_created = await client.post(
+                "/v1/runs",
+                headers={**headers, "Idempotency-Key": "run-create-second"},
+                json={
+                    "capability_version_id": str(version.id),
+                    "arguments": second_arguments,
+                    "confirmation_token": second_preflight.json()["confirmation_token"],
+                },
+            )
+            assert second_created.status_code == 201
+            factory = create_session_factory(engine)
+            async with transaction(factory) as session:
+                stored_run = await session.get(Run, UUID(run_id))
+                assert stored_run is not None
+                for offset in range(99):
+                    session.add(
+                        Run(
+                            id=uuid4(),
+                            workspace_id=stored_run.workspace_id,
+                            actor_user_id=stored_run.actor_user_id,
+                            capability_id=stored_run.capability_id,
+                            capability_version_id=stored_run.capability_version_id,
+                            connection_id=stored_run.connection_id,
+                            connection_version_id=stored_run.connection_version_id,
+                            connection_control_epoch=stored_run.connection_control_epoch,
+                            capability_status_epoch=stored_run.capability_status_epoch,
+                            protocol_revision=stored_run.protocol_revision,
+                            status="preparing",
+                            arguments={},
+                            argument_digest="0" * 64,
+                            arguments_expires_at=stored_run.arguments_expires_at,
+                            deadline=stored_run.deadline,
+                            cancellation_requested=False,
+                            safe_error_code=None,
+                            created_at=stored_run.created_at - timedelta(seconds=offset + 1),
+                            updated_at=stored_run.updated_at,
+                            terminal_at=None,
+                        )
+                    )
+            legacy_active = await client.get("/v1/runs?active=true", headers=headers)
+            assert legacy_active.status_code == 200
+            assert len(legacy_active.json()["items"]) == 50
+            assert legacy_active.json()["page"]["next_cursor"] is not None
+            active_page = await client.get("/v1/runs?active=true&limit=1", headers=headers)
+            assert active_page.status_code == 200
+            assert len(active_page.json()["items"]) == 1
+            assert active_page.json()["page"]["next_cursor"] is not None
+            active_next_page = await client.get(
+                "/v1/runs",
+                headers=headers,
+                params={
+                    "active": "true",
+                    "limit": 1,
+                    "cursor": active_page.json()["page"]["next_cursor"],
+                },
+            )
+            assert active_next_page.status_code == 200
+            assert len(active_next_page.json()["items"]) == 1
+            assert active_next_page.json()["items"][0]["id"] != active_page.json()["items"][0]["id"]
+            active_by_duration = await client.get(
+                "/v1/runs?status=queued&min_duration_seconds=0&max_duration_seconds=300",
+                headers=headers,
+            )
+            assert active_by_duration.status_code == 200
+            assert {item["id"] for item in active_by_duration.json()["items"]} == {
+                run_id,
+                second_created.json()["id"],
+            }
 
             fetched = await client.get(f"/v1/runs/{run_id}", headers=headers)
             assert fetched.status_code == 200
@@ -766,6 +943,39 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             assert cancelled.status_code == 200
             assert cancelled.json()["status"] == "cancelled"
             assert cancelled.json()["safe_error_code"] == "cancelled_before_dispatch"
+            filtered_cancelled = await client.get(
+                "/v1/runs",
+                headers=headers,
+                params={
+                    "status": "cancelled",
+                    "capability_id": str(version.capability_id),
+                    "actor_id": cancelled.json()["actor_user_id"],
+                    "created_after": "2020-01-01T00:00:00Z",
+                    "created_before": "2030-01-01T00:00:00Z",
+                    "min_duration_seconds": 0,
+                    "max_duration_seconds": 300,
+                },
+            )
+            assert [item["id"] for item in filtered_cancelled.json()["items"]] == [run_id]
+
+            naive_created_after = await client.get(
+                "/v1/runs?created_after=2026-09-06T12:00:00", headers=headers
+            )
+            assert naive_created_after.status_code == 422
+            naive_created_before = await client.get(
+                "/v1/runs?created_before=2026-09-06T12:00:00", headers=headers
+            )
+            assert naive_created_before.status_code == 422
+            invalid_run_time_range = await client.get(
+                "/v1/runs?created_after=2030-01-01T00:00:00Z&created_before=2020-01-01T00:00:00Z",
+                headers=headers,
+            )
+            assert invalid_run_time_range.status_code == 422
+            invalid_run_duration_range = await client.get(
+                "/v1/runs?min_duration_seconds=10&max_duration_seconds=5",
+                headers=headers,
+            )
+            assert invalid_run_duration_range.status_code == 422
 
             replayed_cancel = await client.post(
                 f"/v1/runs/{run_id}/cancel",
@@ -773,6 +983,47 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             )
             assert replayed_cancel.status_code == 200
             assert replayed_cancel.json()["id"] == run_id
+
+            retained_until = datetime.now(UTC) + timedelta(minutes=1)
+            async with transaction(factory) as session:
+                session.add(
+                    RunResult(
+                        run_id=UUID(run_id),
+                        workspace_id=workspace_id,
+                        payload={"secret": "redacted"},
+                        canonical_digest="d" * 64,
+                        byte_count=21,
+                        captured_at=datetime.now(UTC),
+                        expires_at=retained_until,
+                    )
+                )
+            retained = await client.get(f"/v1/runs/{run_id}", headers=headers)
+            assert retained.json()["result"] == {"secret": "redacted"}
+            retained_page = await client.get("/v1/runs", headers=headers)
+            retained_item = next(
+                item for item in retained_page.json()["items"] if item["id"] == run_id
+            )
+            assert "result" not in retained_item
+            assert "result_expires_at" not in retained_item
+
+            expired_at = datetime.now(UTC) - timedelta(seconds=1)
+            async with transaction(factory) as session:
+                await session.execute(
+                    update(RunResult)
+                    .where(RunResult.run_id == UUID(run_id))
+                    .values(expires_at=expired_at)
+                )
+            redacted = await client.get(f"/v1/runs/{run_id}", headers=headers)
+            assert redacted.json()["result"] is None
+            assert redacted.json()["result_expires_at"] == expired_at.isoformat().replace(
+                "+00:00", "Z"
+            )
+            redacted_page = await client.get("/v1/runs", headers=headers)
+            redacted_item = next(
+                item for item in redacted_page.json()["items"] if item["id"] == run_id
+            )
+            assert "result" not in redacted_item
+            assert "result_expires_at" not in redacted_item
 
             disabled = await client.post(
                 f"/v1/capability-versions/{version.id}/disable",
@@ -816,6 +1067,10 @@ def test_retryable_and_internal_service_failures_have_server_statuses(
         del args, kwargs
         raise ExecutionError(ExecutionFailureCode.INVALID_ARGUMENTS)
 
+    async def active_limit_run(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise ExecutionError(ExecutionFailureCode.ACTIVE_RUN_LIMIT)
+
     async def scenario() -> None:
         async with api_client() as (client, _engine, workspace_id):
             headers = {"X-Workspace-ID": str(workspace_id)}
@@ -851,6 +1106,19 @@ def test_retryable_and_internal_service_failures_have_server_statuses(
             assert unavailable.status_code == 503
             assert unavailable.json()["error"]["code"] == "idempotency_key_history_incomplete"
 
+            monkeypatch.setattr(ExecutionService, "create_run", active_limit_run)
+            limited = await client.post(
+                "/v1/runs",
+                headers={**headers, "Idempotency-Key": "limited-run"},
+                json={
+                    "capability_version_id": str(uuid4()),
+                    "arguments": {},
+                    "confirmation_token": "token",
+                },
+            )
+            assert limited.status_code == 429
+            assert limited.json()["error"]["code"] == "active_run_limit"
+
             monkeypatch.setattr(ExecutionService, "create_run", persistence_run)
             persistence_failure = await client.post(
                 "/v1/runs",
@@ -883,6 +1151,7 @@ def test_openapi_publishes_every_planned_alpha_route() -> None:
     paths = app.openapi()["paths"]
     assert {
         "/v1/registry/searches",
+        "/v1/session",
         "/v1/registry/imports",
         "/v1/registry/entries",
         "/v1/server-connections",
@@ -904,6 +1173,7 @@ def test_openapi_publishes_every_planned_alpha_route() -> None:
         "/v1/runs/{run_id}/cancel",
         "/v1/audit-events",
     } <= set(paths)
+    assert "429" in paths["/v1/runs"]["post"]["responses"]
 
 
 def test_api_idempotency_rejects_invalid_configuration_before_database_access() -> None:

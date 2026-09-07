@@ -69,6 +69,8 @@ jobs:
       - run: npm run web:typecheck
       - run: npm run web:test
       - run: npm run web:build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e --workspace @modall/web
 
   compose:
     runs-on: ubuntu-latest

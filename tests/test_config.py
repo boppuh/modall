@@ -52,6 +52,12 @@ def test_worker_lease_includes_invocation_finalization_margin(lease_seconds: flo
         {"auth_mode": "oidc"},
         {
             "auth_mode": "oidc",
+            "oidc_issuer": " https://issuer.example",
+            "oidc_audience": "modall",
+            "oidc_jwks_url": "https://issuer.example/jwks",
+        },
+        {
+            "auth_mode": "oidc",
             "oidc_issuer": "http://issuer.example",
             "oidc_audience": "modall",
             "oidc_jwks_url": "https://issuer.example/jwks",

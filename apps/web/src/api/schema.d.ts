@@ -397,6 +397,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Session
+         * @description Return the server-authoritative workspace membership for UI gating.
+         */
+        get: operations["get_session_v1_session_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -470,6 +490,10 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Observed In Current Snapshot */
+            observed_in_current_snapshot: boolean;
+            /** Observed Version Id */
+            observed_version_id?: string | null;
             /** Pending Version Id */
             pending_version_id: string | null;
             /** Status */
@@ -524,6 +548,11 @@ export interface components {
              * Format: uuid
              */
             capability_id: string;
+            /**
+             * Connection Version Id
+             * Format: uuid
+             */
+            connection_version_id: string;
             /**
              * Created At
              * Format: date-time
@@ -803,12 +832,22 @@ export interface components {
             from_cache: boolean;
             /** Items */
             items: components["schemas"]["RegistrySearchItemResponse"][];
+            /**
+             * Server Observed At
+             * Format: date-time
+             */
+            server_observed_at: string;
         };
         /**
          * ResourceType
          * @enum {string}
          */
         ResourceType: "workspace" | "membership" | "secret_binding" | "server_connection" | "capability" | "registry_entry" | "run";
+        /**
+         * Role
+         * @enum {string}
+         */
+        Role: "admin" | "operator" | "viewer";
         /** RunCreateRequest */
         RunCreateRequest: {
             /** Arguments */
@@ -855,7 +894,7 @@ export interface components {
         /** RunPage */
         RunPage: {
             /** Items */
-            items: components["schemas"]["RunResponse"][];
+            items: components["schemas"]["RunSummaryResponse"][];
             page: components["schemas"]["PageInfo"];
         };
         /** RunPreflightRequest */
@@ -891,13 +930,28 @@ export interface components {
              * Format: date-time
              */
             expires_at: string;
+            /**
+             * Server Observed At
+             * Format: date-time
+             */
+            server_observed_at: string;
         };
         /** RunResponse */
         RunResponse: {
+            /**
+             * Actor User Id
+             * Format: uuid
+             */
+            actor_user_id: string;
             /** Arguments */
             arguments: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * Arguments Expires At
+             * Format: date-time
+             */
+            arguments_expires_at: string;
             /** Cancellation Requested */
             cancellation_requested: boolean;
             /**
@@ -939,6 +993,69 @@ export interface components {
             result: {
                 [key: string]: unknown;
             } | null;
+            /** Result Expires At */
+            result_expires_at: string | null;
+            /** Safe Error Code */
+            safe_error_code: string | null;
+            /**
+             * Server Observed At
+             * Format: date-time
+             */
+            server_observed_at: string;
+            /** Status */
+            status: string;
+            /** Terminal At */
+            terminal_at: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** RunSummaryResponse */
+        RunSummaryResponse: {
+            /**
+             * Actor User Id
+             * Format: uuid
+             */
+            actor_user_id: string;
+            /** Cancellation Requested */
+            cancellation_requested: boolean;
+            /**
+             * Capability Id
+             * Format: uuid
+             */
+            capability_id: string;
+            /**
+             * Capability Version Id
+             * Format: uuid
+             */
+            capability_version_id: string;
+            /**
+             * Connection Id
+             * Format: uuid
+             */
+            connection_id: string;
+            /**
+             * Connection Version Id
+             * Format: uuid
+             */
+            connection_version_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Deadline
+             * Format: date-time
+             */
+            deadline: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
             /** Safe Error Code */
             safe_error_code: string | null;
             /** Status */
@@ -950,6 +1067,20 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+        };
+        /** SessionResponse */
+        SessionResponse: {
+            /**
+             * Actor User Id
+             * Format: uuid
+             */
+            actor_user_id: string;
+            role: components["schemas"]["Role"];
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
         };
     };
     responses: never;
@@ -1093,6 +1224,7 @@ export interface operations {
                 cursor?: string | null;
                 connection_id?: string | null;
                 status?: string | null;
+                executable?: boolean;
             };
             header?: {
                 "X-Workspace-ID"?: string | null;
@@ -1807,6 +1939,13 @@ export interface operations {
                 limit?: number;
                 cursor?: string | null;
                 status?: string | null;
+                active?: boolean;
+                capability_id?: string | null;
+                actor_id?: string | null;
+                created_after?: string | null;
+                created_before?: string | null;
+                min_duration_seconds?: number | null;
+                max_duration_seconds?: number | null;
             };
             header?: {
                 "X-Workspace-ID"?: string | null;
@@ -1935,6 +2074,15 @@ export interface operations {
             };
             /** @description Unprocessable Content */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2779,6 +2927,82 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConnectionVersionResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_session_v1_session_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Workspace-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionResponse"];
                 };
             };
             /** @description Unauthorized */

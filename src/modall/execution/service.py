@@ -172,6 +172,7 @@ class ExecutionService:
             connection_version_id=target.binding.connection_version_id,
             argument_digest=argument_digest,
             expires_at=expires_at,
+            server_observed_at=now,
         )
 
     async def create_run(
@@ -283,6 +284,16 @@ class ExecutionService:
 
         if state.dispatch_quarantined:
             raise ExecutionError(ExecutionFailureCode.DISPATCH_QUARANTINED)
+        active_run_count = await self._session.scalar(
+            select(func.count())
+            .select_from(Run)
+            .where(
+                Run.workspace_id == context.workspace_id,
+                Run.status.in_(_ACTIVE_RUN_STATUS_VALUES),
+            )
+        )
+        if (active_run_count or 0) >= self._limits.max_active_runs_per_workspace:
+            raise ExecutionError(ExecutionFailureCode.ACTIVE_RUN_LIMIT)
         run_id = uuid4()
         run = Run(
             id=run_id,

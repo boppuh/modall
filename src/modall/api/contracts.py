@@ -11,15 +11,15 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Header, Query, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Select, and_, or_, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.orm import InstrumentedAttribute, defer
 
 from modall.api.errors import InvalidRequest
 from modall.api.idempotency import idempotent_mutation
 from modall.audit.types import AuditAction, AuditOutcome, ResourceType
 from modall.execution.service import ExecutionService
-from modall.execution.types import HmacKeyVersion
+from modall.execution.types import HmacKeyVersion, RunStatus
 from modall.identity.auth import Authenticator
 from modall.identity.repository import AuthorizationDenied, AuthorizationService
 from modall.identity.service import IdentityService
@@ -29,6 +29,8 @@ from modall.persistence.models import (
     AuditEvent,
     Capability,
     CapabilityVersion,
+    DiscoverySnapshotCapability,
+    McpToolBinding,
     RegistryEntry,
     RegistryEntryVersion,
     Run,
@@ -87,6 +89,12 @@ class PageInfo(BaseModel):
     next_cursor: str | None
 
 
+class SessionResponse(BaseModel):
+    workspace_id: UUID
+    actor_user_id: UUID
+    role: Role
+
+
 class ErrorDetail(BaseModel):
     code: str
     message: str
@@ -111,6 +119,7 @@ class RegistrySearchResponse(BaseModel):
     items: list[RegistrySearchItemResponse]
     fetched_at: datetime
     expires_at: datetime
+    server_observed_at: datetime
     from_cache: bool
 
 
@@ -184,11 +193,14 @@ class CapabilityResponse(BaseModel):
 class CapabilityDetailResponse(CapabilityResponse):
     versions: list["CapabilityVersionResponse"]
     versions_truncated: bool
+    observed_in_current_snapshot: bool
+    observed_version_id: UUID | None = None
 
 
 class CapabilityVersionResponse(BaseModel):
     id: UUID
     capability_id: UUID
+    connection_version_id: UUID
     sequence: int
     display_name: str
     description: str | None
@@ -210,17 +222,17 @@ class RunPreflightResponse(BaseModel):
     connection_version_id: UUID
     argument_digest: str
     expires_at: datetime
+    server_observed_at: datetime
 
 
-class RunResponse(BaseModel):
+class RunSummaryResponse(BaseModel):
     id: UUID
+    actor_user_id: UUID
     capability_id: UUID
     capability_version_id: UUID
     connection_id: UUID
     connection_version_id: UUID
     status: str
-    arguments: dict[str, object] | None
-    result: dict[str, object] | None
     safe_error_code: str | None
     cancellation_requested: bool
     deadline: datetime
@@ -229,8 +241,16 @@ class RunResponse(BaseModel):
     terminal_at: datetime | None
 
 
+class RunResponse(RunSummaryResponse):
+    arguments: dict[str, object] | None
+    result: dict[str, object] | None
+    arguments_expires_at: datetime
+    result_expires_at: datetime | None
+    server_observed_at: datetime
+
+
 class RunPage(BaseModel):
-    items: list[RunResponse]
+    items: list[RunSummaryResponse]
     page: PageInfo
 
 
@@ -360,6 +380,16 @@ def build_control_plane_router(
             replay_response=replay_response,
         )
 
+    @router.get("/session", response_model=SessionResponse)
+    async def get_session(state: State) -> SessionResponse:
+        """Return the server-authoritative workspace membership for UI gating."""
+
+        return SessionResponse(
+            workspace_id=state.context.workspace_id,
+            actor_user_id=state.context.actor_user_id,
+            role=state.context.role,
+        )
+
     @router.post("/registry/searches", response_model=RegistrySearchResponse)
     async def search_registry(body: RegistrySearchRequest, state: State) -> RegistrySearchResponse:
         found = await OfficialRegistryService(state.session, registry_adapter).search(
@@ -380,6 +410,7 @@ def build_control_plane_router(
             ],
             fetched_at=found.fetched_at,
             expires_at=found.expires_at,
+            server_observed_at=datetime.now(UTC),
             from_cache=found.from_cache,
         )
 
@@ -640,10 +671,30 @@ def build_control_plane_router(
         cursor: str | None = None,
         connection_id: UUID | None = None,
         capability_status: str | None = Query(default=None, alias="status"),
+        executable: bool = False,
     ) -> CapabilityPage:
         statement: Select[Any] = select(Capability).where(
             Capability.workspace_id == state.context.workspace_id
         )
+        if executable:
+            statement = (
+                statement.join(
+                    ServerConnection,
+                    ServerConnection.id == Capability.connection_id,
+                )
+                .join(
+                    McpToolBinding,
+                    McpToolBinding.capability_version_id == Capability.enabled_version_id,
+                )
+                .where(
+                    Capability.status == "enabled",
+                    Capability.enabled_version_id.is_not(None),
+                    Capability.pending_version_id.is_(None),
+                    ServerConnection.lifecycle == "active",
+                    ServerConnection.pending_version_id.is_(None),
+                    ServerConnection.verified_version_id == McpToolBinding.connection_version_id,
+                )
+            )
         if connection_id is not None:
             statement = statement.where(Capability.connection_id == connection_id)
         if capability_status is not None:
@@ -663,18 +714,73 @@ def build_control_plane_router(
         )
         versions = list(
             (
-                await state.session.scalars(
-                    select(CapabilityVersion)
+                await state.session.execute(
+                    select(CapabilityVersion, McpToolBinding.connection_version_id)
+                    .join(
+                        McpToolBinding,
+                        McpToolBinding.capability_version_id == CapabilityVersion.id,
+                    )
                     .where(CapabilityVersion.capability_id == capability.id)
                     .order_by(CapabilityVersion.sequence.desc())
                     .limit(_DETAIL_VERSION_LIMIT + 1)
                 )
             ).all()
         )
+        visible_versions = versions[:_DETAIL_VERSION_LIMIT]
+        visible_ids = {item.id for item, _connection_version_id in visible_versions}
+        decision_ids = {
+            version_id
+            for version_id in (capability.pending_version_id, capability.enabled_version_id)
+            if version_id is not None and version_id not in visible_ids
+        }
+        if decision_ids:
+            visible_versions.extend(
+                (
+                    await state.session.execute(
+                        select(CapabilityVersion, McpToolBinding.connection_version_id)
+                        .join(
+                            McpToolBinding,
+                            McpToolBinding.capability_version_id == CapabilityVersion.id,
+                        )
+                        .where(
+                            CapabilityVersion.capability_id == capability.id,
+                            CapabilityVersion.id.in_(decision_ids),
+                        )
+                        .order_by(CapabilityVersion.sequence.desc())
+                    )
+                ).all()
+            )
+        connection = await state.session.scalar(
+            select(ServerConnection).where(
+                ServerConnection.id == capability.connection_id,
+                ServerConnection.workspace_id == state.context.workspace_id,
+            )
+        )
+        decision_version_id = capability.pending_version_id or capability.enabled_version_id
+        observed_version_id: UUID | None = None
+        if connection is not None and connection.current_snapshot_id is not None:
+            observed_version_id = await state.session.scalar(
+                select(DiscoverySnapshotCapability.capability_version_id)
+                .join(
+                    CapabilityVersion,
+                    CapabilityVersion.id == DiscoverySnapshotCapability.capability_version_id,
+                )
+                .where(
+                    DiscoverySnapshotCapability.workspace_id == state.context.workspace_id,
+                    DiscoverySnapshotCapability.connection_id == capability.connection_id,
+                    DiscoverySnapshotCapability.snapshot_id == connection.current_snapshot_id,
+                    CapabilityVersion.capability_id == capability.id,
+                )
+            )
         return CapabilityDetailResponse(
             **_capability(capability).model_dump(),
-            versions=[_capability_version(item) for item in versions[:_DETAIL_VERSION_LIMIT]],
+            versions=[
+                _capability_version(item, connection_version_id)
+                for item, connection_version_id in visible_versions
+            ],
             versions_truncated=len(versions) > _DETAIL_VERSION_LIMIT,
+            observed_in_current_snapshot=observed_version_id == decision_version_id,
+            observed_version_id=observed_version_id,
         )
 
     @router.get(
@@ -686,7 +792,15 @@ def build_control_plane_router(
         version = await _scoped_one(
             state.session, CapabilityVersion, capability_version_id, state.context.workspace_id
         )
-        return _capability_version(version)
+        connection_version_id = await state.session.scalar(
+            select(McpToolBinding.connection_version_id).where(
+                McpToolBinding.capability_version_id == version.id,
+                McpToolBinding.workspace_id == state.context.workspace_id,
+            )
+        )
+        if connection_version_id is None:
+            raise RuntimeError("capability version is missing its immutable connection binding")
+        return _capability_version(version, connection_version_id)
 
     @router.post(
         "/capability-versions/{capability_version_id}/enable",
@@ -765,9 +879,15 @@ def build_control_plane_router(
             connection_version_id=result.connection_version_id,
             argument_digest=result.argument_digest,
             expires_at=result.expires_at,
+            server_observed_at=result.server_observed_at,
         )
 
-    @router.post("/runs", response_model=RunResponse, status_code=status.HTTP_201_CREATED)
+    @router.post(
+        "/runs",
+        response_model=RunResponse,
+        status_code=status.HTTP_201_CREATED,
+        responses={status.HTTP_429_TOO_MANY_REQUESTS: {"model": ErrorResponse}},
+    )
     async def create_run(
         body: RunCreateRequest, state: State, idempotency_key: Idempotency
     ) -> RunResponse:
@@ -788,31 +908,82 @@ def build_control_plane_router(
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
         cursor: str | None = None,
         run_status: str | None = Query(default=None, alias="status"),
+        active: bool = False,
+        capability_id: UUID | None = None,
+        actor_id: UUID | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        min_duration_seconds: Annotated[int | None, Query(ge=0)] = None,
+        max_duration_seconds: Annotated[int | None, Query(ge=0)] = None,
     ) -> RunPage:
-        statement: Select[Any] = select(Run).where(Run.workspace_id == state.context.workspace_id)
+        statement: Select[Any] = (
+            select(Run)
+            .options(defer(Run.arguments, raiseload=True))
+            .where(Run.workspace_id == state.context.workspace_id)
+        )
+        if active:
+            statement = statement.where(
+                Run.status.in_(
+                    [
+                        RunStatus.QUEUED.value,
+                        RunStatus.PREPARING.value,
+                        RunStatus.SESSION_FENCED.value,
+                        RunStatus.DISPATCH_FENCED.value,
+                    ]
+                )
+            )
         if run_status is not None:
             statement = statement.where(Run.status == run_status)
-        statement = statement.order_by(Run.id.desc())
-        statement = _after_cursor(statement, Run.id, cursor)
+        if capability_id is not None:
+            statement = statement.where(Run.capability_id == capability_id)
+        if actor_id is not None:
+            statement = statement.where(Run.actor_user_id == actor_id)
+        if created_after is not None:
+            created_after = _require_aware_datetime(created_after)
+            statement = statement.where(Run.created_at >= created_after)
+        if created_before is not None:
+            created_before = _require_aware_datetime(created_before)
+            statement = statement.where(Run.created_at < created_before)
+        if (
+            created_after is not None
+            and created_before is not None
+            and created_after >= created_before
+        ):
+            raise InvalidRequest("invalid run time range")
+        if (
+            min_duration_seconds is not None
+            and max_duration_seconds is not None
+            and min_duration_seconds > max_duration_seconds
+        ):
+            raise InvalidRequest("invalid run duration range")
+        duration_end = func.coalesce(Run.terminal_at, func.now())
+        duration_seconds = func.extract("epoch", duration_end) - func.extract(
+            "epoch", Run.created_at
+        )
+        if min_duration_seconds is not None:
+            statement = statement.where(duration_seconds >= min_duration_seconds)
+        if max_duration_seconds is not None:
+            statement = statement.where(duration_seconds <= max_duration_seconds)
+        statement = statement.order_by(Run.created_at.desc(), Run.id.desc())
+        if cursor is not None:
+            cursor_time, cursor_id = _decode_audit_cursor(cursor)
+            statement = statement.where(
+                or_(
+                    Run.created_at < cursor_time,
+                    and_(Run.created_at == cursor_time, Run.id < cursor_id),
+                )
+            )
         rows = list((await state.session.scalars(statement.limit(limit + 1))).all())
         page_runs = rows[:limit]
-        results: dict[UUID, RunResult] = {}
-        if page_runs:
-            results = {
-                result.run_id: result
-                for result in (
-                    await state.session.scalars(
-                        select(RunResult).where(
-                            RunResult.workspace_id == state.context.workspace_id,
-                            RunResult.run_id.in_([run.id for run in page_runs]),
-                            RunResult.expires_at > datetime.now(UTC),
-                        )
-                    )
-                ).all()
-            }
         return RunPage(
-            items=[_run_response_value(run, results.get(run.id)) for run in page_runs],
-            page=PageInfo(next_cursor=_next_cursor(rows, limit, lambda row: row.id)),
+            items=[_run_summary(run) for run in page_runs],
+            page=PageInfo(
+                next_cursor=(
+                    _encode_audit_cursor(page_runs[-1].created_at, page_runs[-1].id)
+                    if len(rows) > limit
+                    else None
+                )
+            ),
         )
 
     @router.get("/runs/{run_id}", response_model=RunResponse)
@@ -1121,10 +1292,13 @@ def _capability(item: Capability) -> CapabilityResponse:
     )
 
 
-def _capability_version(item: CapabilityVersion) -> CapabilityVersionResponse:
+def _capability_version(
+    item: CapabilityVersion, connection_version_id: UUID
+) -> CapabilityVersionResponse:
     return CapabilityVersionResponse(
         id=item.id,
         capability_id=item.capability_id,
+        connection_version_id=connection_version_id,
         sequence=item.sequence,
         display_name=item.display_name,
         description=item.description,
@@ -1137,31 +1311,68 @@ def _capability_version(item: CapabilityVersion) -> CapabilityVersionResponse:
 
 
 async def _run_response(session: AsyncSession, run: Run) -> RunResponse:
-    now = datetime.now(UTC)
+    clock = (
+        func.clock_timestamp()
+        if session.get_bind().dialect.name == "postgresql"
+        else func.current_timestamp()
+    )
+    now = await session.scalar(select(clock))
+    if not isinstance(now, datetime):
+        raise RuntimeError("database clock is unavailable")
     result = await session.scalar(
         select(RunResult).where(
             RunResult.run_id == run.id,
             RunResult.workspace_id == run.workspace_id,
-            RunResult.expires_at > now,
         )
     )
-    return _run_response_value(run, result, now=now)
+    return _run_response_value(run, result, now=_utc(now))
 
 
 def _run_response_value(
-    run: Run, result: RunResult | None, *, now: datetime | None = None
+    run: Run,
+    result: RunResult | None,
+    *,
+    now: datetime | None = None,
 ) -> RunResponse:
     current = now or datetime.now(UTC)
     arguments = run.arguments if _utc(run.arguments_expires_at) > current else None
+    result_payload = (
+        result.payload if result is not None and _utc(result.expires_at) > current else None
+    )
+    persisted_result_expiry = result.expires_at if result is not None else None
     return RunResponse(
         id=run.id,
+        actor_user_id=run.actor_user_id,
         capability_id=run.capability_id,
         capability_version_id=run.capability_version_id,
         connection_id=run.connection_id,
         connection_version_id=run.connection_version_id,
         status=run.status,
         arguments=arguments,
-        result=result.payload if result else None,
+        result=result_payload,
+        safe_error_code=run.safe_error_code,
+        arguments_expires_at=run.arguments_expires_at,
+        result_expires_at=(
+            _utc(persisted_result_expiry) if persisted_result_expiry is not None else None
+        ),
+        server_observed_at=current,
+        cancellation_requested=run.cancellation_requested,
+        deadline=run.deadline,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        terminal_at=run.terminal_at,
+    )
+
+
+def _run_summary(run: Run) -> RunSummaryResponse:
+    return RunSummaryResponse(
+        id=run.id,
+        actor_user_id=run.actor_user_id,
+        capability_id=run.capability_id,
+        capability_version_id=run.capability_version_id,
+        connection_id=run.connection_id,
+        connection_version_id=run.connection_version_id,
+        status=run.status,
         safe_error_code=run.safe_error_code,
         cancellation_requested=run.cancellation_requested,
         deadline=run.deadline,
@@ -1177,5 +1388,5 @@ def _utc(value: datetime) -> datetime:
 
 def _require_aware_datetime(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
-        raise InvalidRequest("audit timestamps require an offset")
+        raise InvalidRequest("timestamps require an offset")
     return value.astimezone(UTC)

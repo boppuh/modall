@@ -133,6 +133,22 @@
             "title": "Id",
             "type": "string"
           },
+          "observed_in_current_snapshot": {
+            "title": "Observed In Current Snapshot",
+            "type": "boolean"
+          },
+          "observed_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Version Id"
+          },
           "pending_version_id": {
             "anyOf": [
               {
@@ -179,7 +195,8 @@
           "status_epoch",
           "created_at",
           "versions",
-          "versions_truncated"
+          "versions_truncated",
+          "observed_in_current_snapshot"
         ],
         "title": "CapabilityDetailResponse",
         "type": "object"
@@ -278,6 +295,11 @@
             "title": "Capability Id",
             "type": "string"
           },
+          "connection_version_id": {
+            "format": "uuid",
+            "title": "Connection Version Id",
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -336,6 +358,7 @@
         "required": [
           "id",
           "capability_id",
+          "connection_version_id",
           "sequence",
           "display_name",
           "description",
@@ -1006,6 +1029,11 @@
             },
             "title": "Items",
             "type": "array"
+          },
+          "server_observed_at": {
+            "format": "date-time",
+            "title": "Server Observed At",
+            "type": "string"
           }
         },
         "required": [
@@ -1013,6 +1041,7 @@
           "items",
           "fetched_at",
           "expires_at",
+          "server_observed_at",
           "from_cache"
         ],
         "title": "RegistrySearchResponse",
@@ -1029,6 +1058,15 @@
           "run"
         ],
         "title": "ResourceType",
+        "type": "string"
+      },
+      "Role": {
+        "enum": [
+          "admin",
+          "operator",
+          "viewer"
+        ],
+        "title": "Role",
         "type": "string"
       },
       "RunCreateRequest": {
@@ -1141,7 +1179,7 @@
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/RunResponse"
+              "$ref": "#/components/schemas/RunSummaryResponse"
             },
             "title": "Items",
             "type": "array"
@@ -1201,6 +1239,11 @@
             "format": "date-time",
             "title": "Expires At",
             "type": "string"
+          },
+          "server_observed_at": {
+            "format": "date-time",
+            "title": "Server Observed At",
+            "type": "string"
           }
         },
         "required": [
@@ -1208,13 +1251,19 @@
           "capability_version_id",
           "connection_version_id",
           "argument_digest",
-          "expires_at"
+          "expires_at",
+          "server_observed_at"
         ],
         "title": "RunPreflightResponse",
         "type": "object"
       },
       "RunResponse": {
         "properties": {
+          "actor_user_id": {
+            "format": "uuid",
+            "title": "Actor User Id",
+            "type": "string"
+          },
           "arguments": {
             "anyOf": [
               {
@@ -1226,6 +1275,11 @@
               }
             ],
             "title": "Arguments"
+          },
+          "arguments_expires_at": {
+            "format": "date-time",
+            "title": "Arguments Expires At",
+            "type": "string"
           },
           "cancellation_requested": {
             "title": "Cancellation Requested",
@@ -1278,6 +1332,125 @@
             ],
             "title": "Result"
           },
+          "result_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Expires At"
+          },
+          "safe_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safe Error Code"
+          },
+          "server_observed_at": {
+            "format": "date-time",
+            "title": "Server Observed At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "terminal_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminal At"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "actor_user_id",
+          "capability_id",
+          "capability_version_id",
+          "connection_id",
+          "connection_version_id",
+          "status",
+          "safe_error_code",
+          "cancellation_requested",
+          "deadline",
+          "created_at",
+          "updated_at",
+          "terminal_at",
+          "arguments",
+          "result",
+          "arguments_expires_at",
+          "result_expires_at",
+          "server_observed_at"
+        ],
+        "title": "RunResponse",
+        "type": "object"
+      },
+      "RunSummaryResponse": {
+        "properties": {
+          "actor_user_id": {
+            "format": "uuid",
+            "title": "Actor User Id",
+            "type": "string"
+          },
+          "cancellation_requested": {
+            "title": "Cancellation Requested",
+            "type": "boolean"
+          },
+          "capability_id": {
+            "format": "uuid",
+            "title": "Capability Id",
+            "type": "string"
+          },
+          "capability_version_id": {
+            "format": "uuid",
+            "title": "Capability Version Id",
+            "type": "string"
+          },
+          "connection_id": {
+            "format": "uuid",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "connection_version_id": {
+            "format": "uuid",
+            "title": "Connection Version Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "deadline": {
+            "format": "date-time",
+            "title": "Deadline",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
           "safe_error_code": {
             "anyOf": [
               {
@@ -1313,13 +1486,12 @@
         },
         "required": [
           "id",
+          "actor_user_id",
           "capability_id",
           "capability_version_id",
           "connection_id",
           "connection_version_id",
           "status",
-          "arguments",
-          "result",
           "safe_error_code",
           "cancellation_requested",
           "deadline",
@@ -1327,7 +1499,31 @@
           "updated_at",
           "terminal_at"
         ],
-        "title": "RunResponse",
+        "title": "RunSummaryResponse",
+        "type": "object"
+      },
+      "SessionResponse": {
+        "properties": {
+          "actor_user_id": {
+            "format": "uuid",
+            "title": "Actor User Id",
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "actor_user_id",
+          "role"
+        ],
+        "title": "SessionResponse",
         "type": "object"
       }
     },
@@ -1694,6 +1890,16 @@
                 }
               ],
               "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "executable",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Executable",
+              "type": "boolean"
             }
           },
           {
@@ -2781,6 +2987,118 @@
             }
           },
           {
+            "in": "query",
+            "name": "active",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Active",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "capability_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Capability Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "actor_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Actor Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "created_after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Created After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "created_before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Created Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_duration_seconds",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Duration Seconds"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_duration_seconds",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Duration Seconds"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Workspace-ID",
             "required": false,
@@ -2967,6 +3285,16 @@
               }
             },
             "description": "Unprocessable Content"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
           },
           "500": {
             "content": {
@@ -4347,6 +4675,108 @@
           }
         ],
         "summary": "Append Connection Version"
+      }
+    },
+    "/v1/session": {
+      "get": {
+        "description": "Return the server-authoritative workspace membership for UI gating.",
+        "operationId": "get_session_v1_session_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Workspace-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Workspace-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Session"
       }
     }
   }

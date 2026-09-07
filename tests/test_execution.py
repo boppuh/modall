@@ -337,6 +337,46 @@ def test_preflight_returns_the_exact_expiry_encoded_in_confirmation() -> None:
     asyncio.run(scenario())
 
 
+def test_admission_enforces_the_bounded_active_run_snapshot() -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        limits = ExecutionLimits(max_active_runs_per_workspace=1)
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="active-limit")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=now, limits=limits)
+                first = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "first"},
+                )
+                await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "first"},
+                    confirmation_token=first.confirmation_token,
+                    idempotency_key="active-first",
+                )
+                second = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "second"},
+                )
+                with pytest.raises(ExecutionError) as raised:
+                    await execution.create_run(
+                        context=context,
+                        capability_version_id=version.id,
+                        arguments={"query": "second"},
+                        confirmation_token=second.confirmation_token,
+                        idempotency_key="active-second",
+                    )
+                assert raised.value.code is ExecutionFailureCode.ACTIVE_RUN_LIMIT
+
+    asyncio.run(scenario())
+
+
 def test_preflight_and_confirmation_fail_closed_without_argument_persistence() -> None:
     async def scenario() -> None:
         now = datetime(2026, 9, 6, tzinfo=UTC)
@@ -1656,6 +1696,8 @@ def test_confirmation_limits_expiry_and_key_configuration_fail_closed(
                 ExecutionLimits(schema_validation_memory_bytes=32 * 1024 * 1024)
             with pytest.raises(ValueError, match="invalid execution limits"):
                 ExecutionLimits(schema_validation_memory_bytes=512 * 1024 * 1024)
+            with pytest.raises(ValueError, match="invalid execution limits"):
+                ExecutionLimits(max_active_runs_per_workspace=101)
             with pytest.raises(ValueError, match="invalid execution limits"):
                 ExecutionLimits(
                     argument_retention_days=1,
