@@ -341,6 +341,22 @@ describe("App", () => {
     await waitFor(() => expect(listRunPage).toHaveBeenCalledWith({}, undefined));
   });
 
+  it("reports failures from the query that supplies the visible run ledger", async () => {
+    const historyFailure = renderApp(fakeApi({ listRunPage: vi.fn().mockRejectedValue(new Error("history offline")) }));
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
+    expect(await screen.findByRole("button", { name: /55555555/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "failed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeTruthy();
+    historyFailure.unmount();
+
+    const runsFailure = renderApp(fakeApi({ listRuns: vi.fn().mockRejectedValue(new Error("reconciliation offline")) }));
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeTruthy();
+    runsFailure.unmount();
+  });
+
   it("preserves a run key across ambiguous submission recovery", async () => {
     const createRun = vi.fn<ControlPlane["createRun"]>().mockRejectedValue(new Error("response lost"));
     const api = fakeApi({ createRun });
@@ -688,5 +704,7 @@ describe("App", () => {
     await waitFor(() => expect(api.listAuditEvents).toHaveBeenCalledWith({ resource_type: "server_connection", resource_id: connectionId, actor_id: connectionId, action: "connection.created", outcome: "succeeded", occurred_after: new Date("2026-09-06T08:00").toISOString(), occurred_before: new Date("2026-09-07T08:00").toISOString() }, undefined));
     fireEvent.click(screen.getByRole("button", { name: "Load older events" }));
     await waitFor(() => expect(api.listAuditEvents).toHaveBeenCalledTimes(3));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh ledger" }));
+    await waitFor(() => expect(vi.mocked(api.listAuditEvents).mock.calls.length).toBeGreaterThan(3));
   });
 });

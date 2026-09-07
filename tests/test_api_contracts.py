@@ -805,13 +805,9 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             listed = await client.get("/v1/runs", headers=headers)
             event.remove(engine.sync_engine, "before_cursor_execute", count_result_queries)
             assert listed.status_code == 200
-            assert listed.json()["items"][0]["arguments"] == arguments
-            assert len(result_queries) == 2
-            assert any(
-                "run_results.payload" not in statement and "run_results.expires_at" in statement
-                for statement in result_queries
-            )
-            assert any("run_results.expires_at >" in statement for statement in result_queries)
+            assert "arguments" not in listed.json()["items"][0]
+            assert "result" not in listed.json()["items"][0]
+            assert result_queries == []
 
             filtered = await client.get("/v1/runs?status=queued", headers=headers)
             assert filtered.status_code == 200
@@ -899,7 +895,8 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             retained_item = next(
                 item for item in retained_page.json()["items"] if item["id"] == run_id
             )
-            assert retained_item["result"] == {"secret": "redacted"}
+            assert "result" not in retained_item
+            assert "result_expires_at" not in retained_item
 
             expired_at = datetime.now(UTC) - timedelta(seconds=1)
             async with transaction(factory) as session:
@@ -917,10 +914,8 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             redacted_item = next(
                 item for item in redacted_page.json()["items"] if item["id"] == run_id
             )
-            assert redacted_item["result"] is None
-            assert redacted_item["result_expires_at"] == expired_at.isoformat().replace(
-                "+00:00", "Z"
-            )
+            assert "result" not in redacted_item
+            assert "result_expires_at" not in redacted_item
 
             disabled = await client.post(
                 f"/v1/capability-versions/{version.id}/disable",

@@ -679,6 +679,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     getNextPageParam: (lastPage) => lastPage.nextCursor,
     refetchInterval: (query) => query.state.status === "error" || Object.keys(runFilters).length === 0 ? false : 3000,
   });
+  const hasRunFilters = Object.keys(runFilters).length > 0;
   const capabilities = useQuery({
     queryKey: queryKey(scope, "capabilities"),
     queryFn: () => api.listCapabilities(),
@@ -776,7 +777,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
   const connectionNames = new Map((connections.data ?? []).map((item) => [item.id, item.name]));
   const capabilityNames = new Map((capabilities.data ?? []).map((item) => [item.id, item.tool_identity]));
   const runIndex = new Map((history.data?.pages.flatMap((page) => page.items) ?? []).map((run) => [run.id, run]));
-  if (Object.keys(runFilters).length === 0) for (const run of runs.data ?? []) runIndex.set(run.id, run);
+  if (!hasRunFilters) for (const run of runs.data ?? []) runIndex.set(run.id, run);
   const orderedRuns = [...runIndex.values()].sort((left, right) => right.created_at.localeCompare(left.created_at));
   const selectedCapability = enabledCapabilities.find((item) => item.enabled_version_id === selectedVersionId);
   const confirmationConnection = useQuery({
@@ -794,7 +795,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
   function submitPreflight(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const versionId = selectedVersionId;
-    if (!versionId) {
+    if (!versionId || !selectedCapability) {
       setArgumentsError("Select an enabled capability.");
       return;
     }
@@ -844,7 +845,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
             {prepare.isError && <p className="field-error" role="alert">{failureMessage(prepare.error)}</p>}
             {capabilities.isError && <QueryFailure error={capabilities.error} retry={() => void capabilities.refetch()} />}
             {connections.isError && <QueryFailure error={connections.error} retry={() => void connections.refetch()} />}
-            <button className="primary-action" disabled={!canOperate(role) || prepare.isPending || enabledCapabilities.length === 0} type="submit">{prepare.isPending ? "Checking…" : "Review invocation"}</button>
+            <button className="primary-action" disabled={!canOperate(role) || prepare.isPending || !selectedCapability} type="submit">{prepare.isPending ? "Checking…" : "Review invocation"}</button>
           </form>
           {!capabilities.isError && enabledCapabilities.length === 0 && <p className="field-help">Enable a capability version before opening a run.</p>}
         </div>
@@ -860,7 +861,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
             <label>Max duration (s)<input name="run-max-duration" type="number" min="0" defaultValue={runFilters.max_duration_seconds} /></label>
             <div className="action-strip"><button type="button" onClick={() => { setRunFilters({}); setRunFilterFormKey((value) => value + 1); }}>Clear</button><button className="secondary-action" type="submit">Apply filters</button></div>
           </form>
-          {history.isPending ? <LoadingState label="Loading runs" /> : history.isError ? <QueryFailure error={history.error} retry={() => void history.refetch()} /> : orderedRuns.length === 0 ? <EmptyState title="No runs retained" copy="Completed and in-flight work will appear here." /> : (
+          {(hasRunFilters ? history.isPending : runs.isPending) ? <LoadingState label="Loading runs" /> : (hasRunFilters ? history.isError : runs.isError) ? <QueryFailure error={hasRunFilters ? history.error : runs.error} retry={() => void (hasRunFilters ? history.refetch() : runs.refetch())} /> : orderedRuns.length === 0 ? <EmptyState title="No runs retained" copy="Completed and in-flight work will appear here." /> : (
             <ul className="select-list">{orderedRuns.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{capabilityNames.get(run.capability_id) ?? shortId(run.capability_id)}</strong><small>{connectionNames.get(run.connection_id) ?? shortId(run.connection_id)} · actor {shortId(run.actor_user_id)} · {shortId(run.id)} · {formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
           )}
           {history.hasNextPage && <button className="secondary-action" disabled={history.isFetchingNextPage} type="button" onClick={() => void history.fetchNextPage()}>{history.isFetchingNextPage ? "Loading…" : "Load older runs"}</button>}
@@ -876,7 +877,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
           {confirmationExpired && <p className="field-error" role="alert">This confirmation expired. Go back and run preflight again.</p>}
           <details open><summary>Exact prepared arguments</summary><pre>{JSON.stringify(pendingArguments, null, 2)}</pre></details>
           {invoke.isError && <p className="field-error" role="alert">{failureMessage(invoke.error)}{invoke.error instanceof ApiFailure && ["invalid_confirmation", "confirmation_expired", "confirmation_replayed"].includes(invoke.error.code) ? " Run preflight again." : " Retry to safely reuse this request."}</p>}
-          <div className="action-strip"><button type="button" onClick={() => invalidatePreparedRun()}>Back</button><button className="primary-action" type="button" disabled={invoke.isPending || !confirmedEndpoint || confirmationExpired} onClick={() => invoke.mutate({ prepared: preflight, args: pendingArguments })}>{invoke.isPending ? "Submitting…" : confirmationExpired ? "Confirmation expired" : "Confirm and run"}</button></div>
+          <div className="action-strip"><button type="button" onClick={() => invalidatePreparedRun()}>Back</button><button className="primary-action" type="button" disabled={!canOperate(role) || invoke.isPending || !confirmedEndpoint || confirmationExpired} onClick={() => invoke.mutate({ prepared: preflight, args: pendingArguments })}>{invoke.isPending ? "Submitting…" : confirmationExpired ? "Confirmation expired" : "Confirm and run"}</button></div>
         </section>
       )}
       {invoke.isError && !preflight && <p className="field-error" role="alert">{failureMessage(invoke.error)} Run preflight again.</p>}
@@ -915,7 +916,7 @@ function Audit({ api, scope }: { api: ControlPlane; scope: QueryScope }) {
   return <div className="page-flow">
     <header className="page-heading"><div><p className="kicker">Workspace accountability</p><h1>Audit ledger</h1><p>Payload-free mutation history, actors, outcomes, and correlation lineage.</p></div></header>
     <section className="section-block">
-      <div className="section-heading"><div><span className="index">Append-only history / 01</span><h2>Recorded events</h2></div></div>
+      <div className="section-heading"><div><span className="index">Append-only history / 01</span><h2>Recorded events</h2></div><button className="secondary-action" type="button" disabled={events.isFetching} onClick={() => void events.refetch()}>{events.isFetching ? "Refreshing…" : "Refresh ledger"}</button></div>
       <form className="audit-filters" onSubmit={(event) => { event.preventDefault(); setFilters(draft); }}>
         <label>Resource type<select value={draft.resource_type ?? ""} onChange={(event) => setDraft({ ...draft, resource_type: event.target.value as AuditFilters["resource_type"] || undefined })}><option value="">Any</option>{["workspace", "membership", "secret_binding", "server_connection", "capability", "registry_entry", "run"].map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
         <label>Resource ID<input value={draft.resource_id ?? ""} onChange={(event) => setDraft({ ...draft, resource_id: event.target.value || undefined })} placeholder="UUID" /></label>

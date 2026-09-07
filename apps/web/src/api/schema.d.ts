@@ -885,7 +885,7 @@ export interface components {
         /** RunPage */
         RunPage: {
             /** Items */
-            items: components["schemas"]["RunResponse"][];
+            items: components["schemas"]["RunSummaryResponse"][];
             page: components["schemas"]["PageInfo"];
         };
         /** RunPreflightRequest */
@@ -981,6 +981,62 @@ export interface components {
             } | null;
             /** Result Expires At */
             result_expires_at: string | null;
+            /** Safe Error Code */
+            safe_error_code: string | null;
+            /** Status */
+            status: string;
+            /** Terminal At */
+            terminal_at: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** RunSummaryResponse */
+        RunSummaryResponse: {
+            /**
+             * Actor User Id
+             * Format: uuid
+             */
+            actor_user_id: string;
+            /** Cancellation Requested */
+            cancellation_requested: boolean;
+            /**
+             * Capability Id
+             * Format: uuid
+             */
+            capability_id: string;
+            /**
+             * Capability Version Id
+             * Format: uuid
+             */
+            capability_version_id: string;
+            /**
+             * Connection Id
+             * Format: uuid
+             */
+            connection_id: string;
+            /**
+             * Connection Version Id
+             * Format: uuid
+             */
+            connection_version_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Deadline
+             * Format: date-time
+             */
+            deadline: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
             /** Safe Error Code */
             safe_error_code: string | null;
             /** Status */

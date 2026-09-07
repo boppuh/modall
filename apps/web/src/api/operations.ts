@@ -14,6 +14,7 @@ export type CapabilityVersion = Schemas["CapabilityVersionResponse"];
 export type RegistryEntry = Schemas["RegistryEntryResponse"];
 export type RegistrySearch = Schemas["RegistrySearchResponse"];
 export type Run = Schemas["RunResponse"];
+export type RunSummary = Schemas["RunSummaryResponse"];
 export type RunEvent = Schemas["RunEventResponse"];
 export type RunPreflight = Schemas["RunPreflightResponse"];
 export type AuditEvent = Schemas["AuditEventResponse"];
@@ -78,7 +79,7 @@ async function collectPages<T>(fetchPage: (cursor?: string) => Promise<Page<T>>)
 export interface OverviewData {
   connections: Connection[];
   capabilities: Capability[];
-  runs: Run[];
+  runs: RunSummary[];
 }
 
 export interface ControlPlane {
@@ -95,8 +96,8 @@ export interface ControlPlane {
   listCapabilities(status?: CapabilityStatus): Promise<Capability[]>;
   getCapability(id: string): Promise<CapabilityDetail>;
   capabilityAction(versionId: string, action: "enable" | "disable", idempotencyKey: string): Promise<Capability>;
-  listRuns(): Promise<Run[]>;
-  listRunPage(filters?: RunFilters, cursor?: string): Promise<{ items: Run[]; nextCursor?: string }>;
+  listRuns(): Promise<RunSummary[]>;
+  listRunPage(filters?: RunFilters, cursor?: string): Promise<{ items: RunSummary[]; nextCursor?: string }>;
   getRun(id: string): Promise<Run>;
   listRunEvents(id: string): Promise<RunEvent[]>;
   preflight(versionId: string, argumentsValue: Record<string, unknown>): Promise<RunPreflight>;
@@ -211,7 +212,7 @@ class GeneratedControlPlane implements ControlPlane {
       : unwrap(this.client.POST("/v1/capability-versions/{capability_version_id}/disable", options));
   }
 
-  async listRuns(): Promise<Run[]> {
+  async listRuns(): Promise<RunSummary[]> {
     const [recent, active] = await Promise.all([
       unwrap(this.client.GET("/v1/runs", { params: { query: { limit: 100 } } })),
       unwrap(this.client.GET("/v1/runs", { params: { query: { limit: 100, active: true } } })),
@@ -221,7 +222,7 @@ class GeneratedControlPlane implements ControlPlane {
     return [...byId.values()].sort((left, right) => right.created_at.localeCompare(left.created_at));
   }
 
-  async listRunPage(filters: RunFilters = {}, cursor?: string): Promise<{ items: Run[]; nextCursor?: string }> {
+  async listRunPage(filters: RunFilters = {}, cursor?: string): Promise<{ items: RunSummary[]; nextCursor?: string }> {
     const page = await unwrap(this.client.GET("/v1/runs", { params: { query: { limit: 100, cursor, ...filters } } }));
     return { items: page.items, ...(page.page.next_cursor ? { nextCursor: page.page.next_cursor } : {}) };
   }

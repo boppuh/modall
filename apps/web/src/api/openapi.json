@@ -1156,7 +1156,7 @@
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/RunResponse"
+              "$ref": "#/components/schemas/RunSummaryResponse"
             },
             "title": "Items",
             "type": "array"
@@ -1356,18 +1356,115 @@
           "connection_id",
           "connection_version_id",
           "status",
+          "safe_error_code",
+          "cancellation_requested",
+          "deadline",
+          "created_at",
+          "updated_at",
+          "terminal_at",
           "arguments",
           "result",
-          "safe_error_code",
           "arguments_expires_at",
-          "result_expires_at",
+          "result_expires_at"
+        ],
+        "title": "RunResponse",
+        "type": "object"
+      },
+      "RunSummaryResponse": {
+        "properties": {
+          "actor_user_id": {
+            "format": "uuid",
+            "title": "Actor User Id",
+            "type": "string"
+          },
+          "cancellation_requested": {
+            "title": "Cancellation Requested",
+            "type": "boolean"
+          },
+          "capability_id": {
+            "format": "uuid",
+            "title": "Capability Id",
+            "type": "string"
+          },
+          "capability_version_id": {
+            "format": "uuid",
+            "title": "Capability Version Id",
+            "type": "string"
+          },
+          "connection_id": {
+            "format": "uuid",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "connection_version_id": {
+            "format": "uuid",
+            "title": "Connection Version Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "deadline": {
+            "format": "date-time",
+            "title": "Deadline",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "safe_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safe Error Code"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "terminal_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminal At"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "actor_user_id",
+          "capability_id",
+          "capability_version_id",
+          "connection_id",
+          "connection_version_id",
+          "status",
+          "safe_error_code",
           "cancellation_requested",
           "deadline",
           "created_at",
           "updated_at",
           "terminal_at"
         ],
-        "title": "RunResponse",
+        "title": "RunSummaryResponse",
         "type": "object"
       },
       "SessionResponse": {

@@ -220,7 +220,7 @@ class RunPreflightResponse(BaseModel):
     expires_at: datetime
 
 
-class RunResponse(BaseModel):
+class RunSummaryResponse(BaseModel):
     id: UUID
     actor_user_id: UUID
     capability_id: UUID
@@ -228,11 +228,7 @@ class RunResponse(BaseModel):
     connection_id: UUID
     connection_version_id: UUID
     status: str
-    arguments: dict[str, object] | None
-    result: dict[str, object] | None
     safe_error_code: str | None
-    arguments_expires_at: datetime
-    result_expires_at: datetime | None
     cancellation_requested: bool
     deadline: datetime
     created_at: datetime
@@ -240,8 +236,15 @@ class RunResponse(BaseModel):
     terminal_at: datetime | None
 
 
+class RunResponse(RunSummaryResponse):
+    arguments: dict[str, object] | None
+    result: dict[str, object] | None
+    arguments_expires_at: datetime
+    result_expires_at: datetime | None
+
+
 class RunPage(BaseModel):
-    items: list[RunResponse]
+    items: list[RunSummaryResponse]
     page: PageInfo
 
 
@@ -917,57 +920,8 @@ def build_control_plane_router(
         if active and len(rows) > MAX_ACTIVE_RUNS_PER_WORKSPACE:
             raise RuntimeError("active run limit invariant exceeded")
         page_runs = rows if active else rows[:limit]
-        retained_arguments: dict[UUID, dict[str, object]] = {}
-        result_expiries: dict[UUID, datetime] = {}
-        results: dict[UUID, RunResult] = {}
-        if page_runs:
-            now = datetime.now(UTC)
-            retained_arguments = {
-                run_id: arguments
-                for run_id, arguments in (
-                    await state.session.execute(
-                        select(Run.id, Run.arguments).where(
-                            Run.workspace_id == state.context.workspace_id,
-                            Run.id.in_([run.id for run in page_runs]),
-                            Run.arguments_expires_at > now,
-                        )
-                    )
-                ).all()
-            }
-            result_expiries = {
-                run_id: expires_at
-                for run_id, expires_at in (
-                    await state.session.execute(
-                        select(RunResult.run_id, RunResult.expires_at).where(
-                            RunResult.workspace_id == state.context.workspace_id,
-                            RunResult.run_id.in_([run.id for run in page_runs]),
-                        )
-                    )
-                ).all()
-            }
-            results = {
-                result.run_id: result
-                for result in (
-                    await state.session.scalars(
-                        select(RunResult).where(
-                            RunResult.workspace_id == state.context.workspace_id,
-                            RunResult.run_id.in_([run.id for run in page_runs]),
-                            RunResult.expires_at > now,
-                        )
-                    )
-                ).all()
-            }
         return RunPage(
-            items=[
-                _run_response_value(
-                    run,
-                    results.get(run.id),
-                    retained_arguments=retained_arguments.get(run.id),
-                    arguments_loaded=True,
-                    result_expires_at=result_expiries.get(run.id),
-                )
-                for run in page_runs
-            ],
+            items=[_run_summary(run) for run in page_runs],
             page=PageInfo(
                 next_cursor=(
                     _encode_audit_cursor(page_runs[-1].created_at, page_runs[-1].id)
@@ -1317,28 +1271,13 @@ def _run_response_value(
     result: RunResult | None,
     *,
     now: datetime | None = None,
-    retained_arguments: dict[str, object] | None = None,
-    arguments_loaded: bool = False,
-    result_expires_at: datetime | None = None,
 ) -> RunResponse:
     current = now or datetime.now(UTC)
-    arguments = (
-        retained_arguments
-        if arguments_loaded
-        else run.arguments
-        if _utc(run.arguments_expires_at) > current
-        else None
-    )
+    arguments = run.arguments if _utc(run.arguments_expires_at) > current else None
     result_payload = (
         result.payload if result is not None and _utc(result.expires_at) > current else None
     )
-    persisted_result_expiry = (
-        result_expires_at
-        if result_expires_at is not None
-        else result.expires_at
-        if result is not None
-        else None
-    )
+    persisted_result_expiry = result.expires_at if result is not None else None
     return RunResponse(
         id=run.id,
         actor_user_id=run.actor_user_id,
@@ -1354,6 +1293,24 @@ def _run_response_value(
         result_expires_at=(
             _utc(persisted_result_expiry) if persisted_result_expiry is not None else None
         ),
+        cancellation_requested=run.cancellation_requested,
+        deadline=run.deadline,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        terminal_at=run.terminal_at,
+    )
+
+
+def _run_summary(run: Run) -> RunSummaryResponse:
+    return RunSummaryResponse(
+        id=run.id,
+        actor_user_id=run.actor_user_id,
+        capability_id=run.capability_id,
+        capability_version_id=run.capability_version_id,
+        connection_id=run.connection_id,
+        connection_version_id=run.connection_version_id,
+        status=run.status,
+        safe_error_code=run.safe_error_code,
         cancellation_requested=run.cancellation_requested,
         deadline=run.deadline,
         created_at=run.created_at,
