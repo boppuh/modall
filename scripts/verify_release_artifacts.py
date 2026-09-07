@@ -26,7 +26,7 @@ REQUIRED_HUMAN_GATES = {
     "staging_owner",
 }
 REQUIRED_PANELS = {
-    "API request rate": "modall_http_requests_total",
+    "API request rate": "modall_http_responses_total",
     "API p95 latency": "modall_http_request_duration_seconds_bucket",
     "Requests in flight": "modall_http_in_flight",
     "Worker outcomes": "modall_worker_invocations_total",
@@ -36,6 +36,7 @@ REQUIRED_ALERTS = {
     "ModallApiErrorRateHigh",
     "ModallApiLatencyHigh",
     "ModallWorkerInvocationFailures",
+    "ModallWorkerPollFailures",
     "ModallMaintenanceFailure",
 }
 REQUIRED_DOCUMENT_SECTIONS = {

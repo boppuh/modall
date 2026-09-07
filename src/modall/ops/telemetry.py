@@ -96,6 +96,12 @@ class MetricsRegistry:
             histogram[-2] += duration_seconds
             histogram[-1] += 1
 
+    def initialize_http(self, **labels: object) -> None:
+        """Expose a zero-valued histogram before the first observed request."""
+
+        with self._lock:
+            _ = self._durations[self._labels(labels)]
+
     @staticmethod
     def _format_labels(labels: tuple[tuple[str, str], ...]) -> str:
         if not labels:

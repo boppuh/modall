@@ -35,6 +35,13 @@ from modall.secrets.provider import build_secret_provider
 
 _INVOCATION_PROTOCOL_OVERHEAD_BYTES = 65_536
 _MAX_JSON_ESCAPE_EXPANSION = 6
+_MAINTENANCE_METRIC_OPERATIONS = (
+    "registry_cache_cleanup",
+    "api_idempotency_cleanup",
+    "result_cleanup",
+    "argument_cleanup",
+    "run_metadata_cleanup",
+)
 
 
 def configure_logging(settings: Settings) -> None:
@@ -61,6 +68,7 @@ async def run_worker(settings: Settings) -> None:
     engine = create_engine(async_database_url(str(settings.database_url)))
     session_factory = create_session_factory(engine)
     metrics = MetricsRegistry()
+    _initialize_worker_metrics(metrics)
     metrics_server = start_metrics_server(
         metrics, host="0.0.0.0", port=settings.worker_metrics_port
     )
@@ -150,6 +158,25 @@ async def _run_maintenance(
                     outcome="succeeded",
                 )
     return outcomes
+
+
+def _initialize_worker_metrics(metrics: MetricsRegistry) -> None:
+    for outcome in ("claimed", "failed", "idle"):
+        metrics.increment("modall_worker_polls_total", amount=0, outcome=outcome)
+    for outcome in ("failed", "indeterminate"):
+        metrics.increment(
+            "modall_worker_invocations_total",
+            amount=0,
+            event="invocation_terminal",
+            outcome=outcome,
+        )
+    for operation in _MAINTENANCE_METRIC_OPERATIONS:
+        metrics.increment(
+            "modall_worker_maintenance_total",
+            amount=0,
+            operation=operation,
+            outcome="failed",
+        )
 
 
 def build_execution_runtime(

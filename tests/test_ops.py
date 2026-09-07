@@ -111,21 +111,34 @@ def test_api_metrics_and_rate_limit_are_payload_free() -> None:
         async def ready() -> bool:
             return True
 
-        settings = Settings(_env_file=None, environment="test", api_rate_limit_per_minute=1)
+        settings = Settings(
+            _env_file=None,
+            environment="test",
+            api_rate_limit_per_minute=1,
+            cors_allowed_origins=("https://console.example",),
+        )
         metrics = MetricsRegistry()
         app = create_app(settings, readiness_probe=ready, metrics=metrics)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             first = await client.get("/v1/not-a-real-resource")
-            second = await client.get("/v1/not-a-real-resource")
+            second = await client.get(
+                "/v1/not-a-real-resource", headers={"Origin": "https://console.example"}
+            )
+            unusual = await client.request("UNBOUNDED-METHOD-TOKEN", "/v1/not-a-real-resource")
             exposed = await client.get("/metrics")
 
         assert first.status_code == 404
         assert second.status_code == 429
         assert second.json()["error"]["code"] == "rate_limited"
         assert second.headers["Retry-After"] == "60"
+        assert second.headers["Access-Control-Allow-Origin"] == "https://console.example"
+        assert unusual.status_code == 429
         assert 'route="unmatched"' in exposed.text
         assert "not-a-real-resource" not in exposed.text
+        assert "UNBOUNDED-METHOD-TOKEN" not in exposed.text
+        assert 'method="OTHER"' in exposed.text
+        assert 'modall_http_responses_total{scope="v1",status_class="4xx"}' in exposed.text
 
     asyncio.run(scenario())
 
@@ -144,6 +157,7 @@ def test_api_concurrency_bound_does_not_block_health() -> None:
                 environment="test",
                 api_max_concurrency=1,
                 api_queue_timeout_seconds=0.01,
+                cors_allowed_origins=("https://console.example",),
             ),
             readiness_probe=ready,
         )
@@ -158,13 +172,14 @@ def test_api_concurrency_bound_does_not_block_health() -> None:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             first = asyncio.create_task(client.get("/v1/slow"))
             await entered.wait()
-            overloaded = await client.get("/v1/slow")
+            overloaded = await client.get("/v1/slow", headers={"Origin": "https://console.example"})
             live = await client.get("/health/live")
             release.set()
             completed = await first
 
         assert overloaded.status_code == 503
         assert overloaded.json()["error"]["code"] == "capacity_exceeded"
+        assert overloaded.headers["Access-Control-Allow-Origin"] == "https://console.example"
         assert live.status_code == 200
         assert completed.status_code == 200
 

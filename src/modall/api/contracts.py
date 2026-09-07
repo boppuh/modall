@@ -308,6 +308,7 @@ def build_control_plane_router(
         responses={
             status.HTTP_401_UNAUTHORIZED: {"model": ErrorResponse},
             status.HTTP_403_FORBIDDEN: {"model": ErrorResponse},
+            status.HTTP_429_TOO_MANY_REQUESTS: {"model": ErrorResponse},
             status.HTTP_409_CONFLICT: {"model": ErrorResponse},
             status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ErrorResponse},
             status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponse},
@@ -889,7 +890,6 @@ def build_control_plane_router(
         "/runs",
         response_model=RunResponse,
         status_code=status.HTTP_201_CREATED,
-        responses={status.HTTP_429_TOO_MANY_REQUESTS: {"model": ErrorResponse}},
     )
     async def create_run(
         body: RunCreateRequest, state: State, idempotency_key: Idempotency

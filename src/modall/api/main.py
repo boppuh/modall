@@ -6,6 +6,7 @@ import time
 import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Final
 from uuid import UUID, uuid4
 
 import uvicorn
@@ -49,6 +50,7 @@ class HealthResponse(BaseModel):
 
 
 ReadinessProbe = Callable[[], Awaitable[bool]]
+_METRIC_METHODS: Final = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"})
 
 
 def create_app(
@@ -66,6 +68,11 @@ def create_app(
     rate_limiter = FixedWindowRateLimiter(resolved_settings.api_rate_limit_per_minute)
     request_slots = asyncio.Semaphore(resolved_settings.api_max_concurrency)
     in_flight = 0
+    for status_class in ("1xx", "2xx", "3xx", "4xx", "5xx"):
+        process_metrics.increment(
+            "modall_http_responses_total", amount=0, scope="v1", status_class=status_class
+        )
+    process_metrics.initialize_http(scope="v1")
     database_probe: DatabaseProbe | None = None
     owns_engine = engine is None
     engine = engine or create_engine(async_database_url(str(resolved_settings.database_url)))
@@ -165,11 +172,6 @@ def create_app(
             response = error_response(
                 "internal_error", "The request could not be completed.", 500, request
             )
-            origin = request.headers.get("Origin")
-            if origin in resolved_settings.cors_allowed_origins:
-                response.headers["Access-Control-Allow-Origin"] = origin
-                response.headers["Access-Control-Expose-Headers"] = "X-Correlation-ID"
-                response.headers.add_vary_header("Origin")
         finally:
             if acquired:
                 in_flight -= 1
@@ -178,28 +180,37 @@ def create_app(
         route = request.scope.get("route")
         route_path = getattr(route, "path", "unmatched")
         duration = time.perf_counter() - started
-        metric_labels = {
-            "method": request.method,
-            "route": route_path,
-            "status_class": f"{response.status_code // 100}xx",
-        }
+        metric_method = request.method if request.method in _METRIC_METHODS else "OTHER"
+        status_class = f"{response.status_code // 100}xx"
         process_metrics.increment(
             "modall_http_requests_total",
-            method=request.method,
+            method=metric_method,
             route=route_path,
-            status_class=f"{response.status_code // 100}xx",
+            status_class=status_class,
         )
-        process_metrics.observe_http(duration, **metric_labels)
+        if request.url.path.startswith("/v1/"):
+            process_metrics.increment(
+                "modall_http_responses_total", scope="v1", status_class=status_class
+            )
+            process_metrics.observe_http(duration, scope="v1")
         log_event(
             logging.getLogger("modall.api"),
             logging.INFO,
             "request_completed",
             correlation_id=correlation_id,
-            method=request.method,
+            method=metric_method,
             route=route_path,
             status_code=response.status_code,
             duration_ms=round(duration * 1000, 3),
         )
+        origin = request.headers.get("Origin")
+        if (
+            origin in resolved_settings.cors_allowed_origins
+            and "Access-Control-Allow-Origin" not in response.headers
+        ):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Expose-Headers"] = "X-Correlation-ID"
+            response.headers.add_vary_header("Origin")
         response.headers["X-Correlation-ID"] = str(correlation_id)
         if request.url.path.startswith("/v1/"):
             response.headers["Cache-Control"] = "no-store"

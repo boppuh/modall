@@ -7,6 +7,7 @@ import pytest
 from modall.config import Settings
 from modall.execution.runner import InvocationRunner
 from modall.execution.service import ExecutionService
+from modall.ops.telemetry import MetricsRegistry
 from modall.persistence.database import create_engine, create_session_factory
 from modall.secrets.provider import (
     MountedFileSecretProvider,
@@ -28,6 +29,22 @@ def test_worker_poll_emits_no_payload(capsys: pytest.CaptureFixture[str]) -> Non
     assert '"event":"worker_poll"' in emitted
     assert '"environment":"test"' in emitted
     assert "arguments" not in emitted
+
+
+def test_worker_initializes_failure_metric_series_at_zero() -> None:
+    metrics = MetricsRegistry()
+
+    main._initialize_worker_metrics(metrics)
+    rendered = metrics.render()
+
+    assert 'modall_worker_polls_total{outcome="failed"} 0' in rendered
+    assert (
+        'modall_worker_invocations_total{event="invocation_terminal",outcome="indeterminate"} 0'
+        in rendered
+    )
+    assert (
+        'modall_worker_maintenance_total{operation="result_cleanup",outcome="failed"} 0' in rendered
+    )
 
 
 def test_worker_run_polls_with_configured_interval(monkeypatch: pytest.MonkeyPatch) -> None:

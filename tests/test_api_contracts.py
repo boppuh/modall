@@ -1185,6 +1185,12 @@ def test_openapi_publishes_every_planned_alpha_route() -> None:
         "/v1/audit-events",
     } <= set(paths)
     assert "429" in paths["/v1/runs"]["post"]["responses"]
+    assert all(
+        "429" in operation["responses"]
+        for path_name, path in paths.items()
+        for method, operation in path.items()
+        if path_name.startswith("/v1/") and method in {"get", "post", "put", "patch", "delete"}
+    )
 
 
 def test_api_idempotency_rejects_invalid_configuration_before_database_access() -> None:
