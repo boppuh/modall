@@ -34,7 +34,11 @@ REQUIRED_PANELS = {
         "histogram_quantile(",
     ),
     "Requests in flight": ("modall_http_in_flight", "sum("),
-    "Worker outcomes": ("modall_worker_invocations_total", "rate("),
+    "Worker outcomes": (
+        "modall_worker_invocations_total",
+        'event="invocation_terminal"',
+        "rate(",
+    ),
     "Maintenance failures": (
         "modall_worker_maintenance_total",
         'outcome="failed"',
@@ -54,6 +58,7 @@ REQUIRED_ALERTS = {
         "histogram_quantile(",
         "> 1",
     ),
+    "ModallApiTargetDown": ("up", 'job="modall-api"', "== 0", "absent("),
     "ModallWorkerInvocationFailures": (
         "modall_worker_invocations_total",
         'event="invocation_terminal"',

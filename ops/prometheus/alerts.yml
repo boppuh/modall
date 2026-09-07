@@ -11,6 +11,11 @@ groups:
         for: 10m
         labels: { severity: ticket }
         annotations: { summary: "Modall API p95 latency exceeds one second" }
+      - alert: ModallApiTargetDown
+        expr: up{job="modall-api"} == 0 or absent(up{job="modall-api"})
+        for: 0m
+        labels: { severity: page }
+        annotations: { summary: "The API scrape target is unavailable" }
       - alert: ModallWorkerInvocationFailures
         expr: increase(modall_worker_invocations_total{event="invocation_terminal",outcome=~"failed|indeterminate"}[10m]) > 0 or (modall_worker_invocations_total{event="invocation_terminal",outcome=~"failed|indeterminate"} > 0 unless modall_worker_invocations_total{event="invocation_terminal",outcome=~"failed|indeterminate"} offset 10m)
         for: 0m
