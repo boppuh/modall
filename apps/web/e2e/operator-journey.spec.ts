@@ -42,6 +42,7 @@ const run = {
   arguments_expires_at: new Date(Date.now() + 60_000).toISOString(),
   result: { matches: 17 },
   result_expires_at: new Date(Date.now() + 60_000).toISOString(),
+  server_observed_at: new Date().toISOString(),
   safe_error_code: null,
   cancellation_requested: false,
   deadline: "2026-09-06T12:05:00Z",

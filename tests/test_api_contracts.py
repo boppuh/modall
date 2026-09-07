@@ -779,6 +779,7 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             assert created.json()["actor_user_id"]
             assert created.json()["arguments_expires_at"]
             assert created.json()["result_expires_at"] is None
+            assert created.json()["server_observed_at"]
             run_id = created.json()["id"]
 
             factory = create_session_factory(engine)
@@ -816,11 +817,67 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             active = await client.get("/v1/runs?active=true", headers=headers)
             assert active.status_code == 200
             assert [item["id"] for item in active.json()["items"]] == [run_id]
+            executable = await client.get("/v1/capabilities?executable=true", headers=headers)
+            assert executable.status_code == 200
+            assert [item["id"] for item in executable.json()["items"]] == [
+                str(version.capability_id)
+            ]
+            scoped_capability = await client.get(
+                "/v1/capabilities",
+                headers=headers,
+                params={
+                    "connection_id": executable.json()["items"][0]["connection_id"],
+                    "status": "enabled",
+                    "limit": 1,
+                },
+            )
+            assert scoped_capability.status_code == 200
+            assert len(scoped_capability.json()["items"]) == 1
+
+            second_arguments = {"query": "forecast"}
+            second_preflight = await client.post(
+                "/v1/run-preflights",
+                headers=headers,
+                json={
+                    "capability_version_id": str(version.id),
+                    "arguments": second_arguments,
+                },
+            )
+            second_created = await client.post(
+                "/v1/runs",
+                headers={**headers, "Idempotency-Key": "run-create-second"},
+                json={
+                    "capability_version_id": str(version.id),
+                    "arguments": second_arguments,
+                    "confirmation_token": second_preflight.json()["confirmation_token"],
+                },
+            )
+            assert second_created.status_code == 201
+            active_page = await client.get("/v1/runs?active=true&limit=1", headers=headers)
+            assert active_page.status_code == 200
+            assert len(active_page.json()["items"]) == 1
+            assert active_page.json()["page"]["next_cursor"] is not None
+            active_next_page = await client.get(
+                "/v1/runs",
+                headers=headers,
+                params={
+                    "active": "true",
+                    "limit": 1,
+                    "cursor": active_page.json()["page"]["next_cursor"],
+                },
+            )
+            assert active_next_page.status_code == 200
+            assert len(active_next_page.json()["items"]) == 1
+            assert active_next_page.json()["items"][0]["id"] != active_page.json()["items"][0]["id"]
             active_by_duration = await client.get(
-                "/v1/runs?status=queued&min_duration_seconds=0", headers=headers
+                "/v1/runs?status=queued&min_duration_seconds=0&max_duration_seconds=300",
+                headers=headers,
             )
             assert active_by_duration.status_code == 200
-            assert [item["id"] for item in active_by_duration.json()["items"]] == [run_id]
+            assert {item["id"] for item in active_by_duration.json()["items"]} == {
+                run_id,
+                second_created.json()["id"],
+            }
 
             fetched = await client.get(f"/v1/runs/{run_id}", headers=headers)
             assert fetched.status_code == 200

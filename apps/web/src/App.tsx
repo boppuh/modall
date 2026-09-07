@@ -281,12 +281,12 @@ function Overview({ api, open, scope }: { api: ControlPlane; open: (view: View, 
         <button type="button" onClick={() => open("registry")}>
           <span>Active connections</span>
           <strong>{active.toString().padStart(2, "0")}</strong>
-          <small>{query.data.connections.length} total</small>
+          <small>{query.data.connections.length} visible</small>
         </button>
         <button type="button" onClick={() => open("capabilities")}>
           <span>Enabled capabilities</span>
           <strong>{enabled.toString().padStart(2, "0")}</strong>
-          <small>{query.data.capabilities.length} discovered</small>
+          <small>{query.data.capabilities.length} visible</small>
         </button>
         <button type="button" onClick={() => open("runs")}>
           <span>Runs in flight</span>
@@ -326,7 +326,7 @@ function Overview({ api, open, scope }: { api: ControlPlane; open: (view: View, 
           <strong>
             {query.data.capabilities.filter((item) => item.status === "pending_review").length}
           </strong>
-          <h2>Capabilities need a decision</h2>
+          <h2>Visible capabilities need a decision</h2>
           <p>Inspect immutable schema and metadata before enabling a version.</p>
           <button className="secondary-action" type="button" onClick={() => open("capabilities", "pending_review")}>
             Open review queue
@@ -339,15 +339,21 @@ function Overview({ api, open, scope }: { api: ControlPlane; open: (view: View, 
 
 function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; select: (id: string | null) => void; mutationKeys: { current: Map<string, string> } }) {
   const queryClient = useQueryClient();
+  const viewMounted = useRef(true);
+  useEffect(() => {
+    viewMounted.current = true;
+    return () => { viewMounted.current = false; };
+  }, []);
   const keyFor = (operation: string) => {
     const existing = mutationKeys.current.get(operation);
     if (existing) return existing;
     const key = mutationId(); mutationKeys.current.set(operation, key); return key;
   };
-  const connections = useQuery({
-    queryKey: queryKey(scope, "connections"),
-    queryFn: () => api.listConnections(),
-    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
+  const connections = useInfiniteQuery({
+    queryKey: queryKey(scope, "connection-pages"),
+    queryFn: ({ pageParam }) => api.listConnectionPage(pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor,
   });
   const entries = useQuery({
     queryKey: queryKey(scope, "registry-entries"),
@@ -378,6 +384,7 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
   const refreshLists = () =>
     Promise.all([
       queryClient.invalidateQueries({ queryKey: queryKey(scope, "connections") }),
+      queryClient.invalidateQueries({ queryKey: queryKey(scope, "connection-pages") }),
       queryClient.invalidateQueries({ queryKey: queryKey(scope, "registry-entries") }),
       queryClient.invalidateQueries({ queryKey: queryKey(scope, "overview") }),
     ]);
@@ -385,7 +392,7 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
     mutationFn: ({ input, key }: { input: { name: string; endpointUrl: string; secretBindingId?: string }; key: string; operation: string }) => api.createConnection(input, key),
     onSuccess: async (created, variables) => {
       mutationKeys.current.delete(variables.operation);
-      select(created.id);
+      if (viewMounted.current) select(created.id);
       await refreshLists();
     },
   });
@@ -400,6 +407,7 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
   });
   const resetAction = action.reset;
   useEffect(() => resetAction(), [resetAction, selectedId]);
+  const connectionRows = connections.data?.pages.flatMap((page) => page.items) ?? [];
   const importEntry = useMutation({
     mutationFn: ({ cacheId, digest, key }: { cacheId: string; digest: string; key: string }) =>
       api.importRegistry(cacheId, digest, key),
@@ -509,15 +517,15 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
       </section>
       <section className="split-detail">
         <div className="section-block">
-          <div className="section-heading"><div><span className="index">Connections / 03</span><h2>Trust inventory</h2></div><span>{entries.isError ? "—" : entries.data?.length ?? 0} catalog entries</span></div>
+          <div className="section-heading"><div><span className="index">Connections / 03</span><h2>Trust inventory</h2></div><span>{entries.isError ? "—" : entries.data?.length ?? 0} visible catalog entries</span></div>
           {entries.isError && <QueryFailure error={entries.error} retry={() => void entries.refetch()} />}
           {connections.isPending ? <LoadingState label="Loading connections" /> : connections.isError ? (
             <QueryFailure error={connections.error} retry={() => void connections.refetch()} />
-          ) : connections.data.length === 0 ? (
+          ) : connectionRows.length === 0 ? (
             <EmptyState title="No connection records" copy="Search the official registry or add an endpoint above." />
           ) : (
             <ul className="select-list">
-              {connections.data.map((connection) => (
+              {connectionRows.map((connection) => (
                 <li key={connection.id}>
                   <button className={selectedId === connection.id ? "selected" : ""} type="button" onClick={() => select(connection.id)}>
                     <span><strong>{connection.name}</strong><small>{shortId(connection.id)}</small></span>
@@ -527,6 +535,7 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
               ))}
             </ul>
           )}
+          {connections.hasNextPage && <button className="secondary-action" disabled={connections.isFetchingNextPage} type="button" onClick={() => void connections.fetchNextPage()}>{connections.isFetchingNextPage ? "Loading…" : "Load older connections"}</button>}
         </div>
         <aside className="detail-panel" aria-live="polite">
           {selectedId === null ? (
@@ -596,6 +605,8 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "overview") });
     },
   });
+  const resetAction = action.reset;
+  useEffect(() => resetAction(), [resetAction, selectedId]);
   const capabilityRows = capabilities.data?.pages.flatMap((page) => page.items) ?? [];
   const connectionNames = new Map((connections.data ?? []).map((item) => [item.id, item.name]));
   return (
@@ -673,7 +684,10 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
   const { selectedVersionId, argumentsText, pendingArguments, preflight } = draft;
   const finalEventFetchRun = useRef<string | null>(null);
   const viewMounted = useRef(true);
-  useEffect(() => () => { viewMounted.current = false; }, []);
+  useEffect(() => {
+    viewMounted.current = true;
+    return () => { viewMounted.current = false; };
+  }, []);
   const runsKey = useMemo(() => queryKey(scope, "runs"), [scope]);
   const eventsKey = useMemo(() => queryKey(scope, "run-events", selectedId), [scope, selectedId]);
   const runs = useQuery({
@@ -691,15 +705,15 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     refetchInterval: (query) => query.state.status === "error" ? false : 3000,
   });
   const hasRunFilters = Object.keys(runFilters).length > 0;
-  const capabilities = useQuery({
-    queryKey: queryKey(scope, "capabilities"),
-    queryFn: () => api.listCapabilities("enabled"),
-    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
+  const capabilities = useInfiniteQuery({
+    queryKey: queryKey(scope, "executable-capabilities"),
+    queryFn: ({ pageParam }) => api.listCapabilityPage("enabled", pageParam, true),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor,
   });
   const connections = useQuery({
     queryKey: queryKey(scope, "connections"),
     queryFn: () => api.listConnections(),
-    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
   });
   const [argumentsError, setArgumentsError] = useState("");
   const [confirmationClock, setConfirmationClock] = useState(() => Date.now());
@@ -711,7 +725,14 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
       if (query.state.status === "error") return false;
       const current = query.state.data;
       if (!current || !terminal(current.status)) return 1500;
-      return current.arguments !== null || current.result !== null ? 1000 : false;
+      const expiries = [
+        current.arguments !== null ? current.arguments_expires_at : null,
+        current.result !== null ? current.result_expires_at : null,
+      ].filter((value): value is string => value !== null);
+      if (expiries.length === 0) return false;
+      const serverNow = Date.parse(current.server_observed_at);
+      const nextExpiry = Math.min(...expiries.map((value) => Date.parse(value)));
+      return Math.max(1000, Math.min(nextExpiry - serverNow + 250, 2_147_000_000));
     },
   });
   const events = useQuery({
@@ -778,13 +799,9 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "runs") });
     },
   });
-  const connectionById = new Map((connections.data ?? []).map((item) => [item.id, item]));
-  const enabledCapabilities = (capabilities.data ?? []).filter((item) => {
-    const connection = connectionById.get(item.connection_id);
-    return item.status === "enabled" && item.enabled_version_id && connection?.lifecycle === "active" && connection.pending_version_id === null && connection.verified_version_id !== null;
-  });
+  const enabledCapabilities = capabilities.data?.pages.flatMap((page) => page.items) ?? [];
   const connectionNames = new Map((connections.data ?? []).map((item) => [item.id, item.name]));
-  const capabilityNames = new Map((capabilities.data ?? []).map((item) => [item.id, item.tool_identity]));
+  const capabilityNames = new Map(enabledCapabilities.map((item) => [item.id, item.tool_identity]));
   const runIndex = new Map((history.data?.pages.flatMap((page) => page.items) ?? []).map((run) => [run.id, run]));
   if (!hasRunFilters) for (const run of runs.data ?? []) runIndex.set(run.id, run);
   const orderedRuns = [...runIndex.values()].sort((left, right) => right.created_at.localeCompare(left.created_at));
@@ -858,16 +875,16 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
             {argumentsError && <p className="field-error" role="alert">{argumentsError}</p>}
             {prepare.isError && <p className="field-error" role="alert">{failureMessage(prepare.error)}</p>}
             {capabilities.isError && <QueryFailure error={capabilities.error} retry={() => void capabilities.refetch()} />}
-            {connections.isError && <QueryFailure error={connections.error} retry={() => void connections.refetch()} />}
             <button className="primary-action" disabled={!canOperate(role) || prepare.isPending || !selectedCapability} type="submit">{prepare.isPending ? "Checking…" : "Review invocation"}</button>
           </form>
           {!capabilities.isError && enabledCapabilities.length === 0 && <p className="field-help">Enable a capability version before opening a run.</p>}
+          <div className="action-strip"><button className="secondary-action" type="button" disabled={capabilities.isFetching} onClick={() => void capabilities.refetch()}>{capabilities.isFetching ? "Refreshing…" : "Refresh executable tools"}</button>{capabilities.hasNextPage && <button className="secondary-action" disabled={capabilities.isFetchingNextPage} type="button" onClick={() => void capabilities.fetchNextPage()}>{capabilities.isFetchingNextPage ? "Loading…" : "Load more executable tools"}</button>}</div>
         </div>
         <div className="section-block run-inventory">
           <div className="section-heading"><div><span className="index">Ledger / 02</span><h2>Recent runs</h2></div></div>
           <form className="audit-filters" key={runFilterFormKey} onSubmit={submitRunFilters}>
             <label>Status<select name="run-status" defaultValue={runFilters.status ?? ""}><option value="">Any</option>{["queued", "preparing", "session_fenced", "dispatch_fenced", "succeeded", "failed", "cancelled", "timed_out", "indeterminate"].map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
-            <label>Capability<select name="run-capability" defaultValue={runFilters.capability_id ?? ""}><option value="">Any</option>{(capabilities.data ?? []).map((item) => <option key={item.id} value={item.id}>{item.tool_identity}</option>)}</select></label>
+            <label>Capability<select name="run-capability" defaultValue={runFilters.capability_id ?? ""}><option value="">Any</option>{enabledCapabilities.map((item) => <option key={item.id} value={item.id}>{item.tool_identity}</option>)}</select></label>
             <label>Actor ID<input name="run-actor" defaultValue={runFilters.actor_id ?? ""} placeholder="UUID" pattern="[0-9a-fA-F-]{36}" /></label>
             <label>Created after<input name="run-created-after" type="datetime-local" defaultValue={localDateTimeValue(runFilters.created_after)} /></label>
             <label>Created before<input name="run-created-before" type="datetime-local" defaultValue={localDateTimeValue(runFilters.created_before)} /></label>

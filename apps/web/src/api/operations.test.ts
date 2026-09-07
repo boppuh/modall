@@ -40,6 +40,7 @@ const run = {
   arguments_expires_at: timestamp,
   result: {},
   result_expires_at: timestamp,
+  server_observed_at: timestamp,
   safe_error_code: null,
   cancellation_requested: false,
   deadline: timestamp,
@@ -129,6 +130,7 @@ describe("control-plane operations", () => {
     expect((await api.currentSession()).role).toBe("admin");
     expect((await api.overview()).connections).toHaveLength(1);
     expect(await api.listConnections()).toHaveLength(1);
+    expect((await api.listConnectionPage()).items).toHaveLength(1);
     expect((await api.getConnection(id)).id).toBe(id);
     expect((await api.createConnection({ name: "Tools", endpointUrl: "https://mcp.example", secretBindingId: otherId }, "create-key")).id).toBe(id);
     await api.appendConnectionVersion(id, { endpointUrl: "https://mcp.example/v2" }, "append-key");
@@ -143,6 +145,8 @@ describe("control-plane operations", () => {
     expect((await api.listCapabilityPage("pending_review", "older")).items).toHaveLength(1);
     expect(requests.some((request) => new URL(request.url).searchParams.get("status") === "pending_review")).toBe(true);
     expect(requests.some((request) => new URL(request.url).searchParams.get("cursor") === "older")).toBe(true);
+    await api.listCapabilityPage("enabled", undefined, true);
+    expect(requests.some((request) => new URL(request.url).searchParams.get("executable") === "true")).toBe(true);
     expect((await api.getCapability(id)).tool_identity).toBe("tools/search");
     await api.capabilityAction(otherId, "enable", "cap-enable-key");
     await api.capabilityAction(otherId, "disable", "cap-disable-key");
@@ -195,7 +199,7 @@ describe("control-plane operations", () => {
     );
   });
 
-  it("collects every page and rejects a repeated cursor", async () => {
+  it("bounds connection pages and rejects a repeated collected cursor", async () => {
     let page = 0;
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(() => {
       page += 1;
@@ -205,7 +209,8 @@ describe("control-plane operations", () => {
       }), { status: 200, headers: { "Content-Type": "application/json" } }));
     }));
     const api = createControlPlane({ identityId: "reviewer", workspaceId: id });
-    expect(await api.listConnections()).toHaveLength(2);
+    expect(await api.listConnections()).toHaveLength(1);
+    expect((await api.listConnectionPage("next-page")).items).toHaveLength(1);
 
     page = 0;
     const runRequestUrls: string[] = [];
@@ -231,6 +236,6 @@ describe("control-plane operations", () => {
       items: [connection], page: { next_cursor: "same" },
     }), { status: 200, headers: { "Content-Type": "application/json" } }))));
     const loopingApi = createControlPlane({ identityId: "reviewer", workspaceId: id });
-    await expect(loopingApi.listConnections()).rejects.toThrow("repeated page cursor");
+    await expect(loopingApi.listRunEvents(id)).rejects.toThrow("repeated page cursor");
   });
 });

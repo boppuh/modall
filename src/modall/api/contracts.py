@@ -243,6 +243,7 @@ class RunResponse(RunSummaryResponse):
     result: dict[str, object] | None
     arguments_expires_at: datetime
     result_expires_at: datetime | None
+    server_observed_at: datetime
 
 
 class RunPage(BaseModel):
@@ -666,10 +667,30 @@ def build_control_plane_router(
         cursor: str | None = None,
         connection_id: UUID | None = None,
         capability_status: str | None = Query(default=None, alias="status"),
+        executable: bool = False,
     ) -> CapabilityPage:
         statement: Select[Any] = select(Capability).where(
             Capability.workspace_id == state.context.workspace_id
         )
+        if executable:
+            statement = (
+                statement.join(
+                    ServerConnection,
+                    ServerConnection.id == Capability.connection_id,
+                )
+                .join(
+                    McpToolBinding,
+                    McpToolBinding.capability_version_id == Capability.enabled_version_id,
+                )
+                .where(
+                    Capability.status == "enabled",
+                    Capability.enabled_version_id.is_not(None),
+                    Capability.pending_version_id.is_(None),
+                    ServerConnection.lifecycle == "active",
+                    ServerConnection.pending_version_id.is_(None),
+                    ServerConnection.verified_version_id == McpToolBinding.connection_version_id,
+                )
+            )
         if connection_id is not None:
             statement = statement.where(Capability.connection_id == connection_id)
         if capability_status is not None:
@@ -952,13 +973,13 @@ def build_control_plane_router(
         rows = list((await state.session.scalars(statement.limit(query_limit))).all())
         if active and len(rows) > MAX_ACTIVE_RUNS_PER_WORKSPACE:
             raise RuntimeError("active run limit invariant exceeded")
-        page_runs = rows if active else rows[:limit]
+        page_runs = rows[:limit]
         return RunPage(
             items=[_run_summary(run) for run in page_runs],
             page=PageInfo(
                 next_cursor=(
                     _encode_audit_cursor(page_runs[-1].created_at, page_runs[-1].id)
-                    if not active and len(rows) > limit
+                    if len(rows) > limit
                     else None
                 )
             ),
@@ -1326,6 +1347,7 @@ def _run_response_value(
         result_expires_at=(
             _utc(persisted_result_expiry) if persisted_result_expiry is not None else None
         ),
+        server_observed_at=current,
         cancellation_requested=run.cancellation_requested,
         deadline=run.deadline,
         created_at=run.created_at,

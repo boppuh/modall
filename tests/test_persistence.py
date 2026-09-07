@@ -17,7 +17,16 @@ from modall.identity.repository import (
 from modall.identity.service import IdentityService
 from modall.identity.types import Permission, Principal, Role
 from modall.persistence.database import create_engine, create_session_factory, transaction
-from modall.persistence.models import AuditEvent, Base, SecretBinding, User, WorkspaceMembership
+from modall.persistence.models import (
+    AuditEvent,
+    Base,
+    RegistryEntry,
+    SecretBinding,
+    ServerConnectionVersion,
+    User,
+    WorkspaceMembership,
+)
+from modall.registry.types import RegistrySource, Transport
 from modall.secrets.provider import SecretProviderError, SecretReference
 from modall.secrets.service import SecretBindingService
 
@@ -55,6 +64,14 @@ async def bootstrap_workspace(
         )
         workspace = await identity.create_workspace(owner=user, name=name)
         return user.id, workspace.id
+
+
+def test_registry_model_enum_projections() -> None:
+    assert RegistryEntry(source="official").typed_source is RegistrySource.OFFICIAL
+    assert (
+        ServerConnectionVersion(transport="streamable_http").typed_transport
+        is Transport.STREAMABLE_HTTP
+    )
 
 
 def test_workspace_repository_isolation_authorization_and_atomic_audit() -> None:

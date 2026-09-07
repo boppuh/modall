@@ -86,6 +86,7 @@ export interface ControlPlane {
   currentSession(): Promise<EffectiveSession>;
   overview(): Promise<OverviewData>;
   listConnections(): Promise<Connection[]>;
+  listConnectionPage(cursor?: string): Promise<{ items: Connection[]; nextCursor?: string }>;
   getConnection(id: string): Promise<ConnectionDetail>;
   createConnection(input: { name: string; endpointUrl: string; secretBindingId?: string }, idempotencyKey: string): Promise<Connection>;
   appendConnectionVersion(id: string, input: { endpointUrl: string; secretBindingId?: string }, idempotencyKey: string): Promise<ConnectionVersion>;
@@ -94,7 +95,7 @@ export interface ControlPlane {
   importRegistry(cacheId: string, provenanceDigest: string, idempotencyKey: string): Promise<RegistryEntry>;
   listRegistryEntries(): Promise<RegistryEntry[]>;
   listCapabilities(status?: CapabilityStatus): Promise<Capability[]>;
-  listCapabilityPage(status?: CapabilityStatus, cursor?: string): Promise<{ items: Capability[]; nextCursor?: string }>;
+  listCapabilityPage(status?: CapabilityStatus, cursor?: string, executable?: boolean): Promise<{ items: Capability[]; nextCursor?: string }>;
   getCapability(id: string): Promise<CapabilityDetail>;
   capabilityAction(versionId: string, action: "enable" | "disable", idempotencyKey: string): Promise<Capability>;
   listRuns(): Promise<RunSummary[]>;
@@ -124,7 +125,12 @@ class GeneratedControlPlane implements ControlPlane {
   }
 
   async listConnections(): Promise<Connection[]> {
-    return collectPages((cursor) => unwrap(this.client.GET("/v1/server-connections", { params: { query: { limit: 100, cursor } } })));
+    return (await this.listConnectionPage()).items;
+  }
+
+  async listConnectionPage(cursor?: string): Promise<{ items: Connection[]; nextCursor?: string }> {
+    const page = await unwrap(this.client.GET("/v1/server-connections", { params: { query: { limit: 100, cursor } } }));
+    return { items: page.items, ...(page.page.next_cursor ? { nextCursor: page.page.next_cursor } : {}) };
   }
 
   getConnection(id: string): Promise<ConnectionDetail> {
@@ -194,8 +200,8 @@ class GeneratedControlPlane implements ControlPlane {
     return (await this.listCapabilityPage(status)).items;
   }
 
-  async listCapabilityPage(status?: CapabilityStatus, cursor?: string): Promise<{ items: Capability[]; nextCursor?: string }> {
-    const page = await unwrap(this.client.GET("/v1/capabilities", { params: { query: { limit: 100, cursor, status } } }));
+  async listCapabilityPage(status?: CapabilityStatus, cursor?: string, executable = false): Promise<{ items: Capability[]; nextCursor?: string }> {
+    const page = await unwrap(this.client.GET("/v1/capabilities", { params: { query: { limit: 100, cursor, status, executable } } }));
     return { items: page.items, ...(page.page.next_cursor ? { nextCursor: page.page.next_cursor } : {}) };
   }
 

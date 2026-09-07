@@ -1331,6 +1331,11 @@
             ],
             "title": "Safe Error Code"
           },
+          "server_observed_at": {
+            "format": "date-time",
+            "title": "Server Observed At",
+            "type": "string"
+          },
           "status": {
             "title": "Status",
             "type": "string"
@@ -1370,7 +1375,8 @@
           "arguments",
           "result",
           "arguments_expires_at",
-          "result_expires_at"
+          "result_expires_at",
+          "server_observed_at"
         ],
         "title": "RunResponse",
         "type": "object"
@@ -1860,6 +1866,16 @@
                 }
               ],
               "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "executable",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Executable",
+              "type": "boolean"
             }
           },
           {

@@ -985,6 +985,11 @@ export interface components {
             result_expires_at: string | null;
             /** Safe Error Code */
             safe_error_code: string | null;
+            /**
+             * Server Observed At
+             * Format: date-time
+             */
+            server_observed_at: string;
             /** Status */
             status: string;
             /** Terminal At */
@@ -1207,6 +1212,7 @@ export interface operations {
                 cursor?: string | null;
                 connection_id?: string | null;
                 status?: string | null;
+                executable?: boolean;
             };
             header?: {
                 "X-Workspace-ID"?: string | null;
