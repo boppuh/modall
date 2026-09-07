@@ -39,6 +39,7 @@ from modall.mcp_adapter.client import (
     InvocationResult,
     McpClientAdapter,
 )
+from modall.ops.telemetry import MetricsRegistry
 from modall.persistence.database import create_engine, create_session_factory, transaction
 from modall.persistence.models import (
     AuditEvent,
@@ -1436,6 +1437,62 @@ def test_invocation_runner_maps_only_safe_failures(
                 assert stored.status == expected_status.value
                 assert stored.safe_error_code == expected_code.value
                 assert await session.get(RunResult, run.id) is None
+
+    asyncio.run(scenario())
+
+
+def test_runner_emits_terminal_metric_for_reconciled_expired_dispatch() -> None:
+    async def scenario() -> None:
+        now = datetime(2026, 9, 6, tzinfo=UTC)
+        current = [now]
+        async with database() as factory:
+            user_id, workspace_id = await bootstrap(factory, subject="runner-reconcile")
+            async with transaction(factory) as session:
+                context = await context_for(session, user_id=user_id, workspace_id=workspace_id)
+                version = await create_executable_target(session, context)
+                execution = service(session, now=current[0])
+                token = await execution.preflight(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "reconcile"},
+                )
+                run = await execution.create_run(
+                    context=context,
+                    capability_version_id=version.id,
+                    arguments={"query": "reconcile"},
+                    confirmation_token=token.confirmation_token,
+                    idempotency_key="runner-reconcile",
+                    deadline=now + timedelta(seconds=1),
+                )
+                lease = await execution.claim_job(
+                    worker_id="lost-worker", lease_duration=timedelta(seconds=30)
+                )
+                assert lease is not None
+                await execution.fence_session(lease)
+                await execution.fence_dispatch(lease)
+
+            current[0] = now + timedelta(seconds=2)
+            metrics = MetricsRegistry()
+            runner = InvocationRunner(
+                session_factory=factory,
+                execution_service_factory=lambda session: service(session, now=current[0]),
+                secret_provider=FixtureSecretProvider({}),
+                adapter_factory=lambda _: pytest.fail("a reconciled job must not be invoked"),
+                metrics=metrics,
+            )
+
+            assert not await runner.claim_and_run(
+                worker_id="reconciliation-worker", lease_duration=timedelta(seconds=30)
+            )
+            async with factory() as session:
+                stored = await session.get(Run, run.id)
+                assert stored is not None
+                assert stored.status == RunStatus.INDETERMINATE.value
+                assert stored.safe_error_code == RunFailureCode.DEADLINE_EXCEEDED.value
+            assert (
+                'modall_worker_invocations_total{event="invocation_terminal",'
+                'outcome="indeterminate"} 1' in metrics.render()
+            )
 
     asyncio.run(scenario())
 

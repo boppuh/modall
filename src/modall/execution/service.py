@@ -26,6 +26,7 @@ from modall.execution.types import (
     HmacKeyVersion,
     JobLease,
     JobStatus,
+    ReconciledJob,
     RunEventType,
     RunFailureCode,
     RunPreflight,
@@ -387,6 +388,7 @@ class ExecutionService:
         *,
         worker_id: str,
         lease_duration: timedelta,
+        reconciled_jobs: list[ReconciledJob] | None = None,
     ) -> JobLease | None:
         if not worker_id or len(worker_id) > 128 or lease_duration <= timedelta(0):
             raise ValueError("invalid worker lease")
@@ -394,12 +396,16 @@ class ExecutionService:
         state = await self._execution_state(lock="shared")
         if state.dispatch_quarantined:
             raise ExecutionError(ExecutionFailureCode.DISPATCH_QUARANTINED)
-        await self._terminalize_expired_jobs(now)
+        expired = await self._terminalize_expired_jobs(now)
+        if reconciled_jobs is not None:
+            reconciled_jobs.extend(expired)
         # The session disables autoflush. Persist terminal projections before
         # the next reconciliation query so one dispatch-fenced deadline cannot
         # be selected and terminalized twice with the same event sequence.
         await self._session.flush()
-        await self._terminalize_abandoned_dispatches(now)
+        abandoned = await self._terminalize_abandoned_dispatches(now)
+        if reconciled_jobs is not None:
+            reconciled_jobs.extend(abandoned)
         run = await self._session.scalar(
             select(Run)
             .join(
@@ -1523,11 +1529,11 @@ class ExecutionService:
             ),
         )
 
-    async def _terminalize_expired_jobs(self, now: datetime) -> None:
-        runs = list(
+    async def _terminalize_expired_jobs(self, now: datetime) -> list[ReconciledJob]:
+        rows = list(
             (
-                await self._session.scalars(
-                    select(Run)
+                await self._session.execute(
+                    select(Run, Job)
                     .join(
                         Job,
                         and_(Job.workspace_id == Run.workspace_id, Job.run_id == Run.id),
@@ -1542,19 +1548,23 @@ class ExecutionService:
                 )
             ).all()
         )
-        for run in runs:
+        reconciled: list[ReconciledJob] = []
+        for run, job in rows:
             status = (
                 RunStatus.INDETERMINATE
                 if run.status == RunStatus.DISPATCH_FENCED.value
                 else RunStatus.TIMED_OUT
             )
             await self._terminalize_run(run, status, now, RunFailureCode.DEADLINE_EXCEEDED)
+            if status == RunStatus.INDETERMINATE:
+                reconciled.append(self._reconciled_job(run, job, status))
+        return reconciled
 
-    async def _terminalize_abandoned_dispatches(self, now: datetime) -> None:
-        runs = list(
+    async def _terminalize_abandoned_dispatches(self, now: datetime) -> list[ReconciledJob]:
+        rows = list(
             (
-                await self._session.scalars(
-                    select(Run)
+                await self._session.execute(
+                    select(Run, Job)
                     .join(
                         Job,
                         and_(Job.workspace_id == Run.workspace_id, Job.run_id == Run.id),
@@ -1570,14 +1580,28 @@ class ExecutionService:
                 )
             ).all()
         )
-        for run in runs:
+        reconciled: list[ReconciledJob] = []
+        for run, job in rows:
             await self._terminalize_run(
                 run,
                 RunStatus.INDETERMINATE,
                 now,
                 RunFailureCode.WORKER_LOST_AFTER_DISPATCH,
             )
+            reconciled.append(self._reconciled_job(run, job, RunStatus.INDETERMINATE))
         await self._session.flush()
+        return reconciled
+
+    @staticmethod
+    def _reconciled_job(run: Run, job: Job, status: RunStatus) -> ReconciledJob:
+        return ReconciledJob(
+            job_id=job.id,
+            run_id=run.id,
+            workspace_id=run.workspace_id,
+            correlation_id=run.correlation_id,
+            lease_epoch=job.lease_epoch,
+            status=status,
+        )
 
     async def _terminalize_run(
         self,

@@ -14,6 +14,7 @@ from modall.execution.types import (
     ExecutionError,
     ExecutionFailureCode,
     JobLease,
+    ReconciledJob,
     RunFailureCode,
     RunStatus,
 )
@@ -69,11 +70,15 @@ class InvocationRunner:
     async def claim_and_run(self, *, worker_id: str, lease_duration: timedelta) -> bool:
         """Claim at most one durable job and execute it outside the claim transaction."""
 
+        reconciled_jobs: list[ReconciledJob] = []
         async with transaction(self._session_factory) as session:
             lease = await self._execution_service_factory(session).claim_job(
                 worker_id=worker_id,
                 lease_duration=lease_duration,
+                reconciled_jobs=reconciled_jobs,
             )
+        for reconciled in reconciled_jobs:
+            self._event("invocation_terminal", reconciled, outcome=reconciled.status.value)
         if lease is None:
             return False
         self._event("job_claimed", lease)
@@ -169,7 +174,9 @@ class InvocationRunner:
         self._event("invocation_terminal", lease, outcome=status.value)
         return status
 
-    def _event(self, event: str, lease: JobLease, *, outcome: str | None = None) -> None:
+    def _event(
+        self, event: str, lease: JobLease | ReconciledJob, *, outcome: str | None = None
+    ) -> None:
         fields: dict[str, object] = {
             "correlation_id": lease.correlation_id,
             "workspace_id": lease.workspace_id,
