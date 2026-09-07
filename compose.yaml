@@ -101,14 +101,14 @@ services:
     restart: unless-stopped
     mem_limit: 1536m
     expose:
-      - "9101"
+      - "${MODALL_WORKER_METRICS_PORT:-9101}"
     healthcheck:
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:9101/health/live')",
+          "import os, urllib.request; urllib.request.urlopen('http://localhost:' + os.environ['MODALL_WORKER_METRICS_PORT'] + '/health/live')",
         ]
       interval: 3s
       timeout: 3s

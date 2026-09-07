@@ -109,7 +109,7 @@ async def _run_maintenance(
     session_factory: async_sessionmaker[AsyncSession],
     execution_service_factory: ExecutionServiceFactory,
     metrics: MetricsRegistry | None = None,
-) -> None:
+) -> dict[str, str]:
     operations = (
         ("registry_cache_cleanup_failed", purge_expired_registry_cache),
         ("api_idempotency_cleanup_failed", purge_expired_api_idempotency),
@@ -127,6 +127,7 @@ async def _run_maintenance(
         ),
     )
     logger = logging.getLogger("modall.worker")
+    outcomes: dict[str, str] = {}
     for failure_code, operation in operations:
         operation_name = failure_code.removesuffix("_failed")
         try:
@@ -134,18 +135,21 @@ async def _run_maintenance(
                 async with transaction(session_factory) as session:
                     await operation(session)
         except Exception:
+            outcomes[operation_name] = "failed"
             if metrics is not None:
                 metrics.increment(
                     "modall_worker_maintenance_total", operation=operation_name, outcome="failed"
                 )
             log_event(logger, logging.WARNING, failure_code)
         else:
+            outcomes[operation_name] = "succeeded"
             if metrics is not None:
                 metrics.increment(
                     "modall_worker_maintenance_total",
                     operation=operation_name,
                     outcome="succeeded",
                 )
+    return outcomes
 
 
 def build_execution_runtime(

@@ -221,8 +221,8 @@ class InvocationRunner:
                     lease, status=status, safe_error_code=code
                 )
                 result = RunStatus(run.status)
-                self._event("invocation_terminal", lease, outcome=result.value)
-                return result
+            self._event("invocation_terminal", lease, outcome=result.value)
+            return result
         except ExecutionError:
             return None
 

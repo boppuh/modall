@@ -176,6 +176,8 @@ def test_ops_parser_requires_destructive_confirmations() -> None:
 
     assert parser.parse_args(["restore-enter", "--confirm", "RESTORE"]).command == "restore-enter"
     assert parser.parse_args(["restore-clear", "--confirm", "CLEAR"]).command == "restore-clear"
+    assert parser.parse_args(["restore-reconcile"]).batch_size is None
+    assert parser.parse_args(["restore-reconcile", "--batch-size", "7"]).batch_size == 7
     with pytest.raises(SystemExit):
         parser.parse_args(["restore-enter"])
 
@@ -205,3 +207,40 @@ def test_ops_status_does_not_require_secret_keyrings(monkeypatch: pytest.MonkeyP
         }
 
     asyncio.run(scenario())
+
+
+def test_ops_maintenance_propagates_failure_and_main_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class FakeEngine:
+        disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    engine = FakeEngine()
+    factory = object()
+    monkeypatch.setattr(cli, "create_engine", lambda _: engine)
+    monkeypatch.setattr(cli, "create_session_factory", lambda _: factory)
+    monkeypatch.setattr(cli, "build_execution_runtime", lambda *_: (object(), object()))
+
+    async def failed_maintenance(**_: object) -> dict[str, str]:
+        return {"registry_cache_cleanup": "failed", "result_cleanup": "succeeded"}
+
+    monkeypatch.setattr(cli, "_run_maintenance", failed_maintenance)
+    result = asyncio.run(
+        cli.execute(
+            Settings(_env_file=None, environment="test"), _parser().parse_args(["maintenance"])
+        )
+    )
+    assert result["status"] == "failed"
+    assert engine.disposed
+
+    async def failed_execute(*_: object) -> dict[str, object]:
+        return result
+
+    monkeypatch.setattr(cli, "execute", failed_execute)
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["maintenance"])
+    assert exited.value.code == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "failed"

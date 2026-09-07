@@ -12,7 +12,7 @@ Release candidate: pending. This file separates reproducible evidence from human
 | Migration/clean install | CI Python migration cycle | upgrade, drift check, downgrade, fresh upgrade pass |
 | Local topology | CI Compose build and `docker compose config --quiet` | pass |
 | Release artifacts | `make release-artifacts` | manifest, dashboard, alerts, runbook, threat model valid |
-| Restore/no-duplicate invariant | `test_restore_quarantine_fences_old_jobs_and_retention_erases_content` | pass |
+| Restore/no-duplicate invariant | `uv run pytest --no-cov tests/test_execution.py -k test_restore_quarantine_fences_old_jobs_and_retention_erases_content` | pass |
 | Admission/load bounds | active-run admission, API concurrency/rate, and bounded pagination tests | pass |
 
 ## Manual gates

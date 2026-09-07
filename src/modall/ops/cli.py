@@ -39,7 +39,7 @@ def _parser() -> argparse.ArgumentParser:
     reconcile = commands.add_parser(
         "restore-reconcile", help="Terminalize one bounded batch of restored active runs"
     )
-    reconcile.add_argument("--batch-size", type=int, default=100)
+    reconcile.add_argument("--batch-size", type=int)
     clear = commands.add_parser("restore-clear", help="Clear quarantine after reconciliation")
     clear.add_argument("--confirm", required=True, choices=("CLEAR",))
     commands.add_parser("maintenance", help="Run one bounded retention-maintenance pass")
@@ -53,12 +53,17 @@ async def execute(settings: Settings, args: argparse.Namespace) -> dict[str, obj
     try:
         if args.command == "maintenance":
             _, execution_factory = build_execution_runtime(settings, factory)
-            await _run_maintenance(
+            outcomes = await _run_maintenance(
                 settings=settings,
                 session_factory=factory,
                 execution_service_factory=execution_factory,
             )
-            return {"operation": "maintenance", "status": "completed"}
+            failed = any(outcome == "failed" for outcome in outcomes.values())
+            return {
+                "operation": "maintenance",
+                "status": "failed" if failed else "completed",
+                "outcomes": outcomes,
+            }
         async with transaction(factory) as session:
             if args.command == "status":
                 state = await session.get(SystemExecutionState, 1)
@@ -82,9 +87,12 @@ async def execute(settings: Settings, args: argparse.Namespace) -> dict[str, obj
                 epoch = await execution.enter_restore_quarantine()
                 return {"operation": "restore-enter", "execution_epoch": epoch}
             if args.command == "restore-reconcile":
-                reconciled = await execution.reconcile_restore_quarantine(
-                    batch_size=args.batch_size
+                batch_size = (
+                    args.batch_size
+                    if args.batch_size is not None
+                    else settings.reconciliation_batch_size
                 )
+                reconciled = await execution.reconcile_restore_quarantine(batch_size=batch_size)
                 return {"operation": "restore-reconcile", "reconciled": reconciled}
             if args.command == "restore-clear":
                 epoch = await execution.clear_restore_quarantine()
@@ -98,6 +106,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = _parser().parse_args(argv)
     result = asyncio.run(execute(get_settings(), args))
     print(json.dumps(result, sort_keys=True))
+    if result.get("status") == "failed":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
