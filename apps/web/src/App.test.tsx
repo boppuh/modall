@@ -543,6 +543,26 @@ describe("App", () => {
     expect(connectionAction.mock.calls[1]?.[2]).toBe(originalKey);
   });
 
+  it("rotates refresh keys when discovery generation advances", async () => {
+    const connectionAction = vi.fn<ControlPlane["connectionAction"]>().mockRejectedValue(new Error("response lost"));
+    const initial = { ...connection, versions: [{ id: versionId, sequence: 1, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http" as const, created_at: timestamp }], versions_truncated: false };
+    const advanced = { ...initial, refresh_generation: initial.refresh_generation + 1 };
+    const getConnection = vi.fn<ControlPlane["getConnection"]>().mockResolvedValueOnce(initial).mockResolvedValue(advanced);
+    renderApp(fakeApi({ connectionAction, getConnection }));
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(connectionAction).toHaveBeenCalledTimes(1));
+    const originalKey = connectionAction.mock.calls[0]?.[2];
+    fireEvent.click(screen.getByRole("button", { name: "Modall overview" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    await waitFor(() => expect(screen.getByText("Refresh generation").parentElement?.textContent).toContain("5"));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(connectionAction).toHaveBeenCalledTimes(2));
+    expect(connectionAction.mock.calls[1]?.[2]).not.toBe(originalKey);
+  });
+
   it("rotates connection action keys after the control epoch advances", async () => {
     const disabled = { ...connection, lifecycle: "disabled" as const, control_epoch: 3 };
     const enabled = { ...connection, lifecycle: "active" as const, control_epoch: 4 };

@@ -537,8 +537,8 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
               {detail.data.last_refresh_error_code && <p className="incident-note">Last refresh: {detail.data.last_refresh_error_code}</p>}
               {action.isError && <p className="field-error" role="alert">{failureMessage(action.error)}</p>}
               <div className="action-strip">
-                {canOperate(role) && detail.data.lifecycle !== "disabled" && detail.data.pending_version_id && <button type="button" onClick={() => { const operation = `connection:${detail.data.id}:${detail.data.control_epoch}:verify`; action.mutate({ id: detail.data.id, verb: "verify", operation, key: keyFor(operation) }); }}>Verify pending</button>}
-                {canOperate(role) && detail.data.lifecycle !== "disabled" && <button type="button" onClick={() => { const operation = `connection:${detail.data.id}:${detail.data.control_epoch}:refresh`; action.mutate({ id: detail.data.id, verb: "refresh", operation, key: keyFor(operation) }); }}>Refresh</button>}
+                {canOperate(role) && detail.data.lifecycle !== "disabled" && detail.data.pending_version_id && <button type="button" onClick={() => { const operation = `connection:${detail.data.id}:${detail.data.control_epoch}:${detail.data.refresh_generation}:verify`; action.mutate({ id: detail.data.id, verb: "verify", operation, key: keyFor(operation) }); }}>Verify pending</button>}
+                {canOperate(role) && detail.data.lifecycle !== "disabled" && <button type="button" onClick={() => { const operation = `connection:${detail.data.id}:${detail.data.control_epoch}:${detail.data.refresh_generation}:refresh`; action.mutate({ id: detail.data.id, verb: "refresh", operation, key: keyFor(operation) }); }}>Refresh</button>}
                 {canOperate(role) && detail.data.lifecycle !== "disabled" && <button type="button" onClick={() => { const operation = `connection:${detail.data.id}:${detail.data.control_epoch}:disable`; action.mutate({ id: detail.data.id, verb: "disable", operation, key: keyFor(operation) }); }}>Disable</button>}
                 {isAdmin(role) && detail.data.lifecycle === "disabled" && <button type="button" onClick={() => { const operation = `connection:${detail.data.id}:${detail.data.control_epoch}:enable`; action.mutate({ id: detail.data.id, verb: "enable", operation, key: keyFor(operation) }); }}>
                   {detail.data.lifecycle === "disabled" ? "Re-enable" : "Disable"}
@@ -668,7 +668,11 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     queryFn: () => api.listRuns(),
     refetchInterval: (query) => query.state.status === "error" ? false : 3000,
   });
-  const capabilities = useQuery({ queryKey: queryKey(scope, "capabilities"), queryFn: () => api.listCapabilities() });
+  const capabilities = useQuery({
+    queryKey: queryKey(scope, "capabilities"),
+    queryFn: () => api.listCapabilities(),
+    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
+  });
   const connections = useQuery({ queryKey: queryKey(scope, "connections"), queryFn: () => api.listConnections() });
   const [argumentsError, setArgumentsError] = useState("");
   const [confirmationClock, setConfirmationClock] = useState(() => Date.now());
