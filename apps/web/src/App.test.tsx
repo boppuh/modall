@@ -222,12 +222,15 @@ describe("App", () => {
     const olderConnection = { ...connection, id: "66666666-6666-4666-8666-666666666666", name: "Release tooling" };
     const listConnectionPage = vi.fn<ControlPlane["listConnectionPage"]>()
       .mockResolvedValueOnce({ items: [connection], nextCursor: "older" })
+      .mockResolvedValueOnce({ items: [connection], nextCursor: "older" })
       .mockResolvedValueOnce({ items: [olderConnection] });
     renderApp(fakeApi({ listConnectionPage }));
 
     fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
     expect(await screen.findByRole("button", { name: /Internal developer tools/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Release tooling/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh connections" }));
+    await waitFor(() => expect(listConnectionPage.mock.calls.filter(([cursor]) => cursor === undefined)).toHaveLength(2));
     fireEvent.click(screen.getByRole("button", { name: "Load older connections" }));
     expect(await screen.findByRole("button", { name: /Release tooling/ })).toBeTruthy();
     expect(listConnectionPage).toHaveBeenCalledWith("older");
@@ -290,7 +293,9 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
     fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
     expect(await screen.findByText(/Source connection: Internal developer tools/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Re-enable version" }));
+    const reenable = screen.getByRole("button", { name: "Re-enable version" });
+    await waitFor(() => expect(reenable).toHaveProperty("disabled", false));
+    fireEvent.click(reenable);
     await waitFor(() => expect(api.capabilityAction).toHaveBeenCalledWith(versionId, "enable", expect.any(String)));
   });
 
@@ -300,7 +305,7 @@ describe("App", () => {
     const api = fakeApi({
       listCapabilities: vi.fn().mockResolvedValue([disabled]),
       getCapability: vi.fn().mockResolvedValue({ ...disabled, versions: [
-        { id: pendingVersionId, capability_id: capabilityId, connection_version_id: connectionId, sequence: 2, display_name: "New search", description: null, input_schema: {}, output_schema: null, metadata_digest: "d".repeat(64), schema_supported: true, created_at: timestamp },
+        { id: pendingVersionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 2, display_name: "New search", description: null, input_schema: {}, output_schema: null, metadata_digest: "d".repeat(64), schema_supported: true, created_at: timestamp },
         { id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Old search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp },
       ], versions_truncated: false }),
     });
@@ -308,8 +313,10 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
     fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
     expect(await screen.findByRole("button", { name: "Historical version" })).toHaveProperty("disabled", true);
-    expect(screen.getByText(connectionId)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Enable exact version" }));
+    expect(screen.getAllByText(versionId)).toHaveLength(2);
+    const enable = screen.getByRole("button", { name: "Enable exact version" });
+    await waitFor(() => expect(enable).toHaveProperty("disabled", false));
+    fireEvent.click(enable);
     await waitFor(() => expect(api.capabilityAction).toHaveBeenCalledWith(pendingVersionId, "enable", expect.any(String)));
   });
 
@@ -377,16 +384,41 @@ describe("App", () => {
   });
 
   it("excludes enabled capabilities whose connection cannot execute", async () => {
-    renderApp(fakeApi({ listConnections: vi.fn().mockResolvedValue([{ ...connection, lifecycle: "disabled" }]) }));
+    const listCapabilityPage = vi.fn<ControlPlane["listCapabilityPage"]>()
+      .mockImplementation((_status, _cursor, executable) => Promise.resolve({ items: executable ? [] : [capability] }));
+    renderApp(fakeApi({ listCapabilityPage }));
     fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
     expect(await screen.findByRole("button", { name: "Review invocation" })).toHaveProperty("disabled", true);
-    expect(screen.queryByRole("option", { name: /tools\/search/ })).toBeNull();
+    const executableSelect = screen.getByLabelText<HTMLSelectElement>("Enabled capability");
+    expect([...executableSelect.options].some((option) => option.textContent?.includes("tools/search"))).toBe(false);
+  });
+
+  it("keeps historical capabilities available as run ledger filters", async () => {
+    const historical = { ...capability, id: "66666666-6666-4666-8666-666666666666", tool_identity: "tools/archive", status: "disabled" as const, enabled_version_id: null };
+    const listCapabilityPage = vi.fn<ControlPlane["listCapabilityPage"]>()
+      .mockImplementation((_status, _cursor, executable) => Promise.resolve({ items: executable ? [capability] : [historical] }));
+    renderApp(fakeApi({ listCapabilityPage }));
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
+    expect(await screen.findByRole("option", { name: "tools/archive" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /tools\/search/ })).toBeTruthy();
+  });
+
+  it("blocks capability approval when its source connection cannot execute", async () => {
+    const pending = { ...capability, status: "pending_review" as const, pending_version_id: versionId, enabled_version_id: null };
+    renderApp(fakeApi({
+      listCapabilities: vi.fn().mockResolvedValue([pending]),
+      getCapability: vi.fn().mockResolvedValue({ ...pending, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false, observed_in_current_snapshot: true }),
+      getConnection: vi.fn().mockResolvedValue({ ...connection, lifecycle: "disabled" }),
+    }));
+    fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
+    expect(await screen.findByRole("button", { name: "Enable exact version" })).toHaveProperty("disabled", true);
   });
 
   it("rotates capability action keys after the status epoch advances", async () => {
     const disabled = { ...capability, status: "disabled" as const, status_epoch: 4 };
     const enabled = { ...capability, status: "enabled" as const, status_epoch: 5 };
-    const detail = (value: Capability) => ({ ...value, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: connectionId, sequence: 1, display_name: "Search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false, observed_in_current_snapshot: true });
+    const detail = (value: Capability) => ({ ...value, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false, observed_in_current_snapshot: true });
     const getCapability = vi.fn<ControlPlane["getCapability"]>()
       .mockResolvedValueOnce(detail(capability))
       .mockResolvedValueOnce(detail(disabled))
@@ -397,6 +429,7 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Disable version" }));
     const reenable = await screen.findByRole("button", { name: "Re-enable version" });
+    await waitFor(() => expect(reenable).toHaveProperty("disabled", false));
     const firstDisableKey = capabilityAction.mock.calls[0]?.[2];
     fireEvent.click(reenable);
     fireEvent.click(await screen.findByRole("button", { name: "Disable version" }));
@@ -459,14 +492,17 @@ describe("App", () => {
   it("paginates the server-filtered executable capability projection", async () => {
     const olderCapability = { ...capability, id: "66666666-6666-4666-8666-666666666666", tool_identity: "tools/archive", enabled_version_id: "77777777-7777-4777-8777-777777777777" };
     const listCapabilityPage = vi.fn<ControlPlane["listCapabilityPage"]>()
-      .mockResolvedValueOnce({ items: [capability], nextCursor: "older" })
-      .mockResolvedValueOnce({ items: [olderCapability] });
+      .mockImplementation((_status, cursor, executable) => Promise.resolve(
+        executable
+          ? cursor === "older" ? { items: [olderCapability] } : { items: [capability], nextCursor: "older" }
+          : { items: [capability] },
+      ));
     renderApp(fakeApi({ listCapabilityPage }));
     fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
     expect(await screen.findAllByRole("option", { name: /tools\/search/ })).toHaveLength(2);
     expect(listCapabilityPage).toHaveBeenCalledWith("enabled", undefined, true);
     fireEvent.click(screen.getByRole("button", { name: "Load more executable tools" }));
-    expect(await screen.findAllByRole("option", { name: /tools\/archive/ })).toHaveLength(2);
+    expect(await screen.findAllByRole("option", { name: /tools\/archive/ })).toHaveLength(1);
     expect(listCapabilityPage).toHaveBeenCalledWith("enabled", "older", true);
   });
 
@@ -849,6 +885,24 @@ describe("App", () => {
     expect(appendConnectionVersion.mock.calls[1]?.[2]).not.toBe(originalKey);
   });
 
+  it("clears a failed append when another connection is selected", async () => {
+    const otherConnection = { ...connection, id: "66666666-6666-4666-8666-666666666666", name: "Release tooling" };
+    const detail = (value: Connection) => ({ ...value, versions: [{ id: versionId, sequence: 1, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http" as const, created_at: timestamp }], versions_truncated: false });
+    const appendConnectionVersion = vi.fn<ControlPlane["appendConnectionVersion"]>().mockRejectedValue(new Error("append failed"));
+    renderApp(fakeApi({
+      listConnections: vi.fn().mockResolvedValue([connection, otherConnection]),
+      getConnection: vi.fn((id) => Promise.resolve(detail(id === connectionId ? connection : otherConnection))),
+      appendConnectionVersion,
+    }));
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Append version" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Release tooling/ }));
+    expect(await screen.findByText("Release tooling")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
   it("preserves seconds in run timeline diagnostics", async () => {
     window.history.replaceState({}, "", `/runs/${runId}`);
     renderApp(fakeApi({ listRunEvents: vi.fn().mockResolvedValue([{ id: connectionId, sequence: 1, event_type: "admitted", status: "queued", safe_error_code: null, occurred_at: "2026-09-06T12:00:37Z" }]) }));
@@ -862,6 +916,24 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Request cancellation" }));
     await waitFor(() => expect(cancelRun).toHaveBeenCalledOnce());
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+  });
+
+  it("clears a failed cancellation when another run is selected", async () => {
+    const otherRun = { ...run, id: "66666666-6666-4666-8666-666666666666" };
+    const cancelRun = vi.fn<ControlPlane["cancelRun"]>().mockRejectedValue(new Error("cancel failed"));
+    renderApp(fakeApi({
+      listRuns: vi.fn().mockResolvedValue([run, otherRun]),
+      listRunPage: vi.fn().mockResolvedValue({ items: [run, otherRun] }),
+      getRun: vi.fn((id) => Promise.resolve(id === runId ? run : otherRun)),
+      cancelRun,
+    }));
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
+    const runButtons = await screen.findAllByRole("button", { name: /55555555|66666666/ });
+    fireEvent.click(runButtons.find((button) => button.textContent?.includes("55555555")) as HTMLButtonElement);
+    fireEvent.click(await screen.findByRole("button", { name: "Request cancellation" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /66666666/ }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
   it("shows output contracts, cancellation progress, and paginated audit history", async () => {

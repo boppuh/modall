@@ -769,6 +769,18 @@ class Run(Base):
                 "status IN ('queued', 'preparing', 'session_fenced', 'dispatch_fenced')"
             ),
         ),
+        Index(
+            "ix_runs_workspace_active",
+            "workspace_id",
+            "created_at",
+            "id",
+            postgresql_where=text(
+                "status IN ('queued', 'preparing', 'session_fenced', 'dispatch_fenced')"
+            ),
+            sqlite_where=text(
+                "status IN ('queued', 'preparing', 'session_fenced', 'dispatch_fenced')"
+            ),
+        ),
     )
 
     id: Mapped[UuidPrimaryKey]

@@ -817,6 +817,11 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             active = await client.get("/v1/runs?active=true", headers=headers)
             assert active.status_code == 200
             assert [item["id"] for item in active.json()["items"]] == [run_id]
+            active_with_terminal_status = await client.get(
+                "/v1/runs?active=true&status=succeeded", headers=headers
+            )
+            assert active_with_terminal_status.status_code == 200
+            assert active_with_terminal_status.json()["items"] == []
             executable = await client.get("/v1/capabilities?executable=true", headers=headers)
             assert executable.status_code == 200
             assert [item["id"] for item in executable.json()["items"]] == [

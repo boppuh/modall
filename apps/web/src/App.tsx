@@ -422,6 +422,8 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "connection", selectedId) });
     },
   });
+  const resetAppend = append.reset;
+  useEffect(() => resetAppend(), [resetAppend, selectedId]);
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -517,7 +519,7 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
       </section>
       <section className="split-detail">
         <div className="section-block">
-          <div className="section-heading"><div><span className="index">Connections / 03</span><h2>Trust inventory</h2></div><span>{entries.isError ? "—" : entries.data?.length ?? 0} visible catalog entries</span></div>
+          <div className="section-heading"><div><span className="index">Connections / 03</span><h2>Trust inventory</h2></div><div className="action-strip"><span>{entries.isError ? "—" : entries.data?.length ?? 0} visible catalog entries</span><button className="secondary-action" type="button" disabled={connections.isFetching} onClick={() => void connections.refetch()}>{connections.isFetching ? "Refreshing…" : "Refresh connections"}</button></div></div>
           {entries.isError && <QueryFailure error={entries.error} retry={() => void entries.refetch()} />}
           {connections.isPending ? <LoadingState label="Loading connections" /> : connections.isError ? (
             <QueryFailure error={connections.error} retry={() => void connections.refetch()} />
@@ -596,6 +598,12 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
     enabled: selectedId !== null,
     refetchInterval: (query) => query.state.status === "error" ? false : 5000,
   });
+  const sourceConnection = useQuery({
+    queryKey: queryKey(scope, "capability-source-connection", detail.data?.connection_id),
+    queryFn: () => api.getConnection(detail.data?.connection_id as string),
+    enabled: Boolean(detail.data?.connection_id),
+    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
+  });
   const action = useMutation({
     mutationFn: ({ versionId, verb, key }: { versionId: string; verb: "enable" | "disable"; key: string; operation: string }) => api.capabilityAction(versionId, verb, key),
     onSuccess: async (_data, variables) => {
@@ -640,6 +648,7 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
               <span className="index">Immutable capability</span>
               <div className="detail-title"><h2>{detail.data.tool_identity}</h2><StatusMark value={detail.data.status} /></div>
               <p className="field-help">Source connection: {connectionNames.get(detail.data.connection_id) ?? detail.data.connection_id}</p>
+              {sourceConnection.isError && <QueryFailure error={sourceConnection.error} retry={() => void sourceConnection.refetch()} />}
               {action.isError && <p className="field-error" role="alert">{failureMessage(action.error)}</p>}
               {detail.data.versions.map((version, index) => {
                 const retained = detail.data.enabled_version_id === version.id;
@@ -649,6 +658,7 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
                 const rejected = detail.data.status === "disabled" && pending;
                 const actionable = disableable || reenable || pending;
                 const verb = disableable ? "disable" : "enable";
+                const sourceEligible = sourceConnection.data?.lifecycle === "active" && sourceConnection.data.pending_version_id === null && sourceConnection.data.verified_version_id === version.connection_version_id;
                 return (
                 <article className="schema-version" key={version.id}>
                   <header><div><span>Version {version.sequence}</span><h3>{version.display_name}</h3></div>{index === 0 && <small>Latest observed</small>}</header>
@@ -659,11 +669,11 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
                   {version.output_schema && <details><summary>Output schema</summary><pre>{JSON.stringify(version.output_schema, null, 2)}</pre></details>}
                   {pending && !rejected ? <div className="action-strip">
                     <button className="danger-action" type="button" disabled={!canOperate(role) || action.isPending} onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:disable`; action.mutate({ versionId: version.id, verb: "disable", operation, key: keyFor(operation) }); }}>Reject version</button>
-                    <button className="secondary-action" type="button" disabled={!canOperate(role) || detail.data.status === "unavailable" || detail.data.observed_in_current_snapshot === false || !version.schema_supported || action.isPending} onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:enable`; action.mutate({ versionId: version.id, verb: "enable", operation, key: keyFor(operation) }); }}>Enable exact version</button>
+                    <button className="secondary-action" type="button" disabled={!canOperate(role) || detail.data.status === "unavailable" || detail.data.observed_in_current_snapshot === false || !sourceEligible || !version.schema_supported || action.isPending} onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:enable`; action.mutate({ versionId: version.id, verb: "enable", operation, key: keyFor(operation) }); }}>Enable exact version</button>
                   </div> : <button
                     className={disableable ? "danger-action" : "secondary-action"}
                     type="button"
-                    disabled={!canOperate(role) || !actionable || (verb === "enable" && detail.data.observed_in_current_snapshot === false) || !version.schema_supported || action.isPending}
+                    disabled={!canOperate(role) || !actionable || (verb === "enable" && (detail.data.observed_in_current_snapshot === false || !sourceEligible)) || !version.schema_supported || action.isPending}
                     onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:${verb}`; action.mutate({ versionId: version.id, verb, operation, key: keyFor(operation) }); }}
                   >
                     {!actionable ? "Historical version" : disableable ? "Disable version" : rejected ? "Reconsider version" : "Re-enable version"}
@@ -708,6 +718,12 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
   const capabilities = useInfiniteQuery({
     queryKey: queryKey(scope, "executable-capabilities"),
     queryFn: ({ pageParam }) => api.listCapabilityPage("enabled", pageParam, true),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor,
+  });
+  const ledgerCapabilities = useInfiniteQuery({
+    queryKey: queryKey(scope, "ledger-capabilities"),
+    queryFn: ({ pageParam }) => api.listCapabilityPage(undefined, pageParam),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.nextCursor,
   });
@@ -799,9 +815,12 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "runs") });
     },
   });
+  const resetCancel = cancel.reset;
+  useEffect(() => resetCancel(), [resetCancel, selectedId]);
   const enabledCapabilities = capabilities.data?.pages.flatMap((page) => page.items) ?? [];
+  const ledgerCapabilityRows = ledgerCapabilities.data?.pages.flatMap((page) => page.items) ?? [];
   const connectionNames = new Map((connections.data ?? []).map((item) => [item.id, item.name]));
-  const capabilityNames = new Map(enabledCapabilities.map((item) => [item.id, item.tool_identity]));
+  const capabilityNames = new Map(ledgerCapabilityRows.map((item) => [item.id, item.tool_identity]));
   const runIndex = new Map((history.data?.pages.flatMap((page) => page.items) ?? []).map((run) => [run.id, run]));
   if (!hasRunFilters) for (const run of runs.data ?? []) runIndex.set(run.id, run);
   const orderedRuns = [...runIndex.values()].sort((left, right) => right.created_at.localeCompare(left.created_at));
@@ -884,7 +903,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
           <div className="section-heading"><div><span className="index">Ledger / 02</span><h2>Recent runs</h2></div></div>
           <form className="audit-filters" key={runFilterFormKey} onSubmit={submitRunFilters}>
             <label>Status<select name="run-status" defaultValue={runFilters.status ?? ""}><option value="">Any</option>{["queued", "preparing", "session_fenced", "dispatch_fenced", "succeeded", "failed", "cancelled", "timed_out", "indeterminate"].map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
-            <label>Capability<select name="run-capability" defaultValue={runFilters.capability_id ?? ""}><option value="">Any</option>{enabledCapabilities.map((item) => <option key={item.id} value={item.id}>{item.tool_identity}</option>)}</select></label>
+            <label>Capability<select name="run-capability" defaultValue={runFilters.capability_id ?? ""}><option value="">Any</option>{ledgerCapabilityRows.map((item) => <option key={item.id} value={item.id}>{item.tool_identity}</option>)}</select></label>
             <label>Actor ID<input name="run-actor" defaultValue={runFilters.actor_id ?? ""} placeholder="UUID" pattern="[0-9a-fA-F-]{36}" /></label>
             <label>Created after<input name="run-created-after" type="datetime-local" defaultValue={localDateTimeValue(runFilters.created_after)} /></label>
             <label>Created before<input name="run-created-before" type="datetime-local" defaultValue={localDateTimeValue(runFilters.created_before)} /></label>
@@ -892,6 +911,8 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
             <label>Max duration (s)<input name="run-max-duration" type="number" min="0" defaultValue={runFilters.max_duration_seconds} /></label>
             <div className="action-strip"><button type="button" onClick={() => { setRunFilters({}); setRunFilterFormKey((value) => value + 1); }}>Clear</button><button className="secondary-action" type="submit">Apply filters</button></div>
           </form>
+          {ledgerCapabilities.isError && <QueryFailure error={ledgerCapabilities.error} retry={() => void ledgerCapabilities.refetch()} />}
+          {ledgerCapabilities.hasNextPage && <button className="secondary-action" disabled={ledgerCapabilities.isFetchingNextPage} type="button" onClick={() => void ledgerCapabilities.fetchNextPage()}>{ledgerCapabilities.isFetchingNextPage ? "Loading…" : "Load more filter tools"}</button>}
           {(hasRunFilters ? history.isPending : runs.isPending) ? <LoadingState label="Loading runs" /> : (hasRunFilters ? history.isError : runs.isError) ? <QueryFailure error={hasRunFilters ? history.error : runs.error} retry={() => void (hasRunFilters ? history.refetch() : runs.refetch())} /> : orderedRuns.length === 0 ? <EmptyState title="No runs retained" copy="Completed and in-flight work will appear here." /> : (
             <ul className="select-list">{orderedRuns.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{capabilityNames.get(run.capability_id) ?? shortId(run.capability_id)}</strong><small>{connectionNames.get(run.connection_id) ?? shortId(run.connection_id)} · actor {shortId(run.actor_user_id)} · {shortId(run.id)} · {formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
           )}

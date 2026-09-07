@@ -928,7 +928,7 @@ def build_control_plane_router(
                     ]
                 )
             )
-        elif run_status is not None:
+        if run_status is not None:
             statement = statement.where(Run.status == run_status)
         if capability_id is not None:
             statement = statement.where(Run.capability_id == capability_id)
