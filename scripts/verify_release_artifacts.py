@@ -37,6 +37,7 @@ REQUIRED_ALERTS = {
     "ModallApiLatencyHigh",
     "ModallWorkerInvocationFailures",
     "ModallWorkerPollFailures",
+    "ModallWorkerStalled",
     "ModallMaintenanceFailure",
 }
 REQUIRED_DOCUMENT_SECTIONS = {

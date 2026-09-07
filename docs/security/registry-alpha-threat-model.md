@@ -35,7 +35,8 @@ at most one dispatch, and release transient content.
 - This alpha is not approved for confidential, regulated, private-repository, or production customer
   payloads.
 - API rate limiting is process-local. Multiple API replicas require a shared gateway limiter before
-  horizontal scale.
+  horizontal scale. Behind ingress, the API accepts `X-Real-IP` only from explicitly configured
+  proxy transport addresses; ingress must discard the caller-supplied value and set a validated IP.
 - Metrics endpoints are unauthenticated and must be restricted to the monitoring network by
   deployment ingress policy.
 - The mounted-file provider assumes the deployment platform protects its filesystem and process

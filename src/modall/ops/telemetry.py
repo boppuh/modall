@@ -6,8 +6,9 @@ import json
 import logging
 import math
 import threading
+import time
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Final
@@ -155,7 +156,44 @@ class MetricsRegistry:
         return "\n".join(lines) + "\n"
 
 
-def start_metrics_server(metrics: MetricsRegistry, *, host: str, port: int) -> ThreadingHTTPServer:
+class WorkerLiveness:
+    """Track worker-loop progress for both probes and stalled-worker alerts."""
+
+    def __init__(
+        self,
+        metrics: MetricsRegistry,
+        *,
+        stale_after_seconds: float,
+        monotonic: Callable[[], float] = time.monotonic,
+        wall_time: Callable[[], float] = time.time,
+    ) -> None:
+        self._metrics = metrics
+        self._stale_after_seconds = stale_after_seconds
+        self._monotonic = monotonic
+        self._wall_time = wall_time
+        self._lock = threading.Lock()
+        self._last_progress = monotonic()
+        metrics.gauge("modall_worker_liveness_timeout_seconds", stale_after_seconds)
+        self.touch()
+
+    def touch(self) -> None:
+        with self._lock:
+            self._last_progress = self._monotonic()
+        self._metrics.gauge("modall_worker_last_progress_unixtime_seconds", self._wall_time())
+
+    def is_live(self) -> bool:
+        with self._lock:
+            last_progress = self._last_progress
+        return self._monotonic() - last_progress <= self._stale_after_seconds
+
+
+def start_metrics_server(
+    metrics: MetricsRegistry,
+    *,
+    host: str,
+    port: int,
+    liveness_probe: Callable[[], bool] = lambda: True,
+) -> ThreadingHTTPServer:
     """Start the worker's internal-only metrics and liveness listener."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -165,9 +203,14 @@ def start_metrics_server(metrics: MetricsRegistry, *, host: str, port: int) -> T
                 content_type = "application/openmetrics-text; version=1.0.0"
                 response_status = 200
             elif self.path == "/health/live":
-                body = b'{"status":"ok","service":"worker"}\n'
+                live = liveness_probe()
+                body = (
+                    b'{"status":"ok","service":"worker"}\n'
+                    if live
+                    else b'{"status":"stalled","service":"worker"}\n'
+                )
                 content_type = "application/json"
-                response_status = 200
+                response_status = 200 if live else 503
             else:
                 body = b"not found\n"
                 content_type = "text/plain"

@@ -14,7 +14,12 @@ from modall.config import Settings
 from modall.ops import cli
 from modall.ops.cli import _parser
 from modall.ops.limits import FixedWindowRateLimiter
-from modall.ops.telemetry import JsonFormatter, MetricsRegistry, start_metrics_server
+from modall.ops.telemetry import (
+    JsonFormatter,
+    MetricsRegistry,
+    WorkerLiveness,
+    start_metrics_server,
+)
 from modall.persistence.database import create_engine as create_database_engine
 from modall.persistence.models import Base
 
@@ -91,9 +96,15 @@ def test_metrics_render_openmetrics_histogram_and_escape_labels() -> None:
 
 def test_worker_metrics_server_exposes_only_known_paths() -> None:
     metrics = MetricsRegistry()
-    server = start_metrics_server(metrics, host="127.0.0.1", port=0)
+    live = [False]
+    server = start_metrics_server(metrics, host="127.0.0.1", port=0, liveness_probe=lambda: live[0])
     host, port = cast(tuple[str, int], server.server_address)
     try:
+        with pytest.raises(HTTPError) as stalled:
+            urlopen(f"http://{host}:{port}/health/live", timeout=2)
+        assert stalled.value.code == 503
+        assert json.load(stalled.value) == {"status": "stalled", "service": "worker"}
+        live[0] = True
         with urlopen(f"http://{host}:{port}/health/live", timeout=2) as response:
             assert json.load(response) == {"status": "ok", "service": "worker"}
         with urlopen(f"http://{host}:{port}/metrics", timeout=2) as response:
@@ -106,6 +117,29 @@ def test_worker_metrics_server_exposes_only_known_paths() -> None:
         server.server_close()
 
 
+def test_worker_liveness_tracks_poll_progress_and_exposes_alert_metrics() -> None:
+    monotonic = [0.0]
+    wall_time = [1_000.0]
+    metrics = MetricsRegistry()
+    liveness = WorkerLiveness(
+        metrics,
+        stale_after_seconds=10,
+        monotonic=lambda: monotonic[0],
+        wall_time=lambda: wall_time[0],
+    )
+
+    assert liveness.is_live()
+    monotonic[0] = 10.1
+    assert not liveness.is_live()
+
+    wall_time[0] = 1_010.1
+    liveness.touch()
+    assert liveness.is_live()
+    rendered = metrics.render()
+    assert "modall_worker_liveness_timeout_seconds 10" in rendered
+    assert "modall_worker_last_progress_unixtime_seconds 1010.1" in rendered
+
+
 def test_api_metrics_and_rate_limit_are_payload_free() -> None:
     async def scenario() -> None:
         async def ready() -> bool:
@@ -116,16 +150,27 @@ def test_api_metrics_and_rate_limit_are_payload_free() -> None:
             environment="test",
             api_rate_limit_per_minute=1,
             cors_allowed_origins=("https://console.example",),
+            trusted_proxy_addresses=("127.0.0.1",),
         )
         metrics = MetricsRegistry()
         app = create_app(settings, readiness_probe=ready, metrics=metrics)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            first = await client.get("/v1/not-a-real-resource")
-            second = await client.get(
-                "/v1/not-a-real-resource", headers={"Origin": "https://console.example"}
+            first = await client.get(
+                "/v1/not-a-real-resource", headers={"X-Real-IP": "203.0.113.1"}
             )
-            unusual = await client.request("UNBOUNDED-METHOD-TOKEN", "/v1/not-a-real-resource")
+            second = await client.get(
+                "/v1/not-a-real-resource",
+                headers={"Origin": "https://console.example", "X-Real-IP": "203.0.113.1"},
+            )
+            unusual = await client.request(
+                "UNBOUNDED-METHOD-TOKEN",
+                "/v1/not-a-real-resource",
+                headers={"X-Real-IP": "203.0.113.1"},
+            )
+            other_client = await client.get(
+                "/v1/not-a-real-resource", headers={"X-Real-IP": "203.0.113.2"}
+            )
             exposed = await client.get("/metrics")
 
         assert first.status_code == 404
@@ -134,12 +179,33 @@ def test_api_metrics_and_rate_limit_are_payload_free() -> None:
         assert second.headers["Retry-After"] == "60"
         assert second.headers["Access-Control-Allow-Origin"] == "https://console.example"
         assert unusual.status_code == 429
+        assert other_client.status_code == 404
         assert 'route="unmatched"' in exposed.text
         assert "not-a-real-resource" not in exposed.text
         assert "UNBOUNDED-METHOD-TOKEN" not in exposed.text
         assert 'method="OTHER"' in exposed.text
         assert 'modall_http_responses_total{scope="v1",status_class="4xx"}' in exposed.text
         assert "modall_http_in_flight 0" in exposed.text
+
+    asyncio.run(scenario())
+
+
+def test_api_rate_limit_ignores_forwarded_identity_from_untrusted_peers() -> None:
+    async def scenario() -> None:
+        async def ready() -> bool:
+            return True
+
+        app = create_app(
+            Settings(_env_file=None, environment="test", api_rate_limit_per_minute=1),
+            readiness_probe=ready,
+        )
+        transport = httpx.ASGITransport(app=app, client=("198.51.100.10", 12345))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = await client.get("/v1/missing", headers={"X-Real-IP": "203.0.113.1"})
+            spoofed = await client.get("/v1/missing", headers={"X-Real-IP": "203.0.113.2"})
+
+        assert first.status_code == 404
+        assert spoofed.status_code == 429
 
     asyncio.run(scenario())
 

@@ -6,6 +6,7 @@ import time
 import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from ipaddress import ip_address
 from typing import Final
 from uuid import UUID, uuid4
 
@@ -66,6 +67,7 @@ def create_app(
     resolved_settings = settings or get_settings()
     process_metrics = metrics or MetricsRegistry()
     rate_limiter = FixedWindowRateLimiter(resolved_settings.api_rate_limit_per_minute)
+    trusted_proxies = {str(address) for address in resolved_settings.trusted_proxy_addresses}
     request_slots = asyncio.Semaphore(resolved_settings.api_max_concurrency)
     in_flight = 0
     for status_class in ("1xx", "2xx", "3xx", "4xx", "5xx"):
@@ -132,6 +134,13 @@ def create_app(
             correlation_id = uuid4()
         request.state.correlation_id = correlation_id
         peer = request.client.host if request.client is not None else "unknown"
+        if peer in trusted_proxies:
+            forwarded = request.headers.get("X-Real-IP")
+            if forwarded is not None:
+                try:
+                    peer = str(ip_address(forwarded))
+                except ValueError:
+                    peer = f"invalid-forwarded:{peer}"
         acquired = False
         response: Response
         try:

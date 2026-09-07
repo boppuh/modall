@@ -20,6 +20,7 @@ from modall.mcp_adapter.client import McpClientAdapter
 from modall.mcp_adapter.policy import EndpointPolicy, TransportLimits
 from modall.ops.telemetry import (
     MetricsRegistry,
+    WorkerLiveness,
     configure_json_logging,
     log_event,
     start_metrics_server,
@@ -69,8 +70,21 @@ async def run_worker(settings: Settings) -> None:
     session_factory = create_session_factory(engine)
     metrics = MetricsRegistry()
     _initialize_worker_metrics(metrics)
+    liveness = WorkerLiveness(
+        metrics,
+        stale_after_seconds=(
+            settings.max_run_seconds
+            + settings.worker_lease_duration_seconds
+            + (5 * settings.worker_maintenance_timeout_seconds)
+            + settings.worker_poll_interval_seconds
+            + 30
+        ),
+    )
     metrics_server = start_metrics_server(
-        metrics, host="0.0.0.0", port=settings.worker_metrics_port
+        metrics,
+        host="0.0.0.0",
+        port=settings.worker_metrics_port,
+        liveness_probe=liveness.is_live,
     )
     try:
         invocation_runner, execution_service_factory = build_execution_runtime(
@@ -79,6 +93,7 @@ async def run_worker(settings: Settings) -> None:
         worker_id = f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex}"
         next_maintenance_at = 0.0
         while True:
+            liveness.touch()
             run_once(settings)
             work_claimed = False
             try:
@@ -93,6 +108,7 @@ async def run_worker(settings: Settings) -> None:
                 metrics.increment(
                     "modall_worker_polls_total", outcome="claimed" if work_claimed else "idle"
                 )
+            liveness.touch()
             now = time.monotonic()
             if now >= next_maintenance_at:
                 await _run_maintenance(
@@ -102,6 +118,7 @@ async def run_worker(settings: Settings) -> None:
                     metrics=metrics,
                 )
                 next_maintenance_at = now + settings.worker_maintenance_interval_seconds
+                liveness.touch()
             if work_claimed:
                 continue
             await asyncio.sleep(settings.worker_poll_interval_seconds)

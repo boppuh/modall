@@ -10,12 +10,14 @@ Never place tokens, arguments, results, endpoint credentials, or secret values i
 2. Project the active and retained HMAC key versions and MCP credential files.
 3. Run `alembic upgrade head`; `alembic check` must report no drift.
 4. Start the API, then worker, then web application.
-5. Restrict API `/metrics` and worker port 9101 to the monitoring network at ingress; neither is an
-   internet-facing endpoint.
-6. Require successful API `/health/ready`, API `/metrics`, and worker port 9101 `/health/live` from
-   the monitoring network, and verify `/metrics` is unreachable from the public route.
-7. Run the clean-install reference journey with synthetic data.
-8. Confirm request error rate, p95 latency, worker failures, and maintenance failures are below the
+5. Configure `MODALL_TRUSTED_PROXY_ADDRESSES` with the ingress transport addresses. The ingress must
+   discard any inbound `X-Real-IP` and set exactly one validated client IP before proxying.
+6. Restrict API `/metrics` and the configured worker metrics port (9101 by default) to the monitoring
+   network; neither is an internet-facing endpoint.
+7. Require successful API `/health/ready`, API `/metrics`, and worker `/health/live` on the configured
+   metrics port from the monitoring network, and verify `/metrics` is unreachable publicly.
+8. Run the clean-install reference journey with synthetic data.
+9. Confirm request error rate, p95 latency, worker failures, and maintenance failures are below the
    alert thresholds in `ops/prometheus/alerts.yml`.
 
 ## Backup and restore quarantine

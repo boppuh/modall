@@ -122,11 +122,13 @@ def test_deployed_security_mode_requires_oidc_and_mounted_secrets() -> None:
         oidc_audience="modall",
         oidc_jwks_url="https://issuer.example/jwks",
         secret_provider="mounted_file",
+        trusted_proxy_addresses=("10.0.0.10",),
     )
 
     assert settings.auth_mode == "oidc"
     assert settings.oidc_issuer == "https://issuer.example"
     assert settings.secret_provider == "mounted_file"
+    assert tuple(map(str, settings.trusted_proxy_addresses)) == ("10.0.0.10",)
 
 
 @pytest.mark.parametrize(

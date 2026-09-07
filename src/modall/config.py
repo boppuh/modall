@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, HttpUrl, PostgresDsn, model_validator
+from pydantic import Field, HttpUrl, IPvAnyAddress, PostgresDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _KEY_VERSION = re.compile(r"[A-Za-z0-9._-]{1,32}\Z")
@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     api_max_concurrency: Annotated[int, Field(ge=1, le=1024)] = 64
     api_queue_timeout_seconds: Annotated[float, Field(gt=0, le=10, allow_inf_nan=False)] = 0.25
     api_rate_limit_per_minute: Annotated[int, Field(ge=1, le=100_000)] = 600
+    trusted_proxy_addresses: tuple[IPvAnyAddress, ...] = ()
     max_argument_bytes: Annotated[int, Field(ge=1_024, le=1_048_576)] = 65_536
     max_result_bytes: Annotated[int, Field(ge=1_024, le=1_048_576)] = 262_144
     confirmation_ttl_seconds: Annotated[int, Field(ge=1, le=300)] = 120
@@ -80,6 +81,8 @@ class Settings(BaseSettings):
             raise ValueError("deployed environments require OIDC authentication")
         if deployed and self.secret_provider != "mounted_file":
             raise ValueError("deployed environments require the mounted-file secret provider")
+        if deployed and not self.trusted_proxy_addresses:
+            raise ValueError("deployed environments require at least one trusted ingress proxy")
         if deployed and self.fixture_secret_root is not None:
             raise ValueError("deployed environments cannot configure fixture secrets")
         if self.secret_provider != "fixture" and self.fixture_secret_root is not None:
