@@ -1,10 +1,10 @@
 /* eslint-disable @typescript-eslint/unbound-method */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { ApiFailure, type Capability, type Connection, type ControlPlane, type Run } from "./api/operations";
+import { ApiFailure, type Capability, type CapabilityStatus, type Connection, type ControlPlane, type Run } from "./api/operations";
 import { saveSession, type WorkspaceSession } from "./session";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -59,7 +59,7 @@ const run: Run = {
 };
 
 function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
-  return {
+  const api: ControlPlane = {
     currentSession: vi.fn().mockResolvedValue({ workspace_id: workspaceId, actor_user_id: connectionId, role: "admin" }),
     overview: vi.fn().mockResolvedValue({ connections: [connection], capabilities: [capability], runs: [run] }),
     listConnections: vi.fn().mockResolvedValue([connection]),
@@ -71,6 +71,7 @@ function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
     importRegistry: vi.fn().mockResolvedValue({ id: connectionId, source: "official", external_id: "io.modall/search", current_version_id: versionId, name: "Public search", description: "Search public records", created_at: timestamp }),
     listRegistryEntries: vi.fn().mockResolvedValue([]),
     listCapabilities: vi.fn().mockResolvedValue([capability]),
+    listCapabilityPage: vi.fn().mockResolvedValue({ items: [capability] }),
     getCapability: vi.fn().mockResolvedValue({ ...capability, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Search", description: "Search public records", input_schema: { type: "object" }, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false, observed_in_current_snapshot: true }),
     capabilityAction: vi.fn().mockResolvedValue(capability),
     listRuns: vi.fn().mockResolvedValue([run]),
@@ -83,6 +84,11 @@ function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
     listAuditEvents: vi.fn().mockResolvedValue({ items: [] }),
     ...overrides,
   };
+  const overriddenListCapabilities = overrides.listCapabilities;
+  if (overriddenListCapabilities && !overrides.listCapabilityPage) {
+    api.listCapabilityPage = vi.fn(async (status: CapabilityStatus | undefined) => ({ items: await overriddenListCapabilities(status) }));
+  }
+  return api;
 }
 
 function renderApp(api: ControlPlane, authenticated = true, role: "admin" | "operator" | "viewer" = "admin") {
@@ -158,10 +164,10 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open review queue" }));
     expect(await screen.findByRole("heading", { name: "Capabilities" })).toBeTruthy();
     expect(window.location.search).toBe("?status=pending_review");
-    await waitFor(() => expect(api.listCapabilities).toHaveBeenCalledWith("pending_review"));
+    await waitFor(() => expect(api.listCapabilityPage).toHaveBeenCalledWith("pending_review", undefined));
     fireEvent.change(screen.getByLabelText("Capability status"), { target: { value: "all" } });
     await waitFor(() => expect(window.location.search).toBe(""));
-    await waitFor(() => expect(api.listCapabilities).toHaveBeenCalledWith(undefined));
+    await waitFor(() => expect(api.listCapabilityPage).toHaveBeenCalledWith(undefined, undefined));
     fireEvent.click(screen.getByRole("button", { name: "Modall overview" }));
     expect(await screen.findByRole("heading", { name: "Registry overview" })).toBeTruthy();
 
@@ -187,6 +193,23 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     fireEvent.click(screen.getByRole("button", { name: "Disable" }));
     await waitFor(() => expect(api.connectionAction).toHaveBeenCalledTimes(3));
+  });
+
+  it("loads older capabilities only when an operator requests them", async () => {
+    const olderCapability = { ...capability, id: "66666666-6666-4666-8666-666666666666", tool_identity: "tools/archive" };
+    const listCapabilityPage = vi.fn<ControlPlane["listCapabilityPage"]>()
+      .mockResolvedValueOnce({ items: [capability], nextCursor: "older" })
+      .mockResolvedValueOnce({ items: [olderCapability] });
+    renderApp(fakeApi({ listCapabilityPage }));
+
+    fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
+    expect(await screen.findByRole("button", { name: /tools\/search/ })).toBeTruthy();
+    expect(listCapabilityPage).toHaveBeenCalledWith(undefined, undefined);
+    expect(screen.queryByRole("button", { name: /tools\/archive/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Load older tools" }));
+    expect(await screen.findByRole("button", { name: /tools\/archive/ })).toBeTruthy();
+    expect(listCapabilityPage).toHaveBeenCalledWith(undefined, "older");
   });
 
   it("reviews an immutable capability version and changes its approval", async () => {
@@ -351,6 +374,27 @@ describe("App", () => {
     expect(screen.getByText("Initiating actor").parentElement?.textContent).toContain("22222222");
     fireEvent.click(screen.getByRole("button", { name: "Request cancellation" }));
     await waitFor(() => expect(api.cancelRun).toHaveBeenCalledWith(runId, expect.any(String)));
+  });
+
+  it("does not redirect after a run finishes submitting from an abandoned Runs view", async () => {
+    let resolveRun: ((value: Run) => void) | undefined;
+    const createRun = vi.fn<ControlPlane["createRun"]>().mockImplementation(() => new Promise<Run>((resolve) => { resolveRun = resolve; }));
+    const api = fakeApi({ createRun });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
+    await screen.findAllByRole("option", { name: /tools\/search/ });
+    fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
+    fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
+    const confirm = await screen.findByRole("button", { name: "Confirm and run" });
+    await waitFor(() => expect(confirm).toHaveProperty("disabled", false));
+    fireEvent.click(confirm);
+    await waitFor(() => expect(createRun).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole("button", { name: "Modall overview" }));
+    expect(await screen.findByRole("heading", { name: "Registry overview" })).toBeTruthy();
+    await act(async () => { resolveRun?.(run); });
+    expect(screen.getByRole("heading", { name: "Registry overview" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/");
   });
 
   it("filters and explicitly paginates the run ledger", async () => {
@@ -635,6 +679,25 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(connectionAction).toHaveBeenCalledTimes(2));
     expect(connectionAction.mock.calls[1]?.[2]).toBe(originalKey);
+  });
+
+  it("clears a failed lifecycle action when another connection is selected", async () => {
+    const otherConnection = { ...connection, id: "66666666-6666-4666-8666-666666666666", name: "Release tooling" };
+    const detail = (value: Connection) => ({ ...value, versions: [{ id: versionId, sequence: 1, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http" as const, created_at: timestamp }], versions_truncated: false });
+    const api = fakeApi({
+      listConnections: vi.fn().mockResolvedValue([connection, otherConnection]),
+      getConnection: vi.fn((id) => Promise.resolve(detail(id === connectionId ? connection : otherConnection))),
+      connectionAction: vi.fn().mockRejectedValue(new Error("refresh failed")),
+    });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /Release tooling/ }));
+    expect(await screen.findByText("Release tooling")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
   it("rotates refresh keys when discovery generation advances", async () => {

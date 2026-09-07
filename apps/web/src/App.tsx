@@ -398,6 +398,8 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "connection", selectedId) });
     },
   });
+  const resetAction = action.reset;
+  useEffect(() => resetAction(), [resetAction, selectedId]);
   const importEntry = useMutation({
     mutationFn: ({ cacheId, digest, key }: { cacheId: string; digest: string; key: string }) =>
       api.importRegistry(cacheId, digest, key),
@@ -572,10 +574,11 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
 function Capabilities({ api, scope, role, selectedId, filter, select, setFilter, mutationKeys }: { api: ControlPlane; scope: QueryScope; role: Role; selectedId: string | null; filter: CapabilityFilter; select: (id: string | null) => void; setFilter: (filter: CapabilityFilter) => void; mutationKeys: { current: Map<string, string> } }) {
   const queryClient = useQueryClient();
   const keyFor = (operation: string) => mutationKeys.current.get(operation) ?? (() => { const key = mutationId(); mutationKeys.current.set(operation, key); return key; })();
-  const capabilities = useQuery({
+  const capabilities = useInfiniteQuery({
     queryKey: queryKey(scope, "capabilities", filter),
-    queryFn: () => api.listCapabilities(filter === "all" ? undefined : filter),
-    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
+    queryFn: ({ pageParam }) => api.listCapabilityPage(filter === "all" ? undefined : filter, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor,
   });
   const connections = useQuery({ queryKey: queryKey(scope, "connections"), queryFn: () => api.listConnections() });
   const detail = useQuery({
@@ -593,27 +596,29 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "overview") });
     },
   });
+  const capabilityRows = capabilities.data?.pages.flatMap((page) => page.items) ?? [];
   const connectionNames = new Map((connections.data ?? []).map((item) => [item.id, item.name]));
   return (
     <div className="page-flow">
       <header className="page-heading"><div><p className="kicker">Review and approval</p><h1>Capabilities</h1><p>Approve exact immutable versions. New schema never inherits old trust.</p></div></header>
       <section className="split-detail capability-layout">
         <div className="section-block">
-          <div className="section-heading"><div><span className="index">Review queue / 01</span><h2>Discovered tools</h2></div></div>
+          <div className="section-heading"><div><span className="index">Review queue / 01</span><h2>Discovered tools</h2></div><button className="secondary-action" type="button" disabled={capabilities.isFetching} onClick={() => void capabilities.refetch()}>{capabilities.isFetching ? "Refreshing…" : "Refresh tools"}</button></div>
           <form className="inline-form" onSubmit={(event) => event.preventDefault()}>
             <label>Status<select aria-label="Capability status" value={filter} onChange={(event) => setFilter(event.target.value as CapabilityFilter)}><option value="pending_review">Pending review</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option><option value="unavailable">Unavailable</option><option value="all">All statuses</option></select></label>
           </form>
           {capabilities.isPending ? <LoadingState label="Loading capabilities" /> : capabilities.isError ? (
             <QueryFailure error={capabilities.error} retry={() => void capabilities.refetch()} />
-          ) : capabilities.data.length === 0 ? (
+          ) : capabilityRows.length === 0 ? (
             <EmptyState title="No capabilities discovered" copy="Verify and refresh a connection first." />
           ) : (
             <ul className="select-list">
-              {capabilities.data.map((capability) => (
+              {capabilityRows.map((capability) => (
                 <li key={capability.id}><button className={selectedId === capability.id ? "selected" : ""} type="button" onClick={() => select(capability.id)}><span><strong>{capability.tool_identity}</strong><small>{connectionNames.get(capability.connection_id) ?? shortId(capability.connection_id)} · epoch {capability.status_epoch}</small></span><StatusMark value={capability.status} /></button></li>
               ))}
             </ul>
           )}
+          {capabilities.hasNextPage && <button className="secondary-action" disabled={capabilities.isFetchingNextPage} type="button" onClick={() => void capabilities.fetchNextPage()}>{capabilities.isFetchingNextPage ? "Loading…" : "Load older tools"}</button>}
           {connections.isError && <QueryFailure error={connections.error} retry={() => void connections.refetch()} />}
         </div>
         <aside className="detail-panel capability-detail">
@@ -667,6 +672,8 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
   const queryClient = useQueryClient();
   const { selectedVersionId, argumentsText, pendingArguments, preflight } = draft;
   const finalEventFetchRun = useRef<string | null>(null);
+  const viewMounted = useRef(true);
+  useEffect(() => () => { viewMounted.current = false; }, []);
   const runsKey = useMemo(() => queryKey(scope, "runs"), [scope]);
   const eventsKey = useMemo(() => queryKey(scope, "run-events", selectedId), [scope, selectedId]);
   const runs = useQuery({
@@ -686,7 +693,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
   const hasRunFilters = Object.keys(runFilters).length > 0;
   const capabilities = useQuery({
     queryKey: queryKey(scope, "capabilities"),
-    queryFn: () => api.listCapabilities(),
+    queryFn: () => api.listCapabilities("enabled"),
     refetchInterval: (query) => query.state.status === "error" ? false : 5000,
   });
   const connections = useQuery({
@@ -704,9 +711,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
       if (query.state.status === "error") return false;
       const current = query.state.data;
       if (!current || !terminal(current.status)) return 1500;
-      const expiredArguments = current.arguments !== null && Date.parse(current.arguments_expires_at) <= Date.now();
-      const expiredResult = current.result !== null && current.result_expires_at !== null && Date.parse(current.result_expires_at) <= Date.now();
-      return expiredArguments || expiredResult ? 1000 : false;
+      return current.arguments !== null || current.result !== null ? 1000 : false;
     },
   });
   const events = useQuery({
@@ -736,23 +741,6 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     void queryClient.refetchQueries({ queryKey: eventsKey, exact: true });
   }, [eventsKey, queryClient, runDetail.data]);
   useEffect(() => {
-    const current = runDetail.data;
-    if (!current || !terminal(current.status)) return;
-    const expiries = [
-      current.arguments !== null ? current.arguments_expires_at : null,
-      current.result !== null ? current.result_expires_at : null,
-    ].filter((value): value is string => value !== null);
-    if (expiries.length === 0) return;
-    const nextExpiry = Math.min(...expiries.map((value) => Date.parse(value)));
-    const untilExpiry = nextExpiry - Date.now();
-    if (untilExpiry <= 0) return;
-    const timer = window.setTimeout(() => {
-      void queryClient.refetchQueries({ queryKey: queryKey(scope, "run", current.id), exact: true });
-      void queryClient.refetchQueries({ queryKey: eventsKey, exact: true });
-    }, untilExpiry + 1);
-    return () => window.clearTimeout(timer);
-  }, [eventsKey, queryClient, runDetail.data, scope]);
-  useEffect(() => {
     if (!preflight) return;
     const delay = Math.max(0, Date.parse(preflight.expires_at) - Date.now());
     const timer = window.setTimeout(() => setConfirmationClock(Date.now()), delay + 1);
@@ -771,7 +759,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     },
     onSuccess: async (run, variables) => {
       runKeys.current.delete(`${variables.prepared.capability_version_id}:${variables.prepared.argument_digest}`);
-      select(run.id);
+      if (viewMounted.current) select(run.id);
       setDraft((current) => ({ ...current, preflight: null, pendingArguments: null }));
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "runs") });
     },

@@ -140,7 +140,9 @@ describe("control-plane operations", () => {
     expect((await api.importRegistry(id, "a".repeat(64), "import-key")).source).toBe("official");
     expect(await api.listRegistryEntries()).toEqual([]);
     expect(await api.listCapabilities("pending_review")).toHaveLength(1);
+    expect((await api.listCapabilityPage("pending_review", "older")).items).toHaveLength(1);
     expect(requests.some((request) => new URL(request.url).searchParams.get("status") === "pending_review")).toBe(true);
+    expect(requests.some((request) => new URL(request.url).searchParams.get("cursor") === "older")).toBe(true);
     expect((await api.getCapability(id)).tool_identity).toBe("tools/search");
     await api.capabilityAction(otherId, "enable", "cap-enable-key");
     await api.capabilityAction(otherId, "disable", "cap-disable-key");

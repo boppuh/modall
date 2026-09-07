@@ -94,6 +94,7 @@ export interface ControlPlane {
   importRegistry(cacheId: string, provenanceDigest: string, idempotencyKey: string): Promise<RegistryEntry>;
   listRegistryEntries(): Promise<RegistryEntry[]>;
   listCapabilities(status?: CapabilityStatus): Promise<Capability[]>;
+  listCapabilityPage(status?: CapabilityStatus, cursor?: string): Promise<{ items: Capability[]; nextCursor?: string }>;
   getCapability(id: string): Promise<CapabilityDetail>;
   capabilityAction(versionId: string, action: "enable" | "disable", idempotencyKey: string): Promise<Capability>;
   listRuns(): Promise<RunSummary[]>;
@@ -185,11 +186,17 @@ class GeneratedControlPlane implements ControlPlane {
   }
 
   async listRegistryEntries(): Promise<RegistryEntry[]> {
-    return collectPages((cursor) => unwrap(this.client.GET("/v1/registry/entries", { params: { query: { limit: 100, cursor } } })));
+    const page = await unwrap(this.client.GET("/v1/registry/entries", { params: { query: { limit: 100 } } }));
+    return page.items;
   }
 
   async listCapabilities(status?: CapabilityStatus): Promise<Capability[]> {
-    return collectPages((cursor) => unwrap(this.client.GET("/v1/capabilities", { params: { query: { limit: 100, cursor, status } } })));
+    return (await this.listCapabilityPage(status)).items;
+  }
+
+  async listCapabilityPage(status?: CapabilityStatus, cursor?: string): Promise<{ items: Capability[]; nextCursor?: string }> {
+    const page = await unwrap(this.client.GET("/v1/capabilities", { params: { query: { limit: 100, cursor, status } } }));
+    return { items: page.items, ...(page.page.next_cursor ? { nextCursor: page.page.next_cursor } : {}) };
   }
 
   getCapability(id: string): Promise<CapabilityDetail> {
