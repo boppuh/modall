@@ -18,8 +18,8 @@ const connection: Connection = {
   id: connectionId,
   name: "Internal developer tools",
   lifecycle: "active",
-  pending_version_id: versionId,
-  verified_version_id: null,
+  pending_version_id: null,
+  verified_version_id: versionId,
   control_epoch: 2,
   refresh_generation: 4,
   last_refresh_at: timestamp,
@@ -71,7 +71,7 @@ function fakeApi(overrides: Partial<ControlPlane> = {}): ControlPlane {
     importRegistry: vi.fn().mockResolvedValue({ id: connectionId, source: "official", external_id: "io.modall/search", current_version_id: versionId, name: "Public search", description: "Search public records", created_at: timestamp }),
     listRegistryEntries: vi.fn().mockResolvedValue([]),
     listCapabilities: vi.fn().mockResolvedValue([capability]),
-    getCapability: vi.fn().mockResolvedValue({ ...capability, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Search", description: "Search public records", input_schema: { type: "object" }, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false }),
+    getCapability: vi.fn().mockResolvedValue({ ...capability, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Search", description: "Search public records", input_schema: { type: "object" }, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false, observed_in_current_snapshot: true }),
     capabilityAction: vi.fn().mockResolvedValue(capability),
     listRuns: vi.fn().mockResolvedValue([run]),
     listRunPage: vi.fn().mockResolvedValue({ items: [run] }),
@@ -134,7 +134,10 @@ describe("App", () => {
   });
 
   it("shows workspace posture and navigates through registry lifecycle controls", async () => {
-    const api = fakeApi();
+    const pendingConnection = { ...connection, pending_version_id: versionId, verified_version_id: null };
+    const api = fakeApi({
+      getConnection: vi.fn().mockResolvedValue({ ...pendingConnection, versions: [{ id: versionId, sequence: 1, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http", created_at: timestamp }], versions_truncated: false }),
+    });
     renderApp(api);
     expect(await screen.findByText("Internal developer tools")).toBeTruthy();
     await waitFor(() => expect(document.activeElement?.id).toBe("main-content"));
@@ -283,10 +286,28 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Enable exact version" })).toHaveProperty("disabled", true);
   });
 
+  it("blocks reconsidering a disabled version absent from the current snapshot", async () => {
+    const rejected = { ...capability, status: "disabled" as const, pending_version_id: versionId, enabled_version_id: null };
+    renderApp(fakeApi({
+      listCapabilities: vi.fn().mockResolvedValue([rejected]),
+      getCapability: vi.fn().mockResolvedValue({ ...rejected, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: connectionId, sequence: 1, display_name: "Missing search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false, observed_in_current_snapshot: false }),
+    }));
+    fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
+    expect(await screen.findByRole("button", { name: "Reconsider version" })).toHaveProperty("disabled", true);
+  });
+
+  it("excludes enabled capabilities whose connection cannot execute", async () => {
+    renderApp(fakeApi({ listConnections: vi.fn().mockResolvedValue([{ ...connection, lifecycle: "disabled" }]) }));
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
+    expect(await screen.findByRole("button", { name: "Review invocation" })).toHaveProperty("disabled", true);
+    expect(screen.queryByRole("option", { name: /tools\/search/ })).toBeNull();
+  });
+
   it("rotates capability action keys after the status epoch advances", async () => {
     const disabled = { ...capability, status: "disabled" as const, status_epoch: 4 };
     const enabled = { ...capability, status: "enabled" as const, status_epoch: 5 };
-    const detail = (value: Capability) => ({ ...value, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: connectionId, sequence: 1, display_name: "Search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false });
+    const detail = (value: Capability) => ({ ...value, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: connectionId, sequence: 1, display_name: "Search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false, observed_in_current_snapshot: true });
     const getCapability = vi.fn<ControlPlane["getCapability"]>()
       .mockResolvedValueOnce(detail(capability))
       .mockResolvedValueOnce(detail(disabled))

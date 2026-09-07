@@ -133,6 +133,10 @@
             "title": "Id",
             "type": "string"
           },
+          "observed_in_current_snapshot": {
+            "title": "Observed In Current Snapshot",
+            "type": "boolean"
+          },
           "pending_version_id": {
             "anyOf": [
               {
@@ -179,7 +183,8 @@
           "status_epoch",
           "created_at",
           "versions",
-          "versions_truncated"
+          "versions_truncated",
+          "observed_in_current_snapshot"
         ],
         "title": "CapabilityDetailResponse",
         "type": "object"
@@ -3240,6 +3245,16 @@
               }
             },
             "description": "Unprocessable Content"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
           },
           "500": {
             "content": {

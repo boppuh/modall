@@ -29,6 +29,7 @@ from modall.persistence.models import (
     AuditEvent,
     Capability,
     CapabilityVersion,
+    DiscoverySnapshotCapability,
     McpToolBinding,
     RegistryEntry,
     RegistryEntryVersion,
@@ -191,6 +192,7 @@ class CapabilityResponse(BaseModel):
 class CapabilityDetailResponse(CapabilityResponse):
     versions: list["CapabilityVersionResponse"]
     versions_truncated: bool
+    observed_in_current_snapshot: bool
 
 
 class CapabilityVersionResponse(BaseModel):
@@ -723,6 +725,30 @@ def build_control_plane_router(
                     )
                 ).all()
             )
+        connection = await state.session.scalar(
+            select(ServerConnection).where(
+                ServerConnection.id == capability.connection_id,
+                ServerConnection.workspace_id == state.context.workspace_id,
+            )
+        )
+        decision_version_id = capability.pending_version_id or capability.enabled_version_id
+        observed_in_current_snapshot = False
+        if (
+            connection is not None
+            and connection.current_snapshot_id is not None
+            and decision_version_id
+        ):
+            observed_in_current_snapshot = (
+                await state.session.scalar(
+                    select(DiscoverySnapshotCapability.id).where(
+                        DiscoverySnapshotCapability.workspace_id == state.context.workspace_id,
+                        DiscoverySnapshotCapability.connection_id == capability.connection_id,
+                        DiscoverySnapshotCapability.snapshot_id == connection.current_snapshot_id,
+                        DiscoverySnapshotCapability.capability_version_id == decision_version_id,
+                    )
+                )
+                is not None
+            )
         return CapabilityDetailResponse(
             **_capability(capability).model_dump(),
             versions=[
@@ -730,6 +756,7 @@ def build_control_plane_router(
                 for item, connection_version_id in visible_versions
             ],
             versions_truncated=len(versions) > _DETAIL_VERSION_LIMIT,
+            observed_in_current_snapshot=observed_in_current_snapshot,
         )
 
     @router.get(
@@ -830,7 +857,12 @@ def build_control_plane_router(
             expires_at=result.expires_at,
         )
 
-    @router.post("/runs", response_model=RunResponse, status_code=status.HTTP_201_CREATED)
+    @router.post(
+        "/runs",
+        response_model=RunResponse,
+        status_code=status.HTTP_201_CREATED,
+        responses={status.HTTP_429_TOO_MANY_REQUESTS: {"model": ErrorResponse}},
+    )
     async def create_run(
         body: RunCreateRequest, state: State, idempotency_key: Idempotency
     ) -> RunResponse:

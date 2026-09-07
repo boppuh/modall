@@ -467,6 +467,7 @@ def test_registry_capability_and_audit_read_contracts() -> None:
             assert capability.json()["versions"][0]["display_name"] == "Test tool 102"
             assert len(capability.json()["versions"]) == 101
             assert capability.json()["versions_truncated"] is True
+            assert capability.json()["observed_in_current_snapshot"] is False
             pending_version = next(
                 item
                 for item in capability.json()["versions"]
@@ -1070,6 +1071,7 @@ def test_openapi_publishes_every_planned_alpha_route() -> None:
         "/v1/runs/{run_id}/cancel",
         "/v1/audit-events",
     } <= set(paths)
+    assert "429" in paths["/v1/runs"]["post"]["responses"]
 
 
 def test_api_idempotency_rejects_invalid_configuration_before_database_access() -> None:

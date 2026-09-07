@@ -643,11 +643,11 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
                   {version.output_schema && <details><summary>Output schema</summary><pre>{JSON.stringify(version.output_schema, null, 2)}</pre></details>}
                   {pending && !rejected ? <div className="action-strip">
                     <button className="danger-action" type="button" disabled={!canOperate(role) || action.isPending} onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:disable`; action.mutate({ versionId: version.id, verb: "disable", operation, key: keyFor(operation) }); }}>Reject version</button>
-                    <button className="secondary-action" type="button" disabled={!canOperate(role) || detail.data.status === "unavailable" || !version.schema_supported || action.isPending} onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:enable`; action.mutate({ versionId: version.id, verb: "enable", operation, key: keyFor(operation) }); }}>Enable exact version</button>
+                    <button className="secondary-action" type="button" disabled={!canOperate(role) || detail.data.status === "unavailable" || detail.data.observed_in_current_snapshot === false || !version.schema_supported || action.isPending} onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:enable`; action.mutate({ versionId: version.id, verb: "enable", operation, key: keyFor(operation) }); }}>Enable exact version</button>
                   </div> : <button
                     className={disableable ? "danger-action" : "secondary-action"}
                     type="button"
-                    disabled={!canOperate(role) || !actionable || !version.schema_supported || action.isPending}
+                    disabled={!canOperate(role) || !actionable || (verb === "enable" && detail.data.observed_in_current_snapshot === false) || !version.schema_supported || action.isPending}
                     onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:${verb}`; action.mutate({ versionId: version.id, verb, operation, key: keyFor(operation) }); }}
                   >
                     {!actionable ? "Historical version" : disableable ? "Disable version" : rejected ? "Reconsider version" : "Re-enable version"}
@@ -689,7 +689,11 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     queryFn: () => api.listCapabilities(),
     refetchInterval: (query) => query.state.status === "error" ? false : 5000,
   });
-  const connections = useQuery({ queryKey: queryKey(scope, "connections"), queryFn: () => api.listConnections() });
+  const connections = useQuery({
+    queryKey: queryKey(scope, "connections"),
+    queryFn: () => api.listConnections(),
+    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
+  });
   const [argumentsError, setArgumentsError] = useState("");
   const [confirmationClock, setConfirmationClock] = useState(() => Date.now());
   const runDetail = useQuery({
@@ -786,7 +790,11 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "runs") });
     },
   });
-  const enabledCapabilities = (capabilities.data ?? []).filter((item) => item.status === "enabled" && item.enabled_version_id);
+  const connectionById = new Map((connections.data ?? []).map((item) => [item.id, item]));
+  const enabledCapabilities = (capabilities.data ?? []).filter((item) => {
+    const connection = connectionById.get(item.connection_id);
+    return item.status === "enabled" && item.enabled_version_id && connection?.lifecycle === "active" && connection.pending_version_id === null && connection.verified_version_id !== null;
+  });
   const connectionNames = new Map((connections.data ?? []).map((item) => [item.id, item.name]));
   const capabilityNames = new Map((capabilities.data ?? []).map((item) => [item.id, item.tool_identity]));
   const runIndex = new Map((history.data?.pages.flatMap((page) => page.items) ?? []).map((run) => [run.id, run]));

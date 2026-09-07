@@ -490,6 +490,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Observed In Current Snapshot */
+            observed_in_current_snapshot: boolean;
             /** Pending Version Id */
             pending_version_id: string | null;
             /** Status */
@@ -2054,6 +2056,15 @@ export interface operations {
             };
             /** @description Unprocessable Content */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
