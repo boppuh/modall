@@ -345,7 +345,7 @@ describe("App", () => {
     const historyFailure = renderApp(fakeApi({ listRunPage: vi.fn().mockRejectedValue(new Error("history offline")) }));
     fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
     expect(await screen.findByRole("button", { name: /55555555/ })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Status"), { target: { value: "failed" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
     expect(await screen.findByRole("button", { name: "Try again" })).toBeTruthy();
@@ -378,6 +378,27 @@ describe("App", () => {
     fireEvent.click(confirm);
     await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2));
     expect(createRun.mock.calls[1]?.[2]).toBe(originalKey);
+  });
+
+  it("rotates a run key after an ambiguous invocation is abandoned", async () => {
+    const createRun = vi.fn<ControlPlane["createRun"]>().mockRejectedValue(new Error("response lost"));
+    renderApp(fakeApi({ createRun }));
+    fireEvent.click(await screen.findByRole("button", { name: /Runs$/ }));
+    await screen.findAllByRole("option", { name: /tools\/search/ });
+    fireEvent.change(screen.getByLabelText("Enabled capability"), { target: { value: versionId } });
+    fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
+    let confirm = await screen.findByRole("button", { name: "Confirm and run" });
+    await waitFor(() => expect(confirm).toHaveProperty("disabled", false));
+    fireEvent.click(confirm);
+    await waitFor(() => expect(createRun).toHaveBeenCalledTimes(1));
+    const abandonedKey = createRun.mock.calls[0]?.[2];
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    fireEvent.click(screen.getByRole("button", { name: "Review invocation" }));
+    confirm = await screen.findByRole("button", { name: "Confirm and run" });
+    await waitFor(() => expect(confirm).toHaveProperty("disabled", false));
+    fireEvent.click(confirm);
+    await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2));
+    expect(createRun.mock.calls[1]?.[2]).not.toBe(abandonedKey);
   });
 
   it("warns operators not to retry an indeterminate run", async () => {
@@ -426,11 +447,11 @@ describe("App", () => {
     const expiresAt = new Date(Date.now() + 1500).toISOString();
     const retained = { ...run, status: "succeeded" as const, result: { matches: 17 }, result_expires_at: expiresAt, arguments_expires_at: expiresAt, terminal_at: timestamp };
     const expired = { ...retained, arguments: null, result: null, result_expires_at: null };
-    const getRun = vi.fn().mockResolvedValueOnce(retained).mockResolvedValue(expired);
+    const getRun = vi.fn().mockResolvedValueOnce(retained).mockResolvedValueOnce(retained).mockResolvedValue(expired);
     window.history.replaceState({}, "", `/runs/${runId}`);
     renderApp(fakeApi({ listRuns: vi.fn().mockResolvedValue([retained]), getRun }));
     expect(await screen.findByText(/"matches": 17/)).toBeTruthy();
-    await waitFor(() => expect(getRun).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    await waitFor(() => expect(getRun).toHaveBeenCalledTimes(3), { timeout: 3000 });
     await waitFor(() => expect(screen.queryByText(/"matches": 17/)).toBeNull());
   });
 

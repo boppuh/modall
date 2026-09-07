@@ -291,7 +291,7 @@ function Overview({ api, open, scope }: { api: ControlPlane; open: (view: View, 
         <button type="button" onClick={() => open("runs")}>
           <span>Runs in flight</span>
           <strong>{running.toString().padStart(2, "0")}</strong>
-          <small>{query.data.runs.length} retained</small>
+          <small>{query.data.runs.length} visible</small>
         </button>
       </section>
       <section className="overview-grid">
@@ -692,7 +692,14 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     queryKey: queryKey(scope, "run", selectedId),
     queryFn: () => api.getRun(selectedId as string),
     enabled: selectedId !== null,
-    refetchInterval: (query) => query.state.status === "error" || (query.state.data && terminal(query.state.data.status)) ? false : 1500,
+    refetchInterval: (query) => {
+      if (query.state.status === "error") return false;
+      const current = query.state.data;
+      if (!current || !terminal(current.status)) return 1500;
+      const expiredArguments = current.arguments !== null && Date.parse(current.arguments_expires_at) <= Date.now();
+      const expiredResult = current.result !== null && current.result_expires_at !== null && Date.parse(current.result_expires_at) <= Date.now();
+      return expiredArguments || expiredResult ? 1000 : false;
+    },
   });
   const events = useQuery({
     queryKey: eventsKey,
@@ -724,15 +731,17 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     const current = runDetail.data;
     if (!current || !terminal(current.status)) return;
     const expiries = [
-      current.arguments ? current.arguments_expires_at : null,
-      current.result ? current.result_expires_at : null,
+      current.arguments !== null ? current.arguments_expires_at : null,
+      current.result !== null ? current.result_expires_at : null,
     ].filter((value): value is string => value !== null);
     if (expiries.length === 0) return;
     const nextExpiry = Math.min(...expiries.map((value) => Date.parse(value)));
+    const untilExpiry = nextExpiry - Date.now();
+    if (untilExpiry <= 0) return;
     const timer = window.setTimeout(() => {
       void queryClient.refetchQueries({ queryKey: queryKey(scope, "run", current.id), exact: true });
       void queryClient.refetchQueries({ queryKey: eventsKey, exact: true });
-    }, Math.max(0, nextExpiry - Date.now()) + 1);
+    }, untilExpiry + 1);
     return () => window.clearTimeout(timer);
   }, [eventsKey, queryClient, runDetail.data, scope]);
   useEffect(() => {
@@ -790,6 +799,11 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
 
   function invalidatePreparedRun() {
     setDraft((current) => ({ ...current, preflight: null, pendingArguments: null })); prepare.reset(); invoke.reset();
+  }
+
+  function abandonPreparedRun() {
+    if (preflight) runKeys.current.delete(`${preflight.capability_version_id}:${preflight.argument_digest}`);
+    invalidatePreparedRun();
   }
 
   function submitPreflight(event: FormEvent<HTMLFormElement>) {
@@ -864,6 +878,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
           {(hasRunFilters ? history.isPending : runs.isPending) ? <LoadingState label="Loading runs" /> : (hasRunFilters ? history.isError : runs.isError) ? <QueryFailure error={hasRunFilters ? history.error : runs.error} retry={() => void (hasRunFilters ? history.refetch() : runs.refetch())} /> : orderedRuns.length === 0 ? <EmptyState title="No runs retained" copy="Completed and in-flight work will appear here." /> : (
             <ul className="select-list">{orderedRuns.map((run) => <li key={run.id}><button className={selectedId === run.id ? "selected" : ""} type="button" onClick={() => select(run.id)}><span><strong>{capabilityNames.get(run.capability_id) ?? shortId(run.capability_id)}</strong><small>{connectionNames.get(run.connection_id) ?? shortId(run.connection_id)} · actor {shortId(run.actor_user_id)} · {shortId(run.id)} · {formatTime(run.created_at)}</small></span><StatusMark value={run.status} /></button></li>)}</ul>
           )}
+          {!hasRunFilters && history.isError && <QueryFailure error={history.error} retry={() => void history.refetch()} />}
           {history.hasNextPage && <button className="secondary-action" disabled={history.isFetchingNextPage} type="button" onClick={() => void history.fetchNextPage()}>{history.isFetchingNextPage ? "Loading…" : "Load older runs"}</button>}
         </div>
       </section>
@@ -877,7 +892,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
           {confirmationExpired && <p className="field-error" role="alert">This confirmation expired. Go back and run preflight again.</p>}
           <details open><summary>Exact prepared arguments</summary><pre>{JSON.stringify(pendingArguments, null, 2)}</pre></details>
           {invoke.isError && <p className="field-error" role="alert">{failureMessage(invoke.error)}{invoke.error instanceof ApiFailure && ["invalid_confirmation", "confirmation_expired", "confirmation_replayed"].includes(invoke.error.code) ? " Run preflight again." : " Retry to safely reuse this request."}</p>}
-          <div className="action-strip"><button type="button" onClick={() => invalidatePreparedRun()}>Back</button><button className="primary-action" type="button" disabled={!canOperate(role) || invoke.isPending || !confirmedEndpoint || confirmationExpired} onClick={() => invoke.mutate({ prepared: preflight, args: pendingArguments })}>{invoke.isPending ? "Submitting…" : confirmationExpired ? "Confirmation expired" : "Confirm and run"}</button></div>
+          <div className="action-strip"><button type="button" onClick={abandonPreparedRun}>Back</button><button className="primary-action" type="button" disabled={!canOperate(role) || invoke.isPending || !confirmedEndpoint || confirmationExpired} onClick={() => invoke.mutate({ prepared: preflight, args: pendingArguments })}>{invoke.isPending ? "Submitting…" : confirmationExpired ? "Confirmation expired" : "Confirm and run"}</button></div>
         </section>
       )}
       {invoke.isError && !preflight && <p className="field-error" role="alert">{failureMessage(invoke.error)} Run preflight again.</p>}
