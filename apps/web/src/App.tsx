@@ -349,7 +349,11 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
     queryFn: () => api.listConnections(),
     refetchInterval: (query) => query.state.status === "error" ? false : 5000,
   });
-  const entries = useQuery({ queryKey: queryKey(scope, "registry-entries"), queryFn: () => api.listRegistryEntries() });
+  const entries = useQuery({
+    queryKey: queryKey(scope, "registry-entries"),
+    queryFn: () => api.listRegistryEntries(),
+    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
+  });
   const detail = useQuery({
     queryKey: queryKey(scope, "connection", selectedId),
     queryFn: () => api.getConnection(selectedId as string),
@@ -639,7 +643,7 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
                   {version.output_schema && <details><summary>Output schema</summary><pre>{JSON.stringify(version.output_schema, null, 2)}</pre></details>}
                   {pending && !rejected ? <div className="action-strip">
                     <button className="danger-action" type="button" disabled={!canOperate(role) || action.isPending} onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:disable`; action.mutate({ versionId: version.id, verb: "disable", operation, key: keyFor(operation) }); }}>Reject version</button>
-                    <button className="secondary-action" type="button" disabled={!canOperate(role) || !version.schema_supported || action.isPending} onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:enable`; action.mutate({ versionId: version.id, verb: "enable", operation, key: keyFor(operation) }); }}>Enable exact version</button>
+                    <button className="secondary-action" type="button" disabled={!canOperate(role) || detail.data.status === "unavailable" || !version.schema_supported || action.isPending} onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:enable`; action.mutate({ versionId: version.id, verb: "enable", operation, key: keyFor(operation) }); }}>Enable exact version</button>
                   </div> : <button
                     className={disableable ? "danger-action" : "secondary-action"}
                     type="button"
@@ -677,7 +681,7 @@ function Runs({ api, scope, role, selectedId, select, runKeys, cancelKeys, draft
     queryFn: ({ pageParam }) => api.listRunPage(runFilters, pageParam),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.nextCursor,
-    refetchInterval: (query) => query.state.status === "error" || Object.keys(runFilters).length === 0 ? false : 3000,
+    refetchInterval: (query) => query.state.status === "error" ? false : 3000,
   });
   const hasRunFilters = Object.keys(runFilters).length > 0;
   const capabilities = useQuery({

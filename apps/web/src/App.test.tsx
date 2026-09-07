@@ -271,6 +271,18 @@ describe("App", () => {
     await waitFor(() => expect(api.capabilityAction).toHaveBeenCalledWith(versionId, "disable", expect.any(String)));
   });
 
+  it("keeps unavailable pending capability versions rejectable but not enableable", async () => {
+    const unavailable = { ...capability, status: "unavailable" as const, pending_version_id: versionId, enabled_version_id: null };
+    renderApp(fakeApi({
+      listCapabilities: vi.fn().mockResolvedValue([unavailable]),
+      getCapability: vi.fn().mockResolvedValue({ ...unavailable, versions: [{ id: versionId, capability_id: capabilityId, connection_version_id: connectionId, sequence: 1, display_name: "Unavailable search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp }], versions_truncated: false }),
+    }));
+    fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
+    expect(await screen.findByRole("button", { name: "Reject version" })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: "Enable exact version" })).toHaveProperty("disabled", true);
+  });
+
   it("rotates capability action keys after the status epoch advances", async () => {
     const disabled = { ...capability, status: "disabled" as const, status_epoch: 4 };
     const enabled = { ...capability, status: "enabled" as const, status_epoch: 5 };
