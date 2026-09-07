@@ -839,8 +839,21 @@ def build_control_plane_router(
             )
         rows = list((await state.session.scalars(statement.limit(limit + 1))).all())
         page_runs = rows[:limit]
+        result_expiries: dict[UUID, datetime] = {}
         results: dict[UUID, RunResult] = {}
         if page_runs:
+            now = datetime.now(UTC)
+            result_expiries = {
+                run_id: expires_at
+                for run_id, expires_at in (
+                    await state.session.execute(
+                        select(RunResult.run_id, RunResult.expires_at).where(
+                            RunResult.workspace_id == state.context.workspace_id,
+                            RunResult.run_id.in_([run.id for run in page_runs]),
+                        )
+                    )
+                ).all()
+            }
             results = {
                 result.run_id: result
                 for result in (
@@ -848,12 +861,20 @@ def build_control_plane_router(
                         select(RunResult).where(
                             RunResult.workspace_id == state.context.workspace_id,
                             RunResult.run_id.in_([run.id for run in page_runs]),
+                            RunResult.expires_at > now,
                         )
                     )
                 ).all()
             }
         return RunPage(
-            items=[_run_response_value(run, results.get(run.id)) for run in page_runs],
+            items=[
+                _run_response_value(
+                    run,
+                    results.get(run.id),
+                    result_expires_at=result_expiries.get(run.id),
+                )
+                for run in page_runs
+            ],
             page=PageInfo(
                 next_cursor=(
                     _encode_audit_cursor(page_runs[-1].created_at, page_runs[-1].id)
@@ -1199,12 +1220,23 @@ async def _run_response(session: AsyncSession, run: Run) -> RunResponse:
 
 
 def _run_response_value(
-    run: Run, result: RunResult | None, *, now: datetime | None = None
+    run: Run,
+    result: RunResult | None,
+    *,
+    now: datetime | None = None,
+    result_expires_at: datetime | None = None,
 ) -> RunResponse:
     current = now or datetime.now(UTC)
     arguments = run.arguments if _utc(run.arguments_expires_at) > current else None
     result_payload = (
         result.payload if result is not None and _utc(result.expires_at) > current else None
+    )
+    persisted_result_expiry = (
+        result_expires_at
+        if result_expires_at is not None
+        else result.expires_at
+        if result is not None
+        else None
     )
     return RunResponse(
         id=run.id,
@@ -1218,7 +1250,9 @@ def _run_response_value(
         result=result_payload,
         safe_error_code=run.safe_error_code,
         arguments_expires_at=run.arguments_expires_at,
-        result_expires_at=_utc(result.expires_at) if result else None,
+        result_expires_at=(
+            _utc(persisted_result_expiry) if persisted_result_expiry is not None else None
+        ),
         cancellation_requested=run.cancellation_requested,
         deadline=run.deadline,
         created_at=run.created_at,

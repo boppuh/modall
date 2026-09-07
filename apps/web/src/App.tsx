@@ -346,7 +346,7 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
   const connections = useQuery({
     queryKey: queryKey(scope, "connections"),
     queryFn: () => api.listConnections(),
-    refetchInterval: selectedId ? 5000 : false,
+    refetchInterval: (query) => query.state.status === "error" ? false : 5000,
   });
   const entries = useQuery({ queryKey: queryKey(scope, "registry-entries"), queryFn: () => api.listRegistryEntries() });
   const detail = useQuery({
@@ -579,9 +579,9 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
     refetchInterval: (query) => query.state.status === "error" ? false : 5000,
   });
   const action = useMutation({
-    mutationFn: ({ versionId, verb, key }: { versionId: string; verb: "enable" | "disable"; key: string }) => api.capabilityAction(versionId, verb, key),
+    mutationFn: ({ versionId, verb, key }: { versionId: string; verb: "enable" | "disable"; key: string; operation: string }) => api.capabilityAction(versionId, verb, key),
     onSuccess: async (_data, variables) => {
-      mutationKeys.current.delete(`capability:${variables.versionId}:${variables.verb}`);
+      mutationKeys.current.delete(variables.operation);
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "capabilities") });
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "capability", selectedId) });
       await queryClient.invalidateQueries({ queryKey: queryKey(scope, "overview") });
@@ -622,11 +622,11 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
               {detail.data.versions.map((version, index) => {
                 const retained = detail.data.enabled_version_id === version.id;
                 const pending = detail.data.pending_version_id === version.id;
-                const enabled = detail.data.status === "enabled" && retained;
+                const disableable = (detail.data.status === "enabled" || detail.data.status === "unavailable") && retained;
                 const reenable = detail.data.status === "disabled" && detail.data.pending_version_id === null && retained;
                 const rejected = detail.data.status === "disabled" && pending;
-                const actionable = enabled || reenable || pending;
-                const verb = enabled ? "disable" : "enable";
+                const actionable = disableable || reenable || pending;
+                const verb = disableable ? "disable" : "enable";
                 return (
                 <article className="schema-version" key={version.id}>
                   <header><div><span>Version {version.sequence}</span><h3>{version.display_name}</h3></div>{index === 0 && <small>Latest observed</small>}</header>
@@ -636,15 +636,15 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
                   <details><summary>Input schema</summary><pre>{JSON.stringify(version.input_schema, null, 2)}</pre></details>
                   {version.output_schema && <details><summary>Output schema</summary><pre>{JSON.stringify(version.output_schema, null, 2)}</pre></details>}
                   {pending && !rejected ? <div className="action-strip">
-                    <button className="danger-action" type="button" disabled={!canOperate(role) || action.isPending} onClick={() => action.mutate({ versionId: version.id, verb: "disable", key: keyFor(`capability:${version.id}:disable`) })}>Reject version</button>
-                    <button className="secondary-action" type="button" disabled={!canOperate(role) || !version.schema_supported || action.isPending} onClick={() => action.mutate({ versionId: version.id, verb: "enable", key: keyFor(`capability:${version.id}:enable`) })}>Enable exact version</button>
+                    <button className="danger-action" type="button" disabled={!canOperate(role) || action.isPending} onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:disable`; action.mutate({ versionId: version.id, verb: "disable", operation, key: keyFor(operation) }); }}>Reject version</button>
+                    <button className="secondary-action" type="button" disabled={!canOperate(role) || !version.schema_supported || action.isPending} onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:enable`; action.mutate({ versionId: version.id, verb: "enable", operation, key: keyFor(operation) }); }}>Enable exact version</button>
                   </div> : <button
-                    className={enabled ? "danger-action" : "secondary-action"}
+                    className={disableable ? "danger-action" : "secondary-action"}
                     type="button"
                     disabled={!canOperate(role) || !actionable || !version.schema_supported || action.isPending}
-                    onClick={() => action.mutate({ versionId: version.id, verb, key: keyFor(`capability:${version.id}:${verb}`) })}
+                    onClick={() => { const operation = `capability:${version.id}:${detail.data.status_epoch}:${verb}`; action.mutate({ versionId: version.id, verb, operation, key: keyFor(operation) }); }}
                   >
-                    {!actionable ? "Historical version" : enabled ? "Disable version" : rejected ? "Reconsider version" : "Re-enable version"}
+                    {!actionable ? "Historical version" : disableable ? "Disable version" : rejected ? "Reconsider version" : "Re-enable version"}
                   </button>}
                 </article>
               );})}

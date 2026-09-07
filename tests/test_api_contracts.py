@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from modall.api.contracts import (
@@ -16,6 +16,7 @@ from modall.api.contracts import (
     _decode_sequence_cursor,
     _encode_audit_cursor,
     _encode_sequence_cursor,
+    _run_response,
 )
 from modall.api.idempotency import idempotent_mutation, purge_expired_api_idempotency
 from modall.api.main import create_app
@@ -38,6 +39,7 @@ from modall.persistence.models import (
     McpToolBinding,
     RegistryEntry,
     RegistryEntryVersion,
+    Run,
     RunResult,
     ServerConnectionVersion,
     WorkspaceMembership,
@@ -745,7 +747,14 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             assert created.json()["result_expires_at"] is None
             run_id = created.json()["id"]
 
-            result_queries = 0
+            factory = create_session_factory(engine)
+            async with transaction(factory) as session:
+                stored_run = await session.get(Run, UUID(run_id))
+                assert stored_run is not None
+                direct_response = await _run_response(session, stored_run)
+                assert direct_response.id == UUID(run_id)
+
+            result_queries: list[str] = []
 
             def count_result_queries(
                 connection: object,
@@ -756,16 +765,20 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
                 executemany: bool,
             ) -> None:
                 del connection, cursor, parameters, context, executemany
-                nonlocal result_queries
                 if "FROM run_results" in statement:
-                    result_queries += 1
+                    result_queries.append(statement)
 
             event.listen(engine.sync_engine, "before_cursor_execute", count_result_queries)
             listed = await client.get("/v1/runs", headers=headers)
             event.remove(engine.sync_engine, "before_cursor_execute", count_result_queries)
             assert listed.status_code == 200
             assert listed.json()["items"][0]["arguments"] == arguments
-            assert result_queries == 1
+            assert len(result_queries) == 2
+            assert any(
+                "run_results.payload" not in statement and "run_results.expires_at" in statement
+                for statement in result_queries
+            )
+            assert any("run_results.expires_at >" in statement for statement in result_queries)
 
             filtered = await client.get("/v1/runs?status=queued", headers=headers)
             assert filtered.status_code == 200
@@ -798,8 +811,7 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             assert replayed_cancel.status_code == 200
             assert replayed_cancel.json()["id"] == run_id
 
-            expired_at = datetime.now(UTC) - timedelta(seconds=1)
-            factory = create_session_factory(engine)
+            retained_until = datetime.now(UTC) + timedelta(minutes=1)
             async with transaction(factory) as session:
                 session.add(
                     RunResult(
@@ -808,13 +820,36 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
                         payload={"secret": "redacted"},
                         canonical_digest="d" * 64,
                         byte_count=21,
-                        captured_at=expired_at - timedelta(seconds=1),
-                        expires_at=expired_at,
+                        captured_at=datetime.now(UTC),
+                        expires_at=retained_until,
                     )
+                )
+            retained = await client.get(f"/v1/runs/{run_id}", headers=headers)
+            assert retained.json()["result"] == {"secret": "redacted"}
+            retained_page = await client.get("/v1/runs", headers=headers)
+            retained_item = next(
+                item for item in retained_page.json()["items"] if item["id"] == run_id
+            )
+            assert retained_item["result"] == {"secret": "redacted"}
+
+            expired_at = datetime.now(UTC) - timedelta(seconds=1)
+            async with transaction(factory) as session:
+                await session.execute(
+                    update(RunResult)
+                    .where(RunResult.run_id == UUID(run_id))
+                    .values(expires_at=expired_at)
                 )
             redacted = await client.get(f"/v1/runs/{run_id}", headers=headers)
             assert redacted.json()["result"] is None
             assert redacted.json()["result_expires_at"] == expired_at.isoformat().replace(
+                "+00:00", "Z"
+            )
+            redacted_page = await client.get("/v1/runs", headers=headers)
+            redacted_item = next(
+                item for item in redacted_page.json()["items"] if item["id"] == run_id
+            )
+            assert redacted_item["result"] is None
+            assert redacted_item["result_expires_at"] == expired_at.isoformat().replace(
                 "+00:00", "Z"
             )
 
