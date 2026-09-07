@@ -492,6 +492,8 @@ export interface components {
             id: string;
             /** Observed In Current Snapshot */
             observed_in_current_snapshot: boolean;
+            /** Observed Version Id */
+            observed_version_id?: string | null;
             /** Pending Version Id */
             pending_version_id: string | null;
             /** Status */

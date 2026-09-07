@@ -194,6 +194,7 @@ class CapabilityDetailResponse(CapabilityResponse):
     versions: list["CapabilityVersionResponse"]
     versions_truncated: bool
     observed_in_current_snapshot: bool
+    observed_version_id: UUID | None = None
 
 
 class CapabilityVersionResponse(BaseModel):
@@ -756,22 +757,20 @@ def build_control_plane_router(
             )
         )
         decision_version_id = capability.pending_version_id or capability.enabled_version_id
-        observed_in_current_snapshot = False
-        if (
-            connection is not None
-            and connection.current_snapshot_id is not None
-            and decision_version_id
-        ):
-            observed_in_current_snapshot = (
-                await state.session.scalar(
-                    select(DiscoverySnapshotCapability.id).where(
-                        DiscoverySnapshotCapability.workspace_id == state.context.workspace_id,
-                        DiscoverySnapshotCapability.connection_id == capability.connection_id,
-                        DiscoverySnapshotCapability.snapshot_id == connection.current_snapshot_id,
-                        DiscoverySnapshotCapability.capability_version_id == decision_version_id,
-                    )
+        observed_version_id: UUID | None = None
+        if connection is not None and connection.current_snapshot_id is not None:
+            observed_version_id = await state.session.scalar(
+                select(DiscoverySnapshotCapability.capability_version_id)
+                .join(
+                    CapabilityVersion,
+                    CapabilityVersion.id == DiscoverySnapshotCapability.capability_version_id,
                 )
-                is not None
+                .where(
+                    DiscoverySnapshotCapability.workspace_id == state.context.workspace_id,
+                    DiscoverySnapshotCapability.connection_id == capability.connection_id,
+                    DiscoverySnapshotCapability.snapshot_id == connection.current_snapshot_id,
+                    CapabilityVersion.capability_id == capability.id,
+                )
             )
         return CapabilityDetailResponse(
             **_capability(capability).model_dump(),
@@ -780,7 +779,8 @@ def build_control_plane_router(
                 for item, connection_version_id in visible_versions
             ],
             versions_truncated=len(versions) > _DETAIL_VERSION_LIMIT,
-            observed_in_current_snapshot=observed_in_current_snapshot,
+            observed_in_current_snapshot=observed_version_id == decision_version_id,
+            observed_version_id=observed_version_id,
         )
 
     @router.get(
@@ -1311,14 +1311,21 @@ def _capability_version(
 
 
 async def _run_response(session: AsyncSession, run: Run) -> RunResponse:
-    now = datetime.now(UTC)
+    clock = (
+        func.clock_timestamp()
+        if session.get_bind().dialect.name == "postgresql"
+        else func.current_timestamp()
+    )
+    now = await session.scalar(select(clock))
+    if not isinstance(now, datetime):
+        raise RuntimeError("database clock is unavailable")
     result = await session.scalar(
         select(RunResult).where(
             RunResult.run_id == run.id,
             RunResult.workspace_id == run.workspace_id,
         )
     )
-    return _run_response_value(run, result, now=now)
+    return _run_response_value(run, result, now=_utc(now))
 
 
 def _run_response_value(

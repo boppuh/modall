@@ -236,6 +236,19 @@ describe("App", () => {
     expect(listConnectionPage).toHaveBeenCalledWith("older");
   });
 
+  it("refreshes selected connection history explicitly instead of polling it", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const getConnection = vi.fn<ControlPlane["getConnection"]>().mockResolvedValue({ ...connection, versions: [{ id: versionId, sequence: 1, endpoint_url: "https://mcp.example/tools", secret_binding_id: null, policy_version: "v1", transport: "streamable_http", created_at: timestamp }], versions_truncated: false });
+    renderApp(fakeApi({ getConnection }));
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Internal developer tools/ }));
+    await waitFor(() => expect(getConnection).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(getConnection).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh connections" }));
+    await waitFor(() => expect(getConnection).toHaveBeenCalledTimes(2));
+  });
+
   it("does not redirect after connection creation finishes from an abandoned Registry view", async () => {
     let resolveConnection: ((value: Connection) => void) | undefined;
     const createConnection = vi.fn<ControlPlane["createConnection"]>().mockImplementation(() => new Promise<Connection>((resolve) => { resolveConnection = resolve; }));
@@ -413,6 +426,21 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
     fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
     expect(await screen.findByRole("button", { name: "Enable exact version" })).toHaveProperty("disabled", true);
+  });
+
+  it("marks the version present in the current snapshot rather than the highest sequence", async () => {
+    const currentVersionId = "66666666-6666-4666-8666-666666666666";
+    renderApp(fakeApi({
+      getCapability: vi.fn().mockResolvedValue({ ...capability, observed_version_id: currentVersionId, versions: [
+        { id: versionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 2, display_name: "Newer historical search", description: null, input_schema: {}, output_schema: null, metadata_digest: "b".repeat(64), schema_supported: true, created_at: timestamp },
+        { id: currentVersionId, capability_id: capabilityId, connection_version_id: versionId, sequence: 1, display_name: "Re-observed search", description: null, input_schema: {}, output_schema: null, metadata_digest: "d".repeat(64), schema_supported: true, created_at: timestamp },
+      ], versions_truncated: false, observed_in_current_snapshot: true }),
+    }));
+    fireEvent.click(await screen.findByRole("button", { name: /Capabilities/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /tools\/search/ }));
+    const marker = await screen.findByText("Current snapshot");
+    expect(marker.closest("article")?.textContent).toContain("Re-observed search");
+    expect(marker.closest("article")?.textContent).not.toContain("Newer historical search");
   });
 
   it("rotates capability action keys after the status epoch advances", async () => {
@@ -789,6 +817,19 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     expect(await screen.findByText(/results expired/i)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import" })).toHaveProperty("disabled", true);
+  });
+
+  it("clears a failed import when a new registry search starts", async () => {
+    const api = fakeApi({ importRegistry: vi.fn().mockRejectedValue(new Error("import failed")) });
+    renderApp(api);
+    fireEvent.click(await screen.findByRole("button", { name: /Registry/ }));
+    fireEvent.change(screen.getByLabelText("Registry search"), { target: { value: "search" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Import" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(api.searchRegistry).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
   it("preserves a registry mutation key across navigation", async () => {

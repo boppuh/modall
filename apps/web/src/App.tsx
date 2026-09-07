@@ -364,7 +364,6 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
     queryKey: queryKey(scope, "connection", selectedId),
     queryFn: () => api.getConnection(selectedId as string),
     enabled: selectedId !== null,
-    refetchInterval: (query) => selectedId && query.state.status !== "error" ? 2000 : false,
   });
   const [searchResult, setSearchResult] = useState<RegistrySearch | null>(null);
   const [lastSearchQuery, setLastSearchQuery] = useState("");
@@ -430,7 +429,7 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     const query = formValue(data, "query");
-    if (query) { setLastSearchQuery(query); search.mutate(query); }
+    if (query) { importEntry.reset(); setLastSearchQuery(query); search.mutate(query); }
   }
 
   function submitConnection(event: FormEvent<HTMLFormElement>) {
@@ -520,7 +519,7 @@ function Registry({ api, scope, role, selectedId, select, mutationKeys }: { api:
       </section>
       <section className="split-detail">
         <div className="section-block">
-          <div className="section-heading"><div><span className="index">Connections / 03</span><h2>Trust inventory</h2></div><div className="action-strip"><span>{entries.isError ? "—" : entries.data?.length ?? 0} visible catalog entries</span><button className="secondary-action" type="button" disabled={connections.isFetching} onClick={() => void connections.refetch()}>{connections.isFetching ? "Refreshing…" : "Refresh connections"}</button></div></div>
+          <div className="section-heading"><div><span className="index">Connections / 03</span><h2>Trust inventory</h2></div><div className="action-strip"><span>{entries.isError ? "—" : entries.data?.length ?? 0} visible catalog entries</span><button className="secondary-action" type="button" disabled={connections.isFetching || detail.isFetching} onClick={() => void Promise.all([connections.refetch(), ...(selectedId ? [detail.refetch()] : [])])}>{connections.isFetching || detail.isFetching ? "Refreshing…" : "Refresh connections"}</button></div></div>
           {entries.isError && <QueryFailure error={entries.error} retry={() => void entries.refetch()} />}
           {connections.isPending ? <LoadingState label="Loading connections" /> : connections.isError ? (
             <QueryFailure error={connections.error} retry={() => void connections.refetch()} />
@@ -649,7 +648,7 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
               <p className="field-help">Source connection: {connectionNames.get(detail.data.connection_id) ?? detail.data.connection_id}</p>
               {sourceConnection.isError && <QueryFailure error={sourceConnection.error} retry={() => void sourceConnection.refetch()} />}
               {action.isError && <p className="field-error" role="alert">{failureMessage(action.error)}</p>}
-              {detail.data.versions.map((version, index) => {
+              {detail.data.versions.map((version) => {
                 const retained = detail.data.enabled_version_id === version.id;
                 const pending = detail.data.pending_version_id === version.id;
                 const disableable = (detail.data.status === "enabled" || detail.data.status === "unavailable") && retained;
@@ -660,7 +659,7 @@ function Capabilities({ api, scope, role, selectedId, filter, select, setFilter,
                 const sourceEligible = sourceConnection.data?.lifecycle === "active" && sourceConnection.data.pending_version_id === null && sourceConnection.data.verified_version_id === version.connection_version_id;
                 return (
                 <article className="schema-version" key={version.id}>
-                  <header><div><span>Version {version.sequence}</span><h3>{version.display_name}</h3></div>{index === 0 && <small>Latest observed</small>}</header>
+                  <header><div><span>Version {version.sequence}</span><h3>{version.display_name}</h3></div>{detail.data.observed_version_id === version.id && <small>Current snapshot</small>}</header>
                   <p>{version.description ?? "No description supplied."}</p>
                   <div className="digest-line"><span>metadata</span><code>{version.metadata_digest}</code></div>
                   <div className="digest-line"><span>connection version</span><code>{version.connection_version_id}</code></div>

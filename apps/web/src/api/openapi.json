@@ -137,6 +137,18 @@
             "title": "Observed In Current Snapshot",
             "type": "boolean"
           },
+          "observed_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Version Id"
+          },
           "pending_version_id": {
             "anyOf": [
               {

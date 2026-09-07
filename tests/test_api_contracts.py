@@ -829,6 +829,11 @@ def test_run_preflight_create_read_event_and_cancel_contracts() -> None:
             assert [item["id"] for item in executable.json()["items"]] == [
                 str(version.capability_id)
             ]
+            executable_detail = await client.get(
+                f"/v1/capabilities/{version.capability_id}", headers=headers
+            )
+            assert executable_detail.status_code == 200
+            assert executable_detail.json()["observed_version_id"] == str(version.id)
             scoped_capability = await client.get(
                 "/v1/capabilities",
                 headers=headers,
