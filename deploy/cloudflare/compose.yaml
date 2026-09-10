@@ -50,7 +50,7 @@ services:
     networks:
       application: {}
       egress: {}
-      monitoring:
+      scrape:
         ipv4_address: 172.31.0.11
     healthcheck:
       test:
@@ -70,7 +70,7 @@ services:
     command: ["modall-worker"]
     networks:
       egress: {}
-      monitoring:
+      scrape:
         ipv4_address: 172.31.0.12
     depends_on:
       api:
@@ -155,8 +155,10 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     networks:
-      monitoring:
+      scrape:
         ipv4_address: 172.31.0.10
+      alerting: {}
+      observability: {}
 
   alertmanager:
     image: prom/alertmanager:v0.28.1
@@ -170,7 +172,7 @@ services:
       - ${MODALL_ALERTMANAGER_CONFIG_FILE_HOST:?set the alert routing file}:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager-data:/alertmanager
     networks:
-      - monitoring
+      - alerting
       - alert-egress
 
   grafana:
@@ -197,16 +199,20 @@ services:
       - ../../ops/grafana/registry-alpha-dashboard.json:/var/lib/grafana/dashboards/registry-alpha.json:ro
       - grafana-data:/var/lib/grafana
     networks:
-      - monitoring
+      - observability
       - dashboard
 
 networks:
   edge: {}
   egress: {}
   alert-egress: {}
+  alerting:
+    internal: true
   dashboard:
     internal: true
-  monitoring:
+  observability:
+    internal: true
+  scrape:
     internal: true
     ipam:
       config:

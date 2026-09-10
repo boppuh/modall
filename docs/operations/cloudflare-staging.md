@@ -143,20 +143,21 @@ the external release record without payloads or credentials.
 
 ## Network boundaries
 
-The Compose topology publishes no host ports. Its application, dashboard, and monitoring networks
-are internal. Only `cloudflared` and the web gateway share the edge network; `cloudflared` reaches
-Grafana over the separate dashboard network and cannot resolve or connect to Prometheus or
-Alertmanager. Prometheus scrapes fixed monitoring interfaces. The API returns 404 from `/metrics`
-unless its direct peer is the pinned Prometheus address, and the worker metrics server binds only to
-its monitoring address; the worker does not join the application network. API and worker also join a
-separate egress network because they must reach PostgreSQL, Cloudflare signing keys, the official
-Registry, and curated MCP endpoints. Alertmanager uses a separate outbound bridge solely to deliver
-notifications, so an application-container compromise cannot reach its unauthenticated listener.
+The Compose topology publishes no host ports. Its application, scrape, alerting, observability, and
+dashboard networks are internal. Only `cloudflared` and the web gateway share the edge network;
+`cloudflared` reaches only Grafana over the dashboard network. Prometheus alone bridges the scrape,
+alerting, and observability networks. It scrapes fixed API and worker addresses, sends notifications
+to Alertmanager, and serves Grafana without giving those peers lateral access to one another. The API
+returns 404 from `/metrics` unless its direct peer is the pinned Prometheus address, and the worker
+metrics server binds only to its scrape address; the worker does not join the application network.
+API and worker join a separate egress network for PostgreSQL, Cloudflare signing keys, the official
+Registry, and curated MCP endpoints. Alertmanager uses its own outbound bridge solely to deliver
+notifications, so application and dashboard compromises cannot reach its unauthenticated listener.
 
 Docker networks are segmentation, not a destination allowlist. Enforce the release allowlist and
 deny private, link-local, metadata, and unapproved destinations in the host or provider firewall.
 The application endpoint policy remains an independent fail-closed layer. Ensure `/metrics` and
-worker port 9101 are reachable only from the monitoring network.
+worker port 9101 are reachable only from the scrape network.
 
 ## Rotation and rollback
 

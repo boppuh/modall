@@ -31,7 +31,7 @@ at most one dispatch, and release transient content.
 | Restored work dispatches twice | Installation epoch, startup quarantine, bounded reconciliation | quarantine state-machine tests plus the pending actual backup/restore manual gate |
 | API abuse | Configured per-peer rate and concurrency admission plus bounded query pagination | `tests/test_ops.py`, API contract tests |
 | Forged edge identity | Browser authorization is stripped; Access assertions are accepted only from the fixed gateway peer and still receive full JWT validation | `tests/test_auth.py`, `tests/test_api_contracts.py`, `scripts/verify_cloudflare_deployment.py` |
-| Accidental public service exposure | No Compose host ports; internal application and monitoring networks; Tunnel reaches only web and optionally Grafana | `scripts/verify_cloudflare_deployment.py`, staging qualification smoke check |
+| Accidental public service exposure | No Compose host ports; purpose-specific internal application, scrape, alerting, observability, and dashboard networks | `scripts/verify_cloudflare_deployment.py`, staging qualification smoke check |
 | Retained content outlives policy | Absolute database-clock expiry and bounded worker cleanup | `tests/test_execution.py` |
 
 ## Explicit residual risks
@@ -43,7 +43,7 @@ at most one dispatch, and release transient content.
   proxy transport addresses; Uvicorn forwarded-header rewriting is disabled, and ingress must
   discard caller-supplied `X-Real-IP` and `X-Forwarded-For` values before setting a validated IP.
 - Metrics endpoints are unauthenticated. The Cloudflare staging API accepts metrics requests only
-  from the pinned Prometheus peer, and the worker listener binds only to its monitoring interface;
+  from the pinned Prometheus peer, and the worker listener binds only to its scrape interface;
   other deployment targets must provide equivalent network and application-layer restrictions.
 - The mounted-file provider assumes the deployment platform protects its filesystem and process
   namespace.

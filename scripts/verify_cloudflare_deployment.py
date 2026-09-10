@@ -36,7 +36,7 @@ def main() -> None:
             require(":" in image and not image.endswith(":latest"), f"{name} image must be pinned")
 
     networks = mapping(compose.get("networks"), "networks")
-    for name in ("application", "dashboard", "monitoring"):
+    for name in ("alerting", "application", "dashboard", "observability", "scrape"):
         require(
             mapping(networks.get(name), f"network {name}").get("internal") is True,
             f"{name} network must remain internal",
@@ -49,18 +49,16 @@ def main() -> None:
     api_networks = mapping(api.get("networks"), "api networks")
     worker_networks = mapping(worker.get("networks"), "worker networks")
     require(
-        set(api_networks) == {"application", "egress", "monitoring"}
-        and mapping(api_networks.get("monitoring"), "api monitoring network").get("ipv4_address")
+        set(api_networks) == {"application", "egress", "scrape"}
+        and mapping(api_networks.get("scrape"), "API scrape network").get("ipv4_address")
         == "172.31.0.11",
         "API network boundary drifted",
     )
     require(
-        set(worker_networks) == {"egress", "monitoring"}
-        and mapping(worker_networks.get("monitoring"), "worker monitoring network").get(
-            "ipv4_address"
-        )
+        set(worker_networks) == {"egress", "scrape"}
+        and mapping(worker_networks.get("scrape"), "worker scrape network").get("ipv4_address")
         == "172.31.0.12",
-        "worker metrics must bind only to its monitoring interface",
+        "worker metrics must bind only to its scrape interface",
     )
 
     web = mapping(services["web"], "web")
@@ -105,7 +103,7 @@ def main() -> None:
     )
     require(
         runtime.get("MODALL_WORKER_METRICS_HOST") == "172.31.0.12",
-        "worker metrics must bind only to the monitoring network",
+        "worker metrics must bind only to the scrape network",
     )
 
     cloudflared = mapping(services["cloudflared"], "cloudflared")
@@ -117,8 +115,8 @@ def main() -> None:
     grafana = mapping(services["grafana"], "grafana")
     require(grafana.get("user") == "472:0", "Grafana runtime UID drifted")
     require(
-        set(grafana.get("networks", [])) == {"dashboard", "monitoring"},
-        "Grafana must bridge only dashboard ingress and private monitoring",
+        set(grafana.get("networks", [])) == {"dashboard", "observability"},
+        "Grafana must bridge only dashboard ingress and Prometheus",
     )
     command = cloudflared.get("command")
     require(
@@ -156,8 +154,8 @@ def main() -> None:
     )
     require(
         set(mapping(services["alertmanager"], "alertmanager").get("networks", []))
-        == {"alert-egress", "monitoring"},
-        "Alertmanager must not share application egress",
+        == {"alert-egress", "alerting"},
+        "Alertmanager must share no network with application or dashboard containers",
     )
 
     nginx = (ROOT / "deploy/cloudflare/nginx.conf").read_text()
@@ -189,7 +187,7 @@ def main() -> None:
     }
     require(
         targets == {"modall-api": ["172.31.0.11:8000"], "modall-worker": ["172.31.0.12:9101"]},
-        "Prometheus scrape targets must use only the fixed monitoring interfaces",
+        "Prometheus scrape targets must use only the fixed scrape interfaces",
     )
 
 
