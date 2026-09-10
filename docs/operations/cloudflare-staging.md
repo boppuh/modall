@@ -23,10 +23,11 @@ external release system of record.
    through `--token-file`; never place it in the environment file or Compose command line.
 
 Cloudflare sends the application JWT in `Cf-Access-Jwt-Assertion`. The web gateway strips any
-browser-supplied `Authorization`, `X-Forwarded-For`, and `X-Real-IP`, sets `X-Real-IP` only from
-Cloudflare's `CF-Connecting-IP`, and forwards the assertion. The API accepts that assertion only
-when its direct peer is the gateway's fixed `172.30.0.10` application-network address. It then
-validates signature, issuer, AUD, lifetime, and subject against Cloudflare's certs endpoint.
+browser-supplied `Authorization`, cookies, `X-Forwarded-For`, and `X-Real-IP`, sets `X-Real-IP` only
+from Cloudflare's `CF-Connecting-IP`, and forwards only the assertion. The API accepts that
+assertion only when its direct peer is the gateway's fixed `172.30.0.10` application-network
+address. It then validates signature, issuer, AUD, lifetime, and subject against Cloudflare's certs
+endpoint. Health routes receive neither the Access assertion nor its cookie.
 
 ## Host and secret preparation
 

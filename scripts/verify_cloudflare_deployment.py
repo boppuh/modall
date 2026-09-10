@@ -101,6 +101,7 @@ def main() -> None:
         "proxy_set_header X-Real-IP $http_cf_connecting_ip;",
         'proxy_set_header X-Forwarded-For "";',
         'proxy_set_header Authorization "";',
+        'proxy_set_header Cookie "";',
         "proxy_set_header Cf-Access-Jwt-Assertion $http_cf_access_jwt_assertion;",
         "location ~ ^/health/(live|ready)$",
     ):
