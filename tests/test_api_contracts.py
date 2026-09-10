@@ -198,6 +198,21 @@ def test_cloudflare_access_assertion_reaches_oidc_authenticator_only_from_gatewa
         assert accepted.json()["role"] == "admin"
         assert ambiguous.status_code == 401
 
+        async with api_client(
+            settings=settings,
+            principal=principal,
+            client_address=("172.30.0.11", 12345),
+        ) as (untrusted_client, _engine, untrusted_workspace_id):
+            untrusted = await untrusted_client.get(
+                "/v1/session",
+                headers={
+                    "Cf-Access-Jwt-Assertion": "signed-edge-assertion",
+                    "X-Workspace-ID": str(untrusted_workspace_id),
+                },
+            )
+
+        assert untrusted.status_code == 401
+
     asyncio.run(scenario())
 
 

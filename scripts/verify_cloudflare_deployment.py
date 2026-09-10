@@ -36,7 +36,7 @@ def main() -> None:
             require(":" in image and not image.endswith(":latest"), f"{name} image must be pinned")
 
     networks = mapping(compose.get("networks"), "networks")
-    for name in ("application", "monitoring"):
+    for name in ("application", "dashboard", "monitoring"):
         require(
             mapping(networks.get(name), f"network {name}").get("internal") is True,
             f"{name} network must remain internal",
@@ -78,11 +78,24 @@ def main() -> None:
         runtime.get("MODALL_TRUSTED_PROXY_ADDRESSES") == '["172.30.0.10"]',
         "the API must trust only the fixed web gateway address",
     )
+    for variable in (
+        "MODALL_CONFIRMATION_HMAC_KEY_VERSIONS",
+        "MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS",
+    ):
+        require(
+            runtime.get(variable) == f'${{{variable}:-["v1"]}}',
+            f"{variable} must retain a valid JSON default",
+        )
 
     cloudflared = mapping(services["cloudflared"], "cloudflared")
     require(
-        set(cloudflared.get("networks", [])) == {"edge", "monitoring"},
-        "cloudflared must not join the application network",
+        set(cloudflared.get("networks", [])) == {"dashboard", "edge"},
+        "cloudflared must reach only web and Grafana",
+    )
+    grafana = mapping(services["grafana"], "grafana")
+    require(
+        set(grafana.get("networks", [])) == {"dashboard", "monitoring"},
+        "Grafana must bridge only dashboard ingress and private monitoring",
     )
     command = cloudflared.get("command")
     require(
@@ -95,6 +108,25 @@ def main() -> None:
         set(secrets) == {"cloudflare_tunnel_token", "database_url", "grafana_admin_password"},
         "staging secret projections drifted",
     )
+
+    def require_secret_mount(service_name: str, secret_name: str, expected_target: str) -> None:
+        service = mapping(services[service_name], service_name)
+        mounts = service.get("secrets")
+        require(isinstance(mounts, list), f"{service_name} secrets are missing")
+        matching = [
+            mapping(mount, f"{service_name} secret")
+            for mount in mounts
+            if isinstance(mount, dict) and mount.get("source") == secret_name
+        ]
+        require(
+            len(matching) == 1 and matching[0].get("target") == expected_target,
+            f"{service_name} must mount {secret_name} at {expected_target}",
+        )
+
+    require_secret_mount("api", "database_url", "database-url")
+    require_secret_mount("worker", "database_url", "database-url")
+    require_secret_mount("cloudflared", "cloudflare_tunnel_token", "tunnel-token")
+    require_secret_mount("grafana", "grafana_admin_password", "admin-password")
 
     nginx = (ROOT / "deploy/cloudflare/nginx.conf").read_text()
     for term in (

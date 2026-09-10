@@ -66,6 +66,9 @@ make staging-config-check
 make release-artifacts
 ```
 
+`staging-config-check` reads `deploy/cloudflare/staging.env` by default so it validates the file
+that deployment will actually use. CI overrides `STAGING_ENV_FILE` with the committed example.
+
 ## Deploy and bootstrap
 
 Create and verify a restorable managed-PostgreSQL backup before first admission. From the checked
@@ -90,16 +93,19 @@ the user identity but cannot grant itself membership.
 
 ## Qualify and collect evidence
 
-Save a short-lived `CF_Authorization` application cookie in an owner-readable temporary file. Run
-the payload-free edge, health, and identity smoke check, then securely delete that temporary file:
+Save the exact bare HTTPS staging origin in an owner-readable file maintained separately from the
+command invocation. Save a short-lived `CF_Authorization` application cookie in another
+owner-readable temporary file. Run the payload-free edge, health, and identity smoke check, then
+securely delete the cookie file:
 
 ```sh
-uv run python scripts/qualify_cloudflare_staging.py --base-url https://STAGING-HOST --workspace-id WORKSPACE-UUID --access-cookie-file /secure/temp/access-cookie
+uv run python scripts/qualify_cloudflare_staging.py --base-url https://STAGING-HOST --trusted-origin-file /opt/modall/staging-origin --workspace-id WORKSPACE-UUID --access-cookie-file /secure/temp/access-cookie
 ```
 
-The check proves unauthenticated API and metrics requests are blocked, both API health contracts
-survive the edge path, and the Access identity has current workspace membership. It never prints or
-persists the cookie. This smoke check does not replace the manual reference journey.
+The command refuses to send the cookie unless `--base-url` exactly matches an origin in the trusted
+file. The check proves unauthenticated API and metrics requests are blocked, both API health
+contracts survive the edge path, and the Access identity has current workspace membership. It
+never prints or persists the cookie. This smoke check does not replace the manual reference journey.
 
 Next execute every procedure in `docs/operations/registry-alpha-runbook.md`: reference journey,
 counted-side-effect backup/restore, compatible rollback, endpoint disable and re-enable, credential
@@ -110,10 +116,12 @@ the external release record without payloads or credentials.
 
 ## Network boundaries
 
-The Compose topology publishes no host ports. Its application and monitoring networks are internal;
-only `cloudflared` and the web gateway share the edge network. API and worker also join a separate
-egress network because they must reach PostgreSQL, Cloudflare signing keys, the official Registry,
-and curated MCP endpoints. Alertmanager joins egress solely to deliver configured notifications.
+The Compose topology publishes no host ports. Its application, dashboard, and monitoring networks
+are internal. Only `cloudflared` and the web gateway share the edge network; `cloudflared` reaches
+Grafana over the separate dashboard network and cannot resolve or connect to Prometheus or
+Alertmanager. API and worker also join a separate egress network because they must reach PostgreSQL,
+Cloudflare signing keys, the official Registry, and curated MCP endpoints. Alertmanager joins egress
+solely to deliver configured notifications.
 
 Docker networks are segmentation, not a destination allowlist. Enforce the release allowlist and
 deny private, link-local, metadata, and unapproved destinations in the host or provider firewall.

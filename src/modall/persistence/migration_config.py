@@ -1,6 +1,7 @@
 """Database-only configuration for migration processes."""
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -14,10 +15,16 @@ class MigrationSettings(BaseSettings):
 
     database_url: str | None = None
     database_url_file: Path | None = None
+    environment: Literal["local", "test", "staging", "production"] = "local"
 
 
 def load_migration_database_url(*, fallback: str, env_file: Path) -> str:
     settings = MigrationSettings(_env_file=env_file)
     if settings.database_url_file is not None:
+        if (
+            settings.environment in {"staging", "production"}
+            and not settings.database_url_file.is_absolute()
+        ):
+            raise ValueError("deployed database URL secret path must be absolute")
         return str(read_database_url_secret(settings.database_url_file))
     return settings.database_url or fallback

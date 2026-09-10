@@ -16,7 +16,8 @@ def read_database_url_secret(path: Path) -> PostgresDsn:
     """Load one bounded PostgreSQL DSN without leaking its value or path in errors."""
 
     try:
-        raw = path.read_bytes()
+        with path.open("rb") as secret_file:
+            raw = secret_file.read(2049)
         if not 1 <= len(raw) <= 2048 or b"\x00" in raw:
             raise ValueError
         value = raw.decode("utf-8")

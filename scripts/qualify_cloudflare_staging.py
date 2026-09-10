@@ -59,16 +59,55 @@ def load_cookie(path: Path) -> str:
         raise ValueError("Access cookie file is unavailable or invalid") from None
 
 
+def normalize_https_origin(value: str) -> str:
+    if value != value.strip():
+        raise ValueError("staging origin must be a bare HTTPS origin")
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError
+        _ = parsed.port
+    except ValueError:
+        raise ValueError("staging origin must be a bare HTTPS origin") from None
+    return value.rstrip("/")
+
+
+def load_trusted_origins(path: Path) -> frozenset[str]:
+    try:
+        with path.open("rb") as origin_file:
+            raw = origin_file.read(65_537)
+        if not 1 <= len(raw) <= 65_536 or b"\x00" in raw:
+            raise ValueError
+        lines = raw.decode("utf-8").splitlines()
+        if not 1 <= len(lines) <= 32 or any(not line for line in lines):
+            raise ValueError
+        origins = frozenset(normalize_https_origin(line) for line in lines)
+        if len(origins) != len(lines):
+            raise ValueError
+        return origins
+    except (OSError, UnicodeError, ValueError):
+        raise ValueError("trusted staging origin file is unavailable or invalid") from None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
+    parser.add_argument("--trusted-origin-file", required=True, type=Path)
     parser.add_argument("--workspace-id", required=True, type=UUID)
     parser.add_argument("--access-cookie-file", required=True, type=Path)
     args = parser.parse_args()
-    parsed = urlsplit(args.base_url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.query or parsed.fragment:
-        raise ValueError("base URL must be a bare HTTPS origin")
-    base_url = args.base_url.rstrip("/") + "/"
+    origin = normalize_https_origin(args.base_url)
+    if origin not in load_trusted_origins(args.trusted_origin_file):
+        raise ValueError("base URL is not an approved staging origin")
+    base_url = origin + "/"
     cookie = load_cookie(args.access_cookie_file)
 
     unauthenticated, _ = request_status(base_url, "/v1/session")

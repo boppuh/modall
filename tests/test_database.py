@@ -108,6 +108,20 @@ def test_migration_database_url_prefers_mounted_secret(
     )
 
 
+def test_migration_database_url_rejects_relative_deployed_secret_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MODALL_DATABASE_URL_FILE", raising=False)
+    monkeypatch.delenv("MODALL_ENVIRONMENT", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "MODALL_ENVIRONMENT=staging\nMODALL_DATABASE_URL_FILE=relative-database-url\n"
+    )
+
+    with pytest.raises(ValueError, match="must be absolute"):
+        load_migration_database_url(fallback="postgresql://fallback/db", env_file=env_file)
+
+
 def test_database_probe_reports_ready_and_closes() -> None:
     async def scenario() -> None:
         engine = create_engine("sqlite+aiosqlite:///:memory:")

@@ -12,8 +12,8 @@ x-runtime-environment: &runtime-environment
   MODALL_TRUSTED_PROXY_ADDRESSES: '["172.30.0.10"]'
   MODALL_SECRET_PROVIDER: mounted_file
   MODALL_SECRET_MOUNT_ROOT: /run/modall-secrets
-  MODALL_CONFIRMATION_HMAC_KEY_VERSIONS: ${MODALL_CONFIRMATION_HMAC_KEY_VERSIONS:-'["v1"]'}
-  MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS: ${MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS:-'["v1"]'}
+  MODALL_CONFIRMATION_HMAC_KEY_VERSIONS: '${MODALL_CONFIRMATION_HMAC_KEY_VERSIONS:-["v1"]}'
+  MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS: '${MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS:-["v1"]}'
   MODALL_WORKER_METRICS_PORT: "9101"
 
 x-python-service: &python-service
@@ -126,7 +126,7 @@ services:
         target: tunnel-token
     networks:
       - edge
-      - monitoring
+      - dashboard
 
   prometheus:
     image: prom/prometheus:v3.5.0
@@ -183,10 +183,13 @@ services:
       - grafana-data:/var/lib/grafana
     networks:
       - monitoring
+      - dashboard
 
 networks:
   edge: {}
   egress: {}
+  dashboard:
+    internal: true
   monitoring:
     internal: true
   application:
