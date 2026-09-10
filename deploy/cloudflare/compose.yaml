@@ -22,6 +22,7 @@ x-python-service: &python-service
     dockerfile: docker/python.Dockerfile
   environment: *runtime-environment
   init: true
+  user: "65534:65534"
   read_only: true
   restart: unless-stopped
   security_opt:
@@ -103,6 +104,7 @@ services:
 
   cloudflared:
     image: cloudflare/cloudflared:2026.8.3
+    user: "65532:65532"
     command:
       [
         "tunnel",
@@ -147,6 +149,7 @@ services:
 
   alertmanager:
     image: prom/alertmanager:v0.28.1
+    user: "65534:65534"
     command: ["--config.file=/etc/alertmanager/alertmanager.yml"]
     read_only: true
     restart: unless-stopped
@@ -161,6 +164,7 @@ services:
 
   grafana:
     image: grafana/grafana:12.1.1
+    user: "472:0"
     depends_on:
       - prometheus
     environment:

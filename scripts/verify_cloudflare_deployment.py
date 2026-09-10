@@ -49,6 +49,7 @@ def main() -> None:
             set(service.get("networks", [])) == {"application", "egress"},
             f"{name} must be isolated from the edge and monitoring networks",
         )
+        require(service.get("user") == "65534:65534", f"{name} runtime UID drifted")
 
     web = mapping(services["web"], "web")
     web_networks = mapping(web.get("networks"), "web networks")
@@ -88,11 +89,13 @@ def main() -> None:
         )
 
     cloudflared = mapping(services["cloudflared"], "cloudflared")
+    require(cloudflared.get("user") == "65532:65532", "cloudflared runtime UID drifted")
     require(
         set(cloudflared.get("networks", [])) == {"dashboard", "edge"},
         "cloudflared must reach only web and Grafana",
     )
     grafana = mapping(services["grafana"], "grafana")
+    require(grafana.get("user") == "472:0", "Grafana runtime UID drifted")
     require(
         set(grafana.get("networks", [])) == {"dashboard", "monitoring"},
         "Grafana must bridge only dashboard ingress and private monitoring",
@@ -127,6 +130,10 @@ def main() -> None:
     require_secret_mount("worker", "database_url", "database-url")
     require_secret_mount("cloudflared", "cloudflare_tunnel_token", "tunnel-token")
     require_secret_mount("grafana", "grafana_admin_password", "admin-password")
+    require(
+        mapping(services["alertmanager"], "alertmanager").get("user") == "65534:65534",
+        "Alertmanager runtime UID drifted",
+    )
 
     nginx = (ROOT / "deploy/cloudflare/nginx.conf").read_text()
     for term in (

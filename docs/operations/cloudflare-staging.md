@@ -37,7 +37,7 @@ MCP-server, identity-key, alert-webhook, and image-registry destinations require
 Cloudflare Tunnel does not control API or worker egress.
 
 Create an external secret root such as `/opt/modall/secrets`. Supply these files with no trailing
-newline and restrict host access to the deployment administrator:
+newline. Keep them root-owned and do not make them group- or world-readable:
 
 - `database-url`: a TLS-required managed PostgreSQL DSN for a dedicated least-privilege role;
 - `cloudflare-tunnel-token`: the token for this staging Tunnel only;
@@ -55,8 +55,28 @@ uv run python -c 'from modall.secrets.provider import MountedFileSecretProvider 
 ```
 
 The system confirmation and idempotency keys must contain independently generated high-entropy
-bytes. Do not reuse either key as an MCP credential or database password. Ensure the container user
-can read projected provider files while unprivileged host users cannot access the parent directory.
+bytes. Do not reuse either key as an MCP credential or database password.
+
+Local Compose projects `file:` secrets as bind mounts, so their host permissions remain effective
+inside the container. The topology pins API, worker, and Alertmanager to UID 65534, `cloudflared` to
+UID 65532, and Grafana to UID 472. On the supported rootful Linux host, grant only those container
+principals the required access with POSIX ACLs (install the host's `acl` package first):
+
+```sh
+sudo chown -R root:root /opt/modall/secrets
+sudo chmod 0700 /opt/modall/secrets /opt/modall/secrets/provider
+sudo chmod 0600 /opt/modall/secrets/database-url /opt/modall/secrets/cloudflare-tunnel-token /opt/modall/secrets/grafana-admin-password /opt/modall/secrets/alertmanager.yml
+sudo setfacl -m u:65534:--x,u:65532:--x,u:472:--x /opt/modall/secrets
+sudo setfacl -m u:65534:r /opt/modall/secrets/database-url /opt/modall/secrets/alertmanager.yml
+sudo setfacl -m u:65532:r /opt/modall/secrets/cloudflare-tunnel-token
+sudo setfacl -m u:472:r /opt/modall/secrets/grafana-admin-password
+sudo setfacl -R -m u:65534:rX /opt/modall/secrets/provider
+```
+
+If the host uses user-namespace remapping or rootless Docker, translate the container UIDs to their
+host subordinate UIDs before applying ACLs; do not grant `o+r` as a shortcut. After building, inspect
+the rendered `user` values and require every service to start successfully with `up -d --wait`.
+An unreadable secret must be treated as a deployment failure, not repaired by weakening host modes.
 
 Copy `deploy/cloudflare/staging.env.example` to `deploy/cloudflare/staging.env` and replace every
 placeholder and host path. This file contains coordinates and paths, not secret values. Run:
