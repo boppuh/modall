@@ -123,9 +123,11 @@ uv run python scripts/qualify_cloudflare_staging.py --base-url https://STAGING-H
 ```
 
 The command refuses to send the cookie unless `--base-url` exactly matches an origin in the trusted
-file. The check proves unauthenticated API and metrics requests are blocked, both API health
-contracts survive the edge path, and the Access identity has current workspace membership. It
-never prints or persists the cookie. This smoke check does not replace the manual reference journey.
+file. Before loading the cookie, it requires the unauthenticated UI root to redirect to a Cloudflare
+Access login endpoint and proves unauthenticated API and metrics requests are blocked. It then checks
+that both API health contracts survive the edge path and the Access identity has current workspace
+membership. It never prints or persists the cookie. This smoke check does not replace the manual
+reference journey.
 
 Next execute every procedure in `docs/operations/registry-alpha-runbook.md`: reference journey,
 counted-side-effect backup/restore, compatible rollback, endpoint disable and re-enable, credential

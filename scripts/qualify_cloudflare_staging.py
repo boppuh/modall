@@ -29,7 +29,7 @@ def request_status(
     *,
     cookie: str | None = None,
     workspace_id: UUID | None = None,
-) -> tuple[int, bytes]:
+) -> tuple[int, bytes, dict[str, str]]:
     headers = {"Accept": "application/json"}
     if cookie is not None:
         headers["Cookie"] = f"CF_Authorization={cookie}"
@@ -39,9 +39,17 @@ def request_status(
     opener = urllib.request.build_opener(NoRedirect)
     try:
         with opener.open(request, timeout=10) as response:
-            return response.status, response.read(65_537)
+            return (
+                response.status,
+                response.read(65_537),
+                {name.lower(): value for name, value in response.headers.items()},
+            )
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read(65_537)
+        return (
+            exc.code,
+            exc.read(65_537),
+            {name.lower(): value for name, value in exc.headers.items()},
+        )
     except (OSError, urllib.error.URLError):
         raise RuntimeError(f"staging request failed for {path}") from None
 
@@ -97,6 +105,23 @@ def load_trusted_origins(path: Path) -> frozenset[str]:
         raise ValueError("trusted staging origin file is unavailable or invalid") from None
 
 
+def is_cloudflare_access_redirect(status: int, headers: dict[str, str]) -> bool:
+    if status not in {301, 302, 303, 307, 308}:
+        return False
+    location = headers.get("location")
+    if location is None:
+        return False
+    parsed = urlsplit(location)
+    return bool(
+        parsed.scheme == "https"
+        and parsed.hostname
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.hostname.endswith(".cloudflareaccess.com")
+        and parsed.path.startswith("/cdn-cgi/access/")
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
@@ -108,17 +133,20 @@ def main() -> None:
     if origin not in load_trusted_origins(args.trusted_origin_file):
         raise ValueError("base URL is not an approved staging origin")
     base_url = origin + "/"
-    cookie = load_cookie(args.access_cookie_file)
 
-    unauthenticated, _ = request_status(base_url, "/v1/session")
+    root_status, _, root_headers = request_status(base_url, "/")
+    if not is_cloudflare_access_redirect(root_status, root_headers):
+        raise RuntimeError("the UI root is not protected by Cloudflare Access")
+    unauthenticated, _, _ = request_status(base_url, "/v1/session")
     if 200 <= unauthenticated < 300:
         raise RuntimeError("Cloudflare Access did not reject an unauthenticated request")
-    exposed_metrics, _ = request_status(base_url, "/metrics")
+    exposed_metrics, _, _ = request_status(base_url, "/metrics")
     if 200 <= exposed_metrics < 300:
         raise RuntimeError("the metrics surface is publicly reachable")
 
+    cookie = load_cookie(args.access_cookie_file)
     for path in ("/health/live", "/health/ready"):
-        status, body = request_status(base_url, path, cookie=cookie)
+        status, body, _ = request_status(base_url, path, cookie=cookie)
         try:
             health = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -131,7 +159,7 @@ def main() -> None:
         ):
             raise RuntimeError(f"staging health check failed for {path}")
 
-    status, body = request_status(
+    status, body, _ = request_status(
         base_url,
         "/v1/session",
         cookie=cookie,
