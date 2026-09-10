@@ -71,12 +71,15 @@ sudo setfacl -m u:65534:r /opt/modall/secrets/database-url /opt/modall/secrets/a
 sudo setfacl -m u:65532:r /opt/modall/secrets/cloudflare-tunnel-token
 sudo setfacl -m u:472:r /opt/modall/secrets/grafana-admin-password
 sudo setfacl -R -m u:65534:rX /opt/modall/secrets/provider
+sudo setfacl -m d:u:65534:rX /opt/modall/secrets/provider
 ```
 
 If the host uses user-namespace remapping or rootless Docker, translate the container UIDs to their
 host subordinate UIDs before applying ACLs; do not grant `o+r` as a shortcut. After building, inspect
 the rendered `user` values and require every service to start successfully with `up -d --wait`.
 An unreadable secret must be treated as a deployment failure, not repaired by weakening host modes.
+When rotation replaces a provider file rather than creating it under the ACL-bearing directory,
+reapply the UID 65534 read ACL to the new inode before selecting that version.
 
 Copy `deploy/cloudflare/staging.env.example` to `deploy/cloudflare/staging.env` and replace every
 placeholder and host path. This file contains coordinates and paths, not secret values. Run:

@@ -160,6 +160,14 @@ def test_database_url_can_be_loaded_from_a_bounded_secret_file(tmp_path: Path) -
     assert str(settings.database_url) == "postgresql://staging:secret@database.example/modall"
 
 
+def test_worker_metrics_host_requires_ipv4() -> None:
+    assert str(Settings(_env_file=None, worker_metrics_host="127.0.0.1").worker_metrics_host) == (
+        "127.0.0.1"
+    )
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, worker_metrics_host="::1")
+
+
 @pytest.mark.parametrize("content", ("", " postgresql://db/modall", "postgresql://db/modall\n"))
 def test_database_url_secret_rejects_invalid_content(tmp_path: Path, content: str) -> None:
     secret = tmp_path / "database-url"

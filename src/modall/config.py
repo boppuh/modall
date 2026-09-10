@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     worker_lease_duration_seconds: Annotated[float, Field(ge=15, le=300, allow_inf_nan=False)] = (
         30.0
     )
-    worker_metrics_host: IPvAnyAddress = IPv4Address("0.0.0.0")
+    worker_metrics_host: IPv4Address = IPv4Address("0.0.0.0")
     worker_metrics_port: Annotated[int, Field(ge=1024, le=65535)] = 9101
     api_max_concurrency: Annotated[int, Field(ge=1, le=1024)] = 64
     api_queue_timeout_seconds: Annotated[float, Field(gt=0, le=10, allow_inf_nan=False)] = 0.25
