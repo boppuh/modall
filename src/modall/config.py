@@ -118,6 +118,8 @@ class Settings(BaseSettings):
             raise ValueError("deployed environments require the mounted-file secret provider")
         if deployed and not self.trusted_proxy_addresses:
             raise ValueError("deployed environments require at least one trusted ingress proxy")
+        if deployed and not self.metrics_trusted_peer_addresses:
+            raise ValueError("deployed environments require at least one trusted metrics peer")
         if deployed and self.fixture_secret_root is not None:
             raise ValueError("deployed environments cannot configure fixture secrets")
         if self.secret_provider != "fixture" and self.fixture_secret_root is not None:

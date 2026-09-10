@@ -169,6 +169,7 @@ def test_cloudflare_access_assertion_reaches_oidc_authenticator_only_from_gatewa
         oidc_jwks_url="https://team.cloudflareaccess.com/cdn-cgi/access/certs",
         secret_provider="mounted_file",
         trusted_proxy_addresses=("172.30.0.10",),
+        metrics_trusted_peer_addresses=("172.31.0.10",),
     )
     principal = Principal("https://team.cloudflareaccess.com", "edge-user", "Edge User")
 

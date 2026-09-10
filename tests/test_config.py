@@ -124,12 +124,25 @@ def test_deployed_security_mode_requires_oidc_and_mounted_secrets() -> None:
         oidc_jwks_url="https://issuer.example/jwks",
         secret_provider="mounted_file",
         trusted_proxy_addresses=("10.0.0.10",),
+        metrics_trusted_peer_addresses=("10.0.1.10",),
     )
 
     assert settings.auth_mode == "oidc"
     assert settings.oidc_issuer == "https://issuer.example"
     assert settings.secret_provider == "mounted_file"
     assert tuple(map(str, settings.trusted_proxy_addresses)) == ("10.0.0.10",)
+
+    with pytest.raises(ValidationError, match="trusted metrics peer"):
+        Settings(
+            _env_file=None,
+            environment="staging",
+            auth_mode="oidc",
+            oidc_issuer="https://issuer.example",
+            oidc_audience="modall",
+            oidc_jwks_url="https://issuer.example/jwks",
+            secret_provider="mounted_file",
+            trusted_proxy_addresses=("10.0.0.10",),
+        )
 
 
 def test_cloudflare_access_mode_requires_a_deployed_trusted_proxy() -> None:
@@ -146,6 +159,7 @@ def test_cloudflare_access_mode_requires_a_deployed_trusted_proxy() -> None:
         oidc_jwks_url="https://team.cloudflareaccess.com/cdn-cgi/access/certs",
         secret_provider="mounted_file",
         trusted_proxy_addresses=("172.30.0.10",),
+        metrics_trusted_peer_addresses=("172.31.0.10",),
     )
 
     assert settings.auth_token_source == "cloudflare_access"

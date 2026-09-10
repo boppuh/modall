@@ -120,6 +120,7 @@ def test_local_authenticator_rejects_deployed_mode() -> None:
         oidc_jwks_url="https://issuer.example/jwks",
         secret_provider="mounted_file",
         trusted_proxy_addresses=("10.0.0.10",),
+        metrics_trusted_peer_addresses=("10.0.1.10",),
     )
 
     with pytest.raises(ValueError, match="restricted"):
