@@ -139,9 +139,11 @@ the external release record without payloads or credentials.
 The Compose topology publishes no host ports. Its application, dashboard, and monitoring networks
 are internal. Only `cloudflared` and the web gateway share the edge network; `cloudflared` reaches
 Grafana over the separate dashboard network and cannot resolve or connect to Prometheus or
-Alertmanager. API and worker also join a separate egress network because they must reach PostgreSQL,
-Cloudflare signing keys, the official Registry, and curated MCP endpoints. Alertmanager joins egress
-solely to deliver configured notifications.
+Alertmanager. Prometheus scrapes fixed monitoring interfaces. The API returns 404 from `/metrics`
+unless its direct peer is the pinned Prometheus address, and the worker metrics server binds only to
+its monitoring address; the worker does not join the application network. API and worker also join a
+separate egress network because they must reach PostgreSQL, Cloudflare signing keys, the official
+Registry, and curated MCP endpoints. Alertmanager joins egress solely to deliver notifications.
 
 Docker networks are segmentation, not a destination allowlist. Enforce the release allowlist and
 deny private, link-local, metadata, and unapproved destinations in the host or provider firewall.

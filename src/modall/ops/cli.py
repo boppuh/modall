@@ -71,6 +71,12 @@ def _parser() -> argparse.ArgumentParser:
 
 
 async def execute(settings: Settings, args: argparse.Namespace) -> dict[str, object]:
+    if args.command == "bootstrap-workspace" and (
+        settings.auth_mode != "oidc"
+        or settings.oidc_issuer is None
+        or args.issuer != settings.oidc_issuer
+    ):
+        raise ValueError("workspace bootstrap issuer must exactly match the configured OIDC issuer")
     engine = create_engine(async_database_url(str(settings.database_url)))
     factory = create_session_factory(engine)
 

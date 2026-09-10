@@ -14,6 +14,8 @@ x-runtime-environment: &runtime-environment
   MODALL_SECRET_MOUNT_ROOT: /run/modall-secrets
   MODALL_CONFIRMATION_HMAC_KEY_VERSIONS: '${MODALL_CONFIRMATION_HMAC_KEY_VERSIONS:-["v1"]}'
   MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS: '${MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS:-["v1"]}'
+  MODALL_METRICS_TRUSTED_PEER_ADDRESSES: '["172.31.0.10"]'
+  MODALL_WORKER_METRICS_HOST: 172.31.0.12
   MODALL_WORKER_METRICS_PORT: "9101"
 
 x-python-service: &python-service
@@ -45,6 +47,11 @@ services:
   api:
     <<: *python-service
     command: ["sh", "-c", "alembic upgrade head && exec modall-api"]
+    networks:
+      application: {}
+      egress: {}
+      monitoring:
+        ipv4_address: 172.31.0.11
     healthcheck:
       test:
         [
@@ -61,6 +68,10 @@ services:
   worker:
     <<: *python-service
     command: ["modall-worker"]
+    networks:
+      egress: {}
+      monitoring:
+        ipv4_address: 172.31.0.12
     depends_on:
       api:
         condition: service_healthy
@@ -70,7 +81,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:9101/health/live')",
+          "import urllib.request; urllib.request.urlopen('http://172.31.0.12:9101/health/live')",
         ]
       interval: 10s
       timeout: 3s
@@ -144,8 +155,8 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     networks:
-      - application
-      - monitoring
+      monitoring:
+        ipv4_address: 172.31.0.10
 
   alertmanager:
     image: prom/alertmanager:v0.28.1
@@ -196,6 +207,9 @@ networks:
     internal: true
   monitoring:
     internal: true
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
   application:
     internal: true
     ipam:

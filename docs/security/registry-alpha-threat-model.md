@@ -42,8 +42,9 @@ at most one dispatch, and release transient content.
   horizontal scale. Behind ingress, the API accepts `X-Real-IP` only from explicitly configured
   proxy transport addresses; Uvicorn forwarded-header rewriting is disabled, and ingress must
   discard caller-supplied `X-Real-IP` and `X-Forwarded-For` values before setting a validated IP.
-- Metrics endpoints are unauthenticated and must be restricted to the monitoring network by
-  deployment ingress policy.
+- Metrics endpoints are unauthenticated. The Cloudflare staging API accepts metrics requests only
+  from the pinned Prometheus peer, and the worker listener binds only to its monitoring interface;
+  other deployment targets must provide equivalent network and application-layer restrictions.
 - The mounted-file provider assumes the deployment platform protects its filesystem and process
   namespace.
 - Cloudflare Tunnel is an inbound boundary, not an application egress allowlist. The staging host or

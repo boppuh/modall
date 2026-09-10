@@ -68,6 +68,9 @@ def create_app(
     process_metrics = metrics or MetricsRegistry()
     rate_limiter = FixedWindowRateLimiter(resolved_settings.api_rate_limit_per_minute)
     trusted_proxies = {str(address) for address in resolved_settings.trusted_proxy_addresses}
+    metrics_trusted_peers = {
+        str(address) for address in resolved_settings.metrics_trusted_peer_addresses
+    }
     request_slots = asyncio.Semaphore(resolved_settings.api_max_concurrency)
     in_flight = 0
     for status_class in ("1xx", "2xx", "3xx", "4xx", "5xx"):
@@ -338,7 +341,11 @@ def create_app(
         return HealthResponse(status="ready", service="api")
 
     @app.get("/metrics", include_in_schema=False)
-    async def metrics_endpoint() -> PlainTextResponse:
+    async def metrics_endpoint(request: Request) -> PlainTextResponse:
+        if resolved_settings.environment in {"staging", "production"} and (
+            request.client is None or request.client.host not in metrics_trusted_peers
+        ):
+            return PlainTextResponse("not found\n", status_code=status.HTTP_404_NOT_FOUND)
         return PlainTextResponse(
             process_metrics.render(), media_type="application/openmetrics-text; version=1.0.0"
         )

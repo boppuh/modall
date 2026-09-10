@@ -342,8 +342,16 @@ def test_ops_workspace_bootstrap_is_idempotent(
             ]
         )
 
-        created = await cli.execute(Settings(_env_file=None, environment="test"), arguments)
-        existing = await cli.execute(Settings(_env_file=None, environment="test"), arguments)
+        settings = Settings(
+            _env_file=None,
+            environment="test",
+            auth_mode="oidc",
+            oidc_issuer="https://team.cloudflareaccess.com",
+            oidc_audience="modall",
+            oidc_jwks_url="https://team.cloudflareaccess.com/cdn-cgi/access/certs",
+        )
+        created = await cli.execute(settings, arguments)
+        existing = await cli.execute(settings, arguments)
 
         assert created["status"] == "created"
         assert existing == {
@@ -353,6 +361,33 @@ def test_ops_workspace_bootstrap_is_idempotent(
         }
 
     asyncio.run(scenario())
+
+
+def test_ops_workspace_bootstrap_rejects_an_issuer_mismatch() -> None:
+    arguments = _parser().parse_args(
+        [
+            "bootstrap-workspace",
+            "--name",
+            "Pilot",
+            "--issuer",
+            "https://wrong.cloudflareaccess.com",
+            "--subject",
+            "reviewer-1",
+            "--confirm",
+            "BOOTSTRAP",
+        ]
+    )
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        auth_mode="oidc",
+        oidc_issuer="https://team.cloudflareaccess.com",
+        oidc_audience="modall",
+        oidc_jwks_url="https://team.cloudflareaccess.com/cdn-cgi/access/certs",
+    )
+
+    with pytest.raises(ValueError, match="exactly match"):
+        asyncio.run(cli.execute(settings, arguments))
 
 
 def test_ops_status_does_not_require_secret_keyrings(monkeypatch: pytest.MonkeyPatch) -> None:

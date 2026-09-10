@@ -45,11 +45,23 @@ def main() -> None:
     api = mapping(services["api"], "api")
     worker = mapping(services["worker"], "worker")
     for name, service in (("api", api), ("worker", worker)):
-        require(
-            set(service.get("networks", [])) == {"application", "egress"},
-            f"{name} must be isolated from the edge and monitoring networks",
-        )
         require(service.get("user") == "65534:65534", f"{name} runtime UID drifted")
+    api_networks = mapping(api.get("networks"), "api networks")
+    worker_networks = mapping(worker.get("networks"), "worker networks")
+    require(
+        set(api_networks) == {"application", "egress", "monitoring"}
+        and mapping(api_networks.get("monitoring"), "api monitoring network").get("ipv4_address")
+        == "172.31.0.11",
+        "API network boundary drifted",
+    )
+    require(
+        set(worker_networks) == {"egress", "monitoring"}
+        and mapping(worker_networks.get("monitoring"), "worker monitoring network").get(
+            "ipv4_address"
+        )
+        == "172.31.0.12",
+        "worker metrics must bind only to its monitoring interface",
+    )
 
     web = mapping(services["web"], "web")
     web_networks = mapping(web.get("networks"), "web networks")
@@ -87,6 +99,14 @@ def main() -> None:
             runtime.get(variable) == f'${{{variable}:-["v1"]}}',
             f"{variable} must retain a valid JSON default",
         )
+    require(
+        runtime.get("MODALL_METRICS_TRUSTED_PEER_ADDRESSES") == '["172.31.0.10"]',
+        "API metrics must trust only Prometheus",
+    )
+    require(
+        runtime.get("MODALL_WORKER_METRICS_HOST") == "172.31.0.12",
+        "worker metrics must bind only to the monitoring network",
+    )
 
     cloudflared = mapping(services["cloudflared"], "cloudflared")
     require(cloudflared.get("user") == "65532:65532", "cloudflared runtime UID drifted")
@@ -155,6 +175,16 @@ def main() -> None:
         {mapping(job, "scrape job").get("job_name") for job in jobs}
         == {"modall-api", "modall-worker"},
         "Prometheus must scrape both Modall processes",
+    )
+    targets = {
+        mapping(job, "scrape job").get("job_name"): mapping(
+            mapping(job, "scrape job").get("static_configs")[0], "static scrape config"
+        ).get("targets")
+        for job in jobs
+    }
+    require(
+        targets == {"modall-api": ["172.31.0.11:8000"], "modall-worker": ["172.31.0.12:9101"]},
+        "Prometheus scrape targets must use only the fixed monitoring interfaces",
     )
 
 

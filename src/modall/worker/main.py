@@ -82,7 +82,7 @@ async def run_worker(settings: Settings) -> None:
     )
     metrics_server = start_metrics_server(
         metrics,
-        host="0.0.0.0",
+        host=str(settings.worker_metrics_host),
         port=settings.worker_metrics_port,
         liveness_probe=liveness.is_live,
     )
