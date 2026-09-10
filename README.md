@@ -91,6 +91,12 @@ confirmation arguments and must follow
 from the still-required human reviews. Validate committed operational artifacts with
 `make release-artifacts`.
 
+The supported staging shape uses Cloudflare Access and Tunnel in front of a private container host
+with managed PostgreSQL. Follow the
+[Cloudflare staging guide](docs/operations/cloudflare-staging.md); validate its topology with
+`make staging-config-check`. Cloudflare assertions are accepted only from the fixed internal web
+gateway address, and the origin publishes no host ports.
+
 ## API contracts
 
 The authenticated control-plane API is published under `/v1`. Supply the selected workspace in

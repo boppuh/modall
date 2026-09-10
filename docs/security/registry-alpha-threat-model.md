@@ -6,8 +6,10 @@ Status: engineering baseline; independent security review pending.
 
 The closed alpha accepts only curated MCP endpoints and public, synthetic, or explicitly
 non-confidential invocation data. Operators authenticate through OIDC outside local development.
-The API trusts the configured identity provider, PostgreSQL, and the mounted secret provider. MCP
-servers and the public Registry are untrusted networks and untrusted content sources.
+The API trusts the configured identity provider, PostgreSQL, and the mounted secret provider. In
+Cloudflare staging, Access and Tunnel are the public authentication and transport boundary, while
+the web gateway is the only trusted assertion-forwarding peer. MCP servers and the public Registry
+are untrusted networks and untrusted content sources.
 
 The API never receives or persists MCP credential values; its authentication middleware necessarily
 handles OIDC bearer tokens in memory. It stores opaque secret bindings, immutable MCP metadata,
@@ -28,6 +30,8 @@ at most one dispatch, and release transient content.
 | Silent capability drift | Immutable snapshots/versions and exact-version approval | `tests/test_registry.py`, `tests/test_discovery_publication.py` |
 | Restored work dispatches twice | Installation epoch, startup quarantine, bounded reconciliation | quarantine state-machine tests plus the pending actual backup/restore manual gate |
 | API abuse | Configured per-peer rate and concurrency admission plus bounded query pagination | `tests/test_ops.py`, API contract tests |
+| Forged edge identity | Browser authorization is stripped; Access assertions are accepted only from the fixed gateway peer and still receive full JWT validation | `tests/test_auth.py`, `tests/test_api_contracts.py`, `scripts/verify_cloudflare_deployment.py` |
+| Accidental public service exposure | No Compose host ports; internal application and monitoring networks; Tunnel reaches only web and optionally Grafana | `scripts/verify_cloudflare_deployment.py`, staging qualification smoke check |
 | Retained content outlives policy | Absolute database-clock expiry and bounded worker cleanup | `tests/test_execution.py` |
 
 ## Explicit residual risks
@@ -42,6 +46,8 @@ at most one dispatch, and release transient content.
   deployment ingress policy.
 - The mounted-file provider assumes the deployment platform protects its filesystem and process
   namespace.
+- Cloudflare Tunnel is an inbound boundary, not an application egress allowlist. The staging host or
+  provider firewall must constrain API, worker, and alerting destinations independently.
 - MCP calls are not generally idempotent. A connection loss after the dispatch fence is reported as
   indeterminate and requires human reconciliation.
 - Mixed-version zero-downtime rollback is unsupported.

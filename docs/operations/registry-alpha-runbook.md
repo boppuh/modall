@@ -4,6 +4,10 @@ All examples assume `MODALL_DATABASE_URL` and secret-provider settings point at 
 environment. Capture command output and the deployment revision in the release evidence record.
 Never place tokens, arguments, results, endpoint credentials, or secret values in tickets or logs.
 
+The supported Milestone 1 staging topology and first-deployment procedure are defined in
+`docs/operations/cloudflare-staging.md`. The generic procedures below remain the promotion gates
+for that topology and any later deployment target.
+
 ## Deploy and verify
 
 1. Confirm a restorable database backup and record its identifier outside this repository.

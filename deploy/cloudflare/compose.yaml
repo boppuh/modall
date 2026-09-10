@@ -1,0 +1,209 @@
+name: modall-staging
+
+x-runtime-environment: &runtime-environment
+  MODALL_ENVIRONMENT: staging
+  MODALL_LOG_LEVEL: ${MODALL_LOG_LEVEL:-INFO}
+  MODALL_DATABASE_URL_FILE: /run/secrets/database-url
+  MODALL_AUTH_MODE: oidc
+  MODALL_AUTH_TOKEN_SOURCE: cloudflare_access
+  MODALL_OIDC_ISSUER: ${MODALL_OIDC_ISSUER:?set the exact Cloudflare Access issuer}
+  MODALL_OIDC_AUDIENCE: ${MODALL_OIDC_AUDIENCE:?set the Cloudflare Access application AUD tag}
+  MODALL_OIDC_JWKS_URL: ${MODALL_OIDC_JWKS_URL:?set the Cloudflare Access certs URL}
+  MODALL_TRUSTED_PROXY_ADDRESSES: '["172.30.0.10"]'
+  MODALL_SECRET_PROVIDER: mounted_file
+  MODALL_SECRET_MOUNT_ROOT: /run/modall-secrets
+  MODALL_CONFIRMATION_HMAC_KEY_VERSIONS: ${MODALL_CONFIRMATION_HMAC_KEY_VERSIONS:-'["v1"]'}
+  MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS: ${MODALL_IDEMPOTENCY_HMAC_KEY_VERSIONS:-'["v1"]'}
+  MODALL_WORKER_METRICS_PORT: "9101"
+
+x-python-service: &python-service
+  build:
+    context: ../..
+    dockerfile: docker/python.Dockerfile
+  environment: *runtime-environment
+  init: true
+  read_only: true
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  volumes:
+    - type: bind
+      source: ${MODALL_SECRET_MOUNT_ROOT_HOST:?set the mounted-secret directory}
+      target: /run/modall-secrets
+      read_only: true
+  secrets:
+    - source: database_url
+      target: database-url
+  networks:
+    - application
+    - egress
+
+services:
+  api:
+    <<: *python-service
+    command: ["sh", "-c", "alembic upgrade head && exec modall-api"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  worker:
+    <<: *python-service
+    command: ["modall-worker"]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:9101/health/live')",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  web:
+    build:
+      context: ../..
+      dockerfile: docker/web.production.Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    init: true
+    read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=1m,mode=1777
+      - /var/cache/nginx:size=16m
+      - /var/run:size=1m
+    networks:
+      edge: {}
+      application:
+        ipv4_address: 172.30.0.10
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.8.3
+    command:
+      [
+        "tunnel",
+        "--no-autoupdate",
+        "--loglevel",
+        "info",
+        "run",
+        "--token-file",
+        "/run/secrets/tunnel-token",
+      ]
+    depends_on:
+      web:
+        condition: service_healthy
+    init: true
+    read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    secrets:
+      - source: cloudflare_tunnel_token
+        target: tunnel-token
+    networks:
+      - edge
+      - monitoring
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ../../ops/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - application
+      - monitoring
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml"]
+    read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ${MODALL_ALERTMANAGER_CONFIG_FILE_HOST:?set the alert routing file}:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    networks:
+      - monitoring
+      - egress
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/admin-password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m
+    secrets:
+      - source: grafana_admin_password
+        target: admin-password
+    volumes:
+      - ./grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/modall.yml:ro
+      - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/modall.yml:ro
+      - ../../ops/grafana/registry-alpha-dashboard.json:/var/lib/grafana/dashboards/registry-alpha.json:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - monitoring
+
+networks:
+  edge: {}
+  egress: {}
+  monitoring:
+    internal: true
+  application:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  alertmanager-data: {}
+  grafana-data: {}
+  prometheus-data: {}
+
+secrets:
+  cloudflare_tunnel_token:
+    file: ${CLOUDFLARE_TUNNEL_TOKEN_FILE_HOST:?set the tunnel token file}
+  database_url:
+    file: ${MODALL_DATABASE_URL_FILE_HOST:?set the database URL secret file}
+  grafana_admin_password:
+    file: ${MODALL_GRAFANA_ADMIN_PASSWORD_FILE_HOST:?set the Grafana password file}

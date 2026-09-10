@@ -321,6 +321,8 @@ def create_app(
             keyring_loader=keyring_loader,
             execution_limits=build_execution_limits(resolved_settings),
             environment=resolved_settings.environment,
+            auth_token_source=resolved_settings.auth_token_source,
+            trusted_proxy_addresses=frozenset(trusted_proxies),
         )
     )
 

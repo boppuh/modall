@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from modall.api import main
 from modall.api.contracts import (
     ConnectionResponse,
     _decode_audit_cursor,
@@ -23,6 +24,7 @@ from modall.api.main import create_app
 from modall.config import Settings
 from modall.execution.service import ExecutionService
 from modall.execution.types import ExecutionError, ExecutionFailureCode, HmacKeyVersion
+from modall.identity.auth import AuthenticationError
 from modall.identity.repository import AuthorizationService
 from modall.identity.service import IdentityService
 from modall.identity.types import Permission, Principal, Role, WorkspaceContext
@@ -58,7 +60,10 @@ from modall.registry.types import CapabilityStatus, RegistrySource
 async def api_client(
     registry_adapter: OfficialRegistryAdapter | None = None,
     settings: Settings | None = None,
+    principal: Principal | None = None,
+    client_address: tuple[str, int] = ("127.0.0.1", 12345),
 ) -> AsyncIterator[tuple[httpx.AsyncClient, AsyncEngine, UUID]]:
+    principal = principal or Principal("modall-local", "api-user", "API User")
     engine = create_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
@@ -72,9 +77,7 @@ async def api_client(
         await connection.run_sync(Base.metadata.create_all)
     factory = create_session_factory(engine)
     async with transaction(factory) as session:
-        user = await IdentityService(session).resolve_user(
-            Principal("modall-local", "api-user", "API User")
-        )
+        user = await IdentityService(session).resolve_user(principal)
         workspace = await IdentityService(session).create_workspace(owner=user, name="API")
         workspace_id = workspace.id
     app = create_app(
@@ -84,7 +87,7 @@ async def api_client(
         registry_adapter=registry_adapter,
     )
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app, client=client_address), base_url="http://test"
     ) as client:
         yield client, engine, workspace_id
     await engine.dispose()
@@ -142,6 +145,58 @@ def test_control_plane_requires_workspace_and_has_stable_errors() -> None:
                 headers={"X-Workspace-ID": str(workspace_id)},
             )
             assert unknown.status_code == 403
+
+    asyncio.run(scenario())
+
+
+def test_cloudflare_access_assertion_reaches_oidc_authenticator_only_from_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EdgeAuthenticator:
+        def authenticate(self, token: str | None) -> Principal:
+            if token != "signed-edge-assertion":
+                raise AuthenticationError("invalid edge assertion")
+            return Principal("https://team.cloudflareaccess.com", "edge-user", "Edge User")
+
+    monkeypatch.setattr(main, "build_authenticator", lambda _: EdgeAuthenticator())
+    settings = Settings(
+        _env_file=None,
+        environment="staging",
+        auth_mode="oidc",
+        auth_token_source="cloudflare_access",
+        oidc_issuer="https://team.cloudflareaccess.com",
+        oidc_audience="access-audience",
+        oidc_jwks_url="https://team.cloudflareaccess.com/cdn-cgi/access/certs",
+        secret_provider="mounted_file",
+        trusted_proxy_addresses=("172.30.0.10",),
+    )
+    principal = Principal("https://team.cloudflareaccess.com", "edge-user", "Edge User")
+
+    async def scenario() -> None:
+        async with api_client(
+            settings=settings,
+            principal=principal,
+            client_address=("172.30.0.10", 12345),
+        ) as (client, _engine, workspace_id):
+            accepted = await client.get(
+                "/v1/session",
+                headers={
+                    "Cf-Access-Jwt-Assertion": "signed-edge-assertion",
+                    "X-Workspace-ID": str(workspace_id),
+                },
+            )
+            ambiguous = await client.get(
+                "/v1/session",
+                headers={
+                    "Authorization": "Bearer signed-edge-assertion",
+                    "Cf-Access-Jwt-Assertion": "signed-edge-assertion",
+                    "X-Workspace-ID": str(workspace_id),
+                },
+            )
+
+        assert accepted.status_code == 200
+        assert accepted.json()["role"] == "admin"
+        assert ambiguous.status_code == 401
 
     asyncio.run(scenario())
 

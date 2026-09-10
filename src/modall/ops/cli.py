@@ -13,13 +13,21 @@ from modall.config import Settings, get_settings
 from modall.execution.runtime import build_execution_keyrings, build_execution_limits
 from modall.execution.service import ExecutionService
 from modall.execution.types import RunStatus, SystemExecutionAuthority
+from modall.identity.service import IdentityService
+from modall.identity.types import Principal, Role
 from modall.persistence.database import (
     async_database_url,
     create_engine,
     create_session_factory,
     transaction,
 )
-from modall.persistence.models import Run, SystemExecutionState
+from modall.persistence.models import (
+    Run,
+    SystemExecutionState,
+    User,
+    Workspace,
+    WorkspaceMembership,
+)
 from modall.worker.main import _run_maintenance, build_execution_runtime
 
 _ACTIVE = (
@@ -34,6 +42,15 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="modall-ops")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="Show payload-free execution posture")
+    bootstrap = commands.add_parser(
+        "bootstrap-workspace",
+        help="Create or recover the initial Admin workspace for an exact OIDC principal",
+    )
+    bootstrap.add_argument("--name", required=True)
+    bootstrap.add_argument("--issuer", required=True)
+    bootstrap.add_argument("--subject", required=True)
+    bootstrap.add_argument("--display-name")
+    bootstrap.add_argument("--confirm", required=True, choices=("BOOTSTRAP",))
     enter = commands.add_parser(
         "restore-enter",
         help="Fence dispatch in the restored database before workers start",
@@ -58,6 +75,45 @@ async def execute(settings: Settings, args: argparse.Namespace) -> dict[str, obj
     factory = create_session_factory(engine)
 
     try:
+        if args.command == "bootstrap-workspace":
+            async with transaction(factory) as session:
+                identity = IdentityService(session)
+                owner = await identity.resolve_user(
+                    Principal(
+                        issuer=args.issuer,
+                        subject=args.subject,
+                        display_name=args.display_name,
+                    )
+                )
+                await session.scalar(select(User).where(User.id == owner.id).with_for_update())
+                matches = list(
+                    await session.scalars(
+                        select(Workspace)
+                        .join(
+                            WorkspaceMembership,
+                            WorkspaceMembership.workspace_id == Workspace.id,
+                        )
+                        .where(
+                            WorkspaceMembership.user_id == owner.id,
+                            WorkspaceMembership.role == Role.ADMIN.value,
+                            Workspace.name == args.name.strip(),
+                        )
+                        .limit(2)
+                    )
+                )
+                if len(matches) > 1:
+                    raise RuntimeError("workspace bootstrap state is ambiguous")
+                created = not matches
+                workspace = (
+                    await identity.create_workspace(owner=owner, name=args.name)
+                    if created
+                    else matches[0]
+                )
+                return {
+                    "operation": "bootstrap-workspace",
+                    "status": "created" if created else "existing",
+                    "workspace_id": str(workspace.id),
+                }
         if args.command == "maintenance":
             _, execution_factory = build_execution_runtime(settings, factory)
             outcomes = await _run_maintenance(

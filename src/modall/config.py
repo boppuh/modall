@@ -5,10 +5,26 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, HttpUrl, IPvAnyAddress, PostgresDsn, model_validator
+from pydantic import Field, HttpUrl, IPvAnyAddress, PostgresDsn, TypeAdapter, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _KEY_VERSION = re.compile(r"[A-Za-z0-9._-]{1,32}\Z")
+_POSTGRES_DSN = TypeAdapter(PostgresDsn)
+
+
+def read_database_url_secret(path: Path) -> PostgresDsn:
+    """Load one bounded PostgreSQL DSN without leaking its value or path in errors."""
+
+    try:
+        raw = path.read_bytes()
+        if not 1 <= len(raw) <= 2048 or b"\x00" in raw:
+            raise ValueError
+        value = raw.decode("utf-8")
+        if value != value.strip():
+            raise ValueError
+        return _POSTGRES_DSN.validate_python(value)
+    except (OSError, UnicodeError, ValueError):
+        raise ValueError("database URL secret is unavailable or invalid") from None
 
 
 class Settings(BaseSettings):
@@ -24,6 +40,7 @@ class Settings(BaseSettings):
     environment: Literal["local", "test", "staging", "production"] = "local"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     database_url: PostgresDsn = PostgresDsn("postgresql://modall:modall@localhost:5432/modall")
+    database_url_file: Path | None = None
     worker_poll_interval_seconds: Annotated[float, Field(gt=0, le=60, allow_inf_nan=False)] = 1.0
     worker_maintenance_timeout_seconds: Annotated[
         float, Field(gt=0, le=60, allow_inf_nan=False)
@@ -58,6 +75,7 @@ class Settings(BaseSettings):
     idempotency_hmac_key_versions: tuple[str, ...] = ("v1",)
     cors_allowed_origins: tuple[str, ...] = ()
     auth_mode: Literal["local", "oidc"] = "local"
+    auth_token_source: Literal["authorization", "cloudflare_access"] = "authorization"
     # Preserve the issuer byte-for-byte for OIDC's exact identifier comparison.
     oidc_issuer: str | None = None
     oidc_audience: str | None = None
@@ -71,6 +89,13 @@ class Settings(BaseSettings):
     def validate_security_modes(self) -> "Settings":
         """Prevent development identity or secret fixtures in deployed modes."""
 
+        if self.database_url_file is not None:
+            if (
+                self.environment in {"staging", "production"}
+                and not self.database_url_file.is_absolute()
+            ):
+                raise ValueError("deployed database URL secret path must be absolute")
+            self.database_url = read_database_url_secret(self.database_url_file)
         issuer_url: HttpUrl | None = None
         if self.oidc_issuer is not None:
             if self.oidc_issuer != self.oidc_issuer.strip() or len(self.oidc_issuer) > 512:
@@ -79,6 +104,12 @@ class Settings(BaseSettings):
         deployed = self.environment in {"staging", "production"}
         if deployed and self.auth_mode != "oidc":
             raise ValueError("deployed environments require OIDC authentication")
+        if self.auth_token_source == "cloudflare_access" and (
+            not deployed or self.auth_mode != "oidc" or not self.trusted_proxy_addresses
+        ):
+            raise ValueError(
+                "Cloudflare Access authentication requires deployed OIDC and a trusted proxy"
+            )
         if deployed and self.secret_provider != "mounted_file":
             raise ValueError("deployed environments require the mounted-file secret provider")
         if deployed and not self.trusted_proxy_addresses:

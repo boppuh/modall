@@ -3,9 +3,9 @@
 import math
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from threading import Lock
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 import jwt
 from jwt import PyJWKClient
@@ -16,6 +16,33 @@ from modall.identity.types import Principal
 
 class AuthenticationError(Exception):
     """Raised when caller authentication fails without exposing token details."""
+
+
+AuthenticationTokenSource = Literal["authorization", "cloudflare_access"]
+
+
+def select_authentication_token(
+    source: AuthenticationTokenSource,
+    *,
+    bearer_token: str | None,
+    access_assertions: Sequence[str],
+    peer_address: str | None,
+    trusted_proxy_addresses: frozenset[str],
+) -> str | None:
+    """Select one credential while binding edge assertions to a trusted direct peer."""
+
+    if source == "authorization":
+        return bearer_token
+    if (
+        bearer_token is not None
+        or peer_address not in trusted_proxy_addresses
+        or len(access_assertions) != 1
+    ):
+        return ""
+    assertion = access_assertions[0]
+    if not assertion or assertion != assertion.strip():
+        return ""
+    return assertion
 
 
 class Authenticator(Protocol):
