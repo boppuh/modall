@@ -171,7 +171,7 @@ services:
       - alertmanager-data:/alertmanager
     networks:
       - monitoring
-      - egress
+      - alert-egress
 
   grafana:
     image: grafana/grafana:12.1.1
@@ -203,6 +203,7 @@ services:
 networks:
   edge: {}
   egress: {}
+  alert-egress: {}
   dashboard:
     internal: true
   monitoring:

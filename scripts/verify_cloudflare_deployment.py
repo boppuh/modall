@@ -154,6 +154,11 @@ def main() -> None:
         mapping(services["alertmanager"], "alertmanager").get("user") == "65534:65534",
         "Alertmanager runtime UID drifted",
     )
+    require(
+        set(mapping(services["alertmanager"], "alertmanager").get("networks", []))
+        == {"alert-egress", "monitoring"},
+        "Alertmanager must not share application egress",
+    )
 
     nginx = (ROOT / "deploy/cloudflare/nginx.conf").read_text()
     for term in (

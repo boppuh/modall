@@ -78,8 +78,10 @@ If the host uses user-namespace remapping or rootless Docker, translate the cont
 host subordinate UIDs before applying ACLs; do not grant `o+r` as a shortcut. After building, inspect
 the rendered `user` values and require every service to start successfully with `up -d --wait`.
 An unreadable secret must be treated as a deployment failure, not repaired by weakening host modes.
-When rotation replaces a provider file rather than creating it under the ACL-bearing directory,
-reapply the UID 65534 read ACL to the new inode before selecting that version.
+The default provider ACL is defense in depth, but an explicit `chmod 0600` can make its ACL mask
+ineffective. For every new or replaced provider file, set its final owner and mode first, then run
+`sudo setfacl -m u:65534:r FILE` and confirm `getfacl FILE` reports an effective read permission for
+UID 65534 before selecting that version.
 
 Copy `deploy/cloudflare/staging.env.example` to `deploy/cloudflare/staging.env` and replace every
 placeholder and host path. This file contains coordinates and paths, not secret values. Run:
@@ -148,7 +150,8 @@ Alertmanager. Prometheus scrapes fixed monitoring interfaces. The API returns 40
 unless its direct peer is the pinned Prometheus address, and the worker metrics server binds only to
 its monitoring address; the worker does not join the application network. API and worker also join a
 separate egress network because they must reach PostgreSQL, Cloudflare signing keys, the official
-Registry, and curated MCP endpoints. Alertmanager joins egress solely to deliver notifications.
+Registry, and curated MCP endpoints. Alertmanager uses a separate outbound bridge solely to deliver
+notifications, so an application-container compromise cannot reach its unauthenticated listener.
 
 Docker networks are segmentation, not a destination allowlist. Enforce the release allowlist and
 deny private, link-local, metadata, and unapproved destinations in the host or provider firewall.
@@ -157,10 +160,12 @@ worker port 9101 are reachable only from the monitoring network.
 
 ## Rotation and rollback
 
-Rotate the Tunnel token by refreshing it in Cloudflare, replacing only the mounted token file, and
-recreating `cloudflared`. A single-host alpha has a short connector interruption; use multiple
-connectors before accepting an availability commitment. Rotate Access policies or AUD tags only in
-a maintenance window because the API pins the exact issuer and audience.
+Rotate the Tunnel token by refreshing it in Cloudflare and atomically replacing only the mounted
+token file. Set the new inode to root-owned mode `0600`, reapply
+`sudo setfacl -m u:65532:r /opt/modall/secrets/cloudflare-tunnel-token`, verify the effective ACL,
+and only then recreate `cloudflared`. A single-host alpha has a short connector interruption; use
+multiple connectors before accepting an availability commitment. Rotate Access policies or AUD
+tags only in a maintenance window because the API pins the exact issuer and audience.
 
 For application rollback, follow the main runbook: stop admission and workers, snapshot PostgreSQL,
 deploy only a revision compatible with the current schema, then repeat readiness, identity, audit,
