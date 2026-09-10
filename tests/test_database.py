@@ -83,7 +83,6 @@ def test_migration_database_url_loads_repository_env_without_runtime_validation(
         "MODALL_ENVIRONMENT=production\n"
         "MODALL_DATABASE_URL=postgresql://env-user:env-pass@db/env-db\n"
     )
-
     assert (
         load_migration_database_url(
             fallback="postgresql://fallback/db",
@@ -91,6 +90,36 @@ def test_migration_database_url_loads_repository_env_without_runtime_validation(
         )
         == "postgresql://env-user:env-pass@db/env-db"
     )
+
+
+def test_migration_database_url_prefers_mounted_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MODALL_DATABASE_URL", raising=False)
+    monkeypatch.delenv("MODALL_DATABASE_URL_FILE", raising=False)
+    secret = tmp_path / "database-url"
+    secret.write_text("postgresql://secret-user:secret-pass@db/secret-db")
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"MODALL_DATABASE_URL_FILE={secret}\n")
+
+    assert (
+        load_migration_database_url(fallback="postgresql://fallback/db", env_file=env_file)
+        == "postgresql://secret-user:secret-pass@db/secret-db"
+    )
+
+
+def test_migration_database_url_rejects_relative_deployed_secret_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MODALL_DATABASE_URL_FILE", raising=False)
+    monkeypatch.delenv("MODALL_ENVIRONMENT", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "MODALL_ENVIRONMENT=staging\nMODALL_DATABASE_URL_FILE=relative-database-url\n"
+    )
+
+    with pytest.raises(ValueError, match="must be absolute"):
+        load_migration_database_url(fallback="postgresql://fallback/db", env_file=env_file)
 
 
 def test_database_probe_reports_ready_and_closes() -> None:

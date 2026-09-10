@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import cast
 from urllib.error import HTTPError
 from urllib.request import urlopen
@@ -289,6 +290,104 @@ def test_ops_parser_requires_destructive_confirmations() -> None:
     assert parser.parse_args(["restore-reconcile", "--batch-size", "7"]).batch_size == 7
     with pytest.raises(SystemExit):
         parser.parse_args(["restore-enter"])
+    bootstrap = parser.parse_args(
+        [
+            "bootstrap-workspace",
+            "--name",
+            "Pilot",
+            "--issuer",
+            "https://team.cloudflareaccess.com",
+            "--subject",
+            "reviewer-1",
+            "--confirm",
+            "BOOTSTRAP",
+        ]
+    )
+    assert bootstrap.command == "bootstrap-workspace"
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "bootstrap-workspace",
+                "--name",
+                "Pilot",
+                "--issuer",
+                "https://team.cloudflareaccess.com",
+                "--subject",
+                "reviewer-1",
+            ]
+        )
+
+
+def test_ops_workspace_bootstrap_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine = create_database_engine(f"sqlite+aiosqlite:///{tmp_path / 'bootstrap.db'}")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        monkeypatch.setattr(cli, "create_engine", lambda _: engine)
+        arguments = _parser().parse_args(
+            [
+                "bootstrap-workspace",
+                "--name",
+                "Pilot",
+                "--issuer",
+                "https://team.cloudflareaccess.com",
+                "--subject",
+                "reviewer-1",
+                "--display-name",
+                "Pilot Reviewer",
+                "--confirm",
+                "BOOTSTRAP",
+            ]
+        )
+
+        settings = Settings(
+            _env_file=None,
+            environment="test",
+            auth_mode="oidc",
+            oidc_issuer="https://team.cloudflareaccess.com",
+            oidc_audience="modall",
+            oidc_jwks_url="https://team.cloudflareaccess.com/cdn-cgi/access/certs",
+        )
+        created = await cli.execute(settings, arguments)
+        existing = await cli.execute(settings, arguments)
+
+        assert created["status"] == "created"
+        assert existing == {
+            "operation": "bootstrap-workspace",
+            "status": "existing",
+            "workspace_id": created["workspace_id"],
+        }
+
+    asyncio.run(scenario())
+
+
+def test_ops_workspace_bootstrap_rejects_an_issuer_mismatch() -> None:
+    arguments = _parser().parse_args(
+        [
+            "bootstrap-workspace",
+            "--name",
+            "Pilot",
+            "--issuer",
+            "https://wrong.cloudflareaccess.com",
+            "--subject",
+            "reviewer-1",
+            "--confirm",
+            "BOOTSTRAP",
+        ]
+    )
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        auth_mode="oidc",
+        oidc_issuer="https://team.cloudflareaccess.com",
+        oidc_audience="modall",
+        oidc_jwks_url="https://team.cloudflareaccess.com/cdn-cgi/access/certs",
+    )
+
+    with pytest.raises(ValueError, match="exactly match"):
+        asyncio.run(cli.execute(settings, arguments))
 
 
 def test_ops_status_does_not_require_secret_keyrings(monkeypatch: pytest.MonkeyPatch) -> None:

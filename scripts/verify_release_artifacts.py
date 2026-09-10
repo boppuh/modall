@@ -16,6 +16,7 @@ REQUIRED_AUTOMATED_GATES = {
     "accessibility-reference-journey",
     "migration-clean-install",
     "compose-build",
+    "cloudflare-staging-config",
     "restore-quarantine-state-machine",
     "bounded-load",
     "release-artifacts",
@@ -110,6 +111,14 @@ REQUIRED_DOCUMENT_SECTIONS = {
     "docs/release/registry-alpha-qualification.md": {
         "## Automated gates",
         "## Manual gates",
+    },
+    "docs/operations/cloudflare-staging.md": {
+        "## Cloudflare control plane",
+        "## Host and secret preparation",
+        "## Deploy and bootstrap",
+        "## Qualify and collect evidence",
+        "## Network boundaries",
+        "## Rotation and rollback",
     },
 }
 

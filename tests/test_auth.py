@@ -12,6 +12,7 @@ from modall.identity.auth import (
     OidcAuthenticator,
     PyJwkSigningKeyResolver,
     build_authenticator,
+    select_authentication_token,
 )
 from modall.identity.types import Principal
 
@@ -66,6 +67,50 @@ def test_local_authenticator_is_explicit() -> None:
         authenticator.authenticate("unexpected-token")
 
 
+def test_authorization_token_source_uses_only_the_bearer_token() -> None:
+    assert (
+        select_authentication_token(
+            "authorization",
+            bearer_token="bearer",
+            access_assertions=("edge",),
+            peer_address="10.0.0.10",
+            trusted_proxy_addresses=frozenset({"10.0.0.10"}),
+        )
+        == "bearer"
+    )
+
+
+def test_cloudflare_token_source_requires_one_assertion_from_the_trusted_peer() -> None:
+    trusted = frozenset({"10.0.0.10"})
+    assert (
+        select_authentication_token(
+            "cloudflare_access",
+            bearer_token=None,
+            access_assertions=("edge-token",),
+            peer_address="10.0.0.10",
+            trusted_proxy_addresses=trusted,
+        )
+        == "edge-token"
+    )
+    for bearer, assertions, peer in (
+        ("ambiguous", ("edge-token",), "10.0.0.10"),
+        (None, (), "10.0.0.10"),
+        (None, ("one", "two"), "10.0.0.10"),
+        (None, ("edge-token",), "10.0.0.11"),
+        (None, (" edge-token",), "10.0.0.10"),
+    ):
+        assert (
+            select_authentication_token(
+                "cloudflare_access",
+                bearer_token=bearer,
+                access_assertions=assertions,
+                peer_address=peer,
+                trusted_proxy_addresses=trusted,
+            )
+            == ""
+        )
+
+
 def test_local_authenticator_rejects_deployed_mode() -> None:
     settings = Settings(
         environment="production",
@@ -75,6 +120,7 @@ def test_local_authenticator_rejects_deployed_mode() -> None:
         oidc_jwks_url="https://issuer.example/jwks",
         secret_provider="mounted_file",
         trusted_proxy_addresses=("10.0.0.10",),
+        metrics_trusted_peer_addresses=("10.0.1.10",),
     )
 
     with pytest.raises(ValueError, match="restricted"):

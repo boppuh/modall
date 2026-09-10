@@ -1,6 +1,9 @@
 .DS_Store
 .env
 .modall/
+deploy/cloudflare/alertmanager.yml
+deploy/cloudflare/staging.env
+deploy/cloudflare/secrets/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/

@@ -192,7 +192,7 @@ function SignIn({ onSignIn }: { onSignIn: (session: WorkspaceSession) => void })
             </p>
           )}
           <label>
-            OIDC access token <span>optional in local mode</span>
+            OIDC access token <span>optional with local or edge authentication</span>
             <input
               value={accessToken}
               onChange={(event) => setAccessToken(event.target.value)}

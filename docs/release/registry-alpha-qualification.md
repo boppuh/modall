@@ -11,6 +11,7 @@ Release candidate: pending. This file separates reproducible evidence from human
 | Desktop/mobile accessibility journey | `npm run e2e --workspace @modall/web` | both projects pass with no axe violations |
 | Migration/clean install | CI Python migration cycle | upgrade, drift check, downgrade, fresh upgrade pass |
 | Local topology | CI Compose build and `docker compose config --quiet` | pass |
+| Cloudflare staging topology | `make staging-config-check` plus CI production-image build | no public origin ports, pinned edge connector, trusted assertion boundary, mounted secrets, and private monitoring |
 | Release artifacts | `make release-artifacts` | manifest, dashboard, alerts, runbook, threat model valid |
 | Restore-quarantine state machine | `uv run pytest --no-cov tests/test_execution.py -k test_restore_quarantine_fences_old_jobs_and_retention_erases_content` | pass |
 | Admission/load bounds | active-run admission, API concurrency/rate, and bounded pagination tests | pass |

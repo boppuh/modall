@@ -2,13 +2,31 @@
 
 import re
 from functools import lru_cache
+from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, HttpUrl, IPvAnyAddress, PostgresDsn, model_validator
+from pydantic import Field, HttpUrl, IPvAnyAddress, PostgresDsn, TypeAdapter, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _KEY_VERSION = re.compile(r"[A-Za-z0-9._-]{1,32}\Z")
+_POSTGRES_DSN = TypeAdapter(PostgresDsn)
+
+
+def read_database_url_secret(path: Path) -> PostgresDsn:
+    """Load one bounded PostgreSQL DSN without leaking its value or path in errors."""
+
+    try:
+        with path.open("rb") as secret_file:
+            raw = secret_file.read(2049)
+        if not 1 <= len(raw) <= 2048 or b"\x00" in raw:
+            raise ValueError
+        value = raw.decode("utf-8")
+        if value != value.strip():
+            raise ValueError
+        return _POSTGRES_DSN.validate_python(value)
+    except (OSError, UnicodeError, ValueError):
+        raise ValueError("database URL secret is unavailable or invalid") from None
 
 
 class Settings(BaseSettings):
@@ -24,6 +42,7 @@ class Settings(BaseSettings):
     environment: Literal["local", "test", "staging", "production"] = "local"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     database_url: PostgresDsn = PostgresDsn("postgresql://modall:modall@localhost:5432/modall")
+    database_url_file: Path | None = None
     worker_poll_interval_seconds: Annotated[float, Field(gt=0, le=60, allow_inf_nan=False)] = 1.0
     worker_maintenance_timeout_seconds: Annotated[
         float, Field(gt=0, le=60, allow_inf_nan=False)
@@ -34,11 +53,13 @@ class Settings(BaseSettings):
     worker_lease_duration_seconds: Annotated[float, Field(ge=15, le=300, allow_inf_nan=False)] = (
         30.0
     )
+    worker_metrics_host: IPv4Address = IPv4Address("0.0.0.0")
     worker_metrics_port: Annotated[int, Field(ge=1024, le=65535)] = 9101
     api_max_concurrency: Annotated[int, Field(ge=1, le=1024)] = 64
     api_queue_timeout_seconds: Annotated[float, Field(gt=0, le=10, allow_inf_nan=False)] = 0.25
     api_rate_limit_per_minute: Annotated[int, Field(ge=1, le=100_000)] = 600
     trusted_proxy_addresses: tuple[IPvAnyAddress, ...] = ()
+    metrics_trusted_peer_addresses: tuple[IPvAnyAddress, ...] = ()
     max_argument_bytes: Annotated[int, Field(ge=1_024, le=1_048_576)] = 65_536
     max_result_bytes: Annotated[int, Field(ge=1_024, le=1_048_576)] = 262_144
     confirmation_ttl_seconds: Annotated[int, Field(ge=1, le=300)] = 120
@@ -58,6 +79,7 @@ class Settings(BaseSettings):
     idempotency_hmac_key_versions: tuple[str, ...] = ("v1",)
     cors_allowed_origins: tuple[str, ...] = ()
     auth_mode: Literal["local", "oidc"] = "local"
+    auth_token_source: Literal["authorization", "cloudflare_access"] = "authorization"
     # Preserve the issuer byte-for-byte for OIDC's exact identifier comparison.
     oidc_issuer: str | None = None
     oidc_audience: str | None = None
@@ -71,6 +93,13 @@ class Settings(BaseSettings):
     def validate_security_modes(self) -> "Settings":
         """Prevent development identity or secret fixtures in deployed modes."""
 
+        if self.database_url_file is not None:
+            if (
+                self.environment in {"staging", "production"}
+                and not self.database_url_file.is_absolute()
+            ):
+                raise ValueError("deployed database URL secret path must be absolute")
+            self.database_url = read_database_url_secret(self.database_url_file)
         issuer_url: HttpUrl | None = None
         if self.oidc_issuer is not None:
             if self.oidc_issuer != self.oidc_issuer.strip() or len(self.oidc_issuer) > 512:
@@ -79,10 +108,18 @@ class Settings(BaseSettings):
         deployed = self.environment in {"staging", "production"}
         if deployed and self.auth_mode != "oidc":
             raise ValueError("deployed environments require OIDC authentication")
+        if self.auth_token_source == "cloudflare_access" and (
+            not deployed or self.auth_mode != "oidc" or not self.trusted_proxy_addresses
+        ):
+            raise ValueError(
+                "Cloudflare Access authentication requires deployed OIDC and a trusted proxy"
+            )
         if deployed and self.secret_provider != "mounted_file":
             raise ValueError("deployed environments require the mounted-file secret provider")
         if deployed and not self.trusted_proxy_addresses:
             raise ValueError("deployed environments require at least one trusted ingress proxy")
+        if deployed and not self.metrics_trusted_peer_addresses:
+            raise ValueError("deployed environments require at least one trusted metrics peer")
         if deployed and self.fixture_secret_root is not None:
             raise ValueError("deployed environments cannot configure fixture secrets")
         if self.secret_provider != "fixture" and self.fixture_secret_root is not None:

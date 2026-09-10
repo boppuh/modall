@@ -20,7 +20,11 @@ from modall.api.idempotency import idempotent_mutation
 from modall.audit.types import AuditAction, AuditOutcome, ResourceType
 from modall.execution.service import ExecutionService
 from modall.execution.types import ExecutionLimits, HmacKeyVersion, RunStatus
-from modall.identity.auth import Authenticator
+from modall.identity.auth import (
+    AuthenticationTokenSource,
+    Authenticator,
+    select_authentication_token,
+)
 from modall.identity.repository import AuthorizationDenied, AuthorizationService
 from modall.identity.service import IdentityService
 from modall.identity.types import Permission, Role, WorkspaceContext
@@ -300,6 +304,8 @@ def build_control_plane_router(
     keyring_loader: Callable[[], tuple[Sequence[HmacKeyVersion], Sequence[HmacKeyVersion]]],
     execution_limits: ExecutionLimits,
     environment: str,
+    auth_token_source: AuthenticationTokenSource = "authorization",
+    trusted_proxy_addresses: frozenset[str] = frozenset(),
 ) -> APIRouter:
     """Bind the HTTP surface to one process-scoped set of dependencies."""
 
@@ -327,7 +333,13 @@ def build_control_plane_router(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Security(bearer)] = None,
         workspace_header: Annotated[str | None, Header(alias="X-Workspace-ID")] = None,
     ) -> _RequestState:
-        token = _bearer_token(request.headers.get("Authorization"), credentials)
+        token = select_authentication_token(
+            auth_token_source,
+            bearer_token=_bearer_token(request.headers.get("Authorization"), credentials),
+            access_assertions=request.headers.getlist("Cf-Access-Jwt-Assertion"),
+            peer_address=request.client.host if request.client is not None else None,
+            trusted_proxy_addresses=trusted_proxy_addresses,
+        )
         principal = await asyncio.to_thread(authenticator.authenticate, token)
         if workspace_header is None:
             raise AuthorizationDenied("workspace access denied")

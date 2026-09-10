@@ -79,3 +79,5 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker compose config --quiet
       - run: docker compose build
+      - run: make staging-config-check STAGING_ENV_FILE=deploy/cloudflare/staging.env.example
+      - run: docker compose --env-file deploy/cloudflare/staging.env.example -f deploy/cloudflare/compose.yaml build api worker web

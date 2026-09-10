@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -123,12 +124,97 @@ def test_deployed_security_mode_requires_oidc_and_mounted_secrets() -> None:
         oidc_jwks_url="https://issuer.example/jwks",
         secret_provider="mounted_file",
         trusted_proxy_addresses=("10.0.0.10",),
+        metrics_trusted_peer_addresses=("10.0.1.10",),
     )
 
     assert settings.auth_mode == "oidc"
     assert settings.oidc_issuer == "https://issuer.example"
     assert settings.secret_provider == "mounted_file"
     assert tuple(map(str, settings.trusted_proxy_addresses)) == ("10.0.0.10",)
+
+    with pytest.raises(ValidationError, match="trusted metrics peer"):
+        Settings(
+            _env_file=None,
+            environment="staging",
+            auth_mode="oidc",
+            oidc_issuer="https://issuer.example",
+            oidc_audience="modall",
+            oidc_jwks_url="https://issuer.example/jwks",
+            secret_provider="mounted_file",
+            trusted_proxy_addresses=("10.0.0.10",),
+        )
+
+
+def test_cloudflare_access_mode_requires_a_deployed_trusted_proxy() -> None:
+    with pytest.raises(ValidationError, match="Cloudflare Access"):
+        Settings(_env_file=None, auth_token_source="cloudflare_access")
+
+    settings = Settings(
+        _env_file=None,
+        environment="staging",
+        auth_mode="oidc",
+        auth_token_source="cloudflare_access",
+        oidc_issuer="https://team.cloudflareaccess.com",
+        oidc_audience="access-audience",
+        oidc_jwks_url="https://team.cloudflareaccess.com/cdn-cgi/access/certs",
+        secret_provider="mounted_file",
+        trusted_proxy_addresses=("172.30.0.10",),
+        metrics_trusted_peer_addresses=("172.31.0.10",),
+    )
+
+    assert settings.auth_token_source == "cloudflare_access"
+
+
+def test_database_url_can_be_loaded_from_a_bounded_secret_file(tmp_path: Path) -> None:
+    secret = tmp_path / "database-url"
+    secret.write_text("postgresql://staging:secret@database.example/modall")
+
+    settings = Settings(_env_file=None, database_url_file=secret)
+
+    assert str(settings.database_url) == "postgresql://staging:secret@database.example/modall"
+
+
+def test_worker_metrics_host_requires_ipv4() -> None:
+    assert str(Settings(_env_file=None, worker_metrics_host="127.0.0.1").worker_metrics_host) == (
+        "127.0.0.1"
+    )
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, worker_metrics_host="::1")
+
+
+@pytest.mark.parametrize("content", ("", " postgresql://db/modall", "postgresql://db/modall\n"))
+def test_database_url_secret_rejects_invalid_content(tmp_path: Path, content: str) -> None:
+    secret = tmp_path / "database-url"
+    secret.write_text(content)
+
+    with pytest.raises(ValidationError, match="database URL secret"):
+        Settings(_env_file=None, database_url_file=secret)
+
+
+def test_database_url_secret_rejects_missing_or_oversized_files(tmp_path: Path) -> None:
+    missing = tmp_path / "missing"
+    with pytest.raises(ValidationError, match="database URL secret"):
+        Settings(_env_file=None, database_url_file=missing)
+
+    oversized = tmp_path / "oversized"
+    oversized.write_bytes(b"x" * 2049)
+    with pytest.raises(ValidationError, match="database URL secret"):
+        Settings(_env_file=None, database_url_file=oversized)
+
+
+def test_deployed_database_url_secret_path_must_be_absolute() -> None:
+    with pytest.raises(ValidationError, match="must be absolute"):
+        Settings(
+            _env_file=None,
+            environment="staging",
+            database_url_file=Path("database-url"),
+            auth_mode="oidc",
+            oidc_issuer="https://issuer.example",
+            oidc_audience="modall",
+            oidc_jwks_url="https://issuer.example/jwks",
+            secret_provider="mounted_file",
+            trusted_proxy_addresses=("10.0.0.10",),
+        )
 
 
 @pytest.mark.parametrize(

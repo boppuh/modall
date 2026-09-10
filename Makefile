@@ -1,6 +1,7 @@
 .DEFAULT_GOAL := help
+STAGING_ENV_FILE ?= deploy/cloudflare/staging.env
 
-.PHONY: bootstrap check compose-down compose-up format help migrate python-check release-artifacts test web-check
+.PHONY: bootstrap check compose-down compose-up format help migrate python-check release-artifacts staging-config-check test web-check
 
 help:
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -30,12 +31,17 @@ web-check: ## Run web lint, types, tests, and production build
 
 release-artifacts: ## Validate release evidence, dashboard, alerts, and runbooks
 	uv run python scripts/verify_release_artifacts.py
+	uv run python scripts/verify_cloudflare_deployment.py
+
+staging-config-check: ## Validate the Cloudflare staging Compose topology
+	docker compose --env-file $(STAGING_ENV_FILE) -f deploy/cloudflare/compose.yaml config --quiet
 
 test: ## Run Python and web tests
 	uv run pytest
 	npm run web:test
 
 check: python-check web-check release-artifacts ## Run every local quality gate
+	$(MAKE) staging-config-check STAGING_ENV_FILE=deploy/cloudflare/staging.env.example
 	docker compose config --quiet
 
 compose-up: ## Build and start the local stack
